@@ -584,7 +584,8 @@ every one of these before any debugging session:
   that the differential suite now pins.
 - **Result:** cold CD-heavy mask builds 124 → 13.3 ms (9.3×); warm fill p90
   38 → 3.8 µs; warm serving step 7.39 → 1.33 µs/request (accept 11×) — under
-  the 6 µs G8 per-request budget with margin, pending the declared-runner rerun.
+  the 6 µs G8 per-request budget with margin — confirmed on the declared H100
+  SXM5 runner: TPOT overhead +1.02% @batch 32 (<2% gate PASS; +0.12% @1).
   Zero divergence in 200-seed lockstep fuzzing of v6 vs v5; the pure-Python
   spec path and every parity/entry-id invariant unchanged.
 - **Lesson:** name a suspect only after a component-level measurement under the

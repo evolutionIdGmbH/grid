@@ -229,25 +229,25 @@ overlaps the GPU forward pass.
 
 The **serving contract (M6, §6)** is realized end to end: `grid/serving/`
 implements cold-only worker prefetch (the warm steady state never queues), E17
-single-flight, kernel v5 `fill_bits` (the whole bitmask row in one FFI call),
-one shared producer per template (one kernel, one registration space), and the
-**T2 cross-template tier** (schema-independent entries survive template churn).
-Gate results on the declared H100 runner: **G7** MET (hit p50 < 10 µs);
-**G10** full audit replay (1,000 generations across a namespace rollover,
-bit-identical, 100% tamper detection); **G5 both arms** (10k model-free walks
-+ 1,000 model-in-loop generations: all parse, audit-verified, 0 dead-ends);
-**G6 + G6(b)** (0 RBAC bypasses, model-free and prompt-suite). **G8**
-([`bench/RESULTS-serving.md`](bench/RESULTS-serving.md)): **5/7** — TTFT cold
-specialize 44.5 ms / warm 2.50 ms and both single-flight criteria pass; TPOT
-overhead @batch 32 is **+10.7%** against the <2% gate (batch 1: +0.15%) — the
-gap is per-request Python orchestration (~30 µs/request/step) vs vLLM's
-native-backend floor of +1.07% on the identical harness
-(`bench/vllm_xgr_floor.py`), the motivating case for a kernel v6
-session-in-kernel accept+fill; the adversarial cold-miss arm exceeds its 30 ms
-step budget (a fresh schema's literal-interior walks run 100–300 ms at 152k
-vocab, and vLLM 0.24 exposes no RUNNING-request defer hook to skip a round).
-The first real G8 run read **+5151%** @batch 32 from three stacked
-serving-only defects, diagnosed with an in-engine probe and fixed the same day
-(`LESSONS.md` 6.5). Remaining before the R0 release gate: G8 TPOT/adversarial
-closure (kernel v6, or a gate re-scope decision), and the SynCode/GBNF G9
+single-flight, the **T2 cross-template tier** (schema-independent entries
+survive template churn), and the kernel line v5 → v6: `fill_bits` row fill
+with a packed-row memo, verdict-equivalence CD grouping, and **session-in-
+kernel accept+fill** (one FFI call each; warm serving step **1.33 µs**/request
+measured — `LESSONS.md` 6.5/6.6 tell the diagnosis story from the first run's
++5151% to here). Gate results on the declared H100 runner: **G7** MET (hit
+p50 < 10 µs); **G10** full audit replay (1,000 generations across a namespace
+rollover, bit-identical, 100% tamper detection); **G5 both arms** (10k
+model-free walks + 1,000 model-in-loop generations: all parse, audit-verified,
+0 dead-ends); **G6 + G6(b)** (0 RBAC bypasses, model-free and prompt-suite).
+**G8** ([`bench/RESULTS-serving.md`](bench/RESULTS-serving.md), kernel v6,
+H100 SXM5): **5/7** — **TPOT overhead +1.02% @batch 32 (+0.12% @1, +0.23% @8)
+PASSES the <2% gate**; TTFT cold specialize 24.2 ms / warm 1.36 ms pass; both
+single-flight criteria pass. The remaining red pair is the adversarial
+cold-miss arm (max step 50.3 ms vs a 30 ms budget; co-batched degradation
++233% over a 6.3 ms base): a fresh schema's cold literal-interior walks
+(~13 ms residual each after the 9.3× v5.1 cut) stall the batch because vLLM
+0.24 exposes no RUNNING-request defer hook to skip a round — the open
+decision is re-scoping that criterion to the measured walk envelope vs
+further walk-cost work (subtree memoization) or an upstream defer hook.
+Remaining before the R0 release gate: that decision, and the SynCode/GBNF G9
 arms. See `DESIGN.md` §11, `LESSONS.md`, and `ONBOARDING.md`.
