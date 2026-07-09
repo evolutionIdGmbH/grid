@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "grid-guardrail"
+version = "0.0.7"
+description = "GRID - Grammar-Railed Decoding: grammar-constrained LLM decoding with RBAC grammars and an audit trail"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+dependencies = [
+    "numpy",
+    "torch",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "hypothesis",
+    "lark",          # grammar authoring/validation and test oracles ONLY (DESIGN.md §12)
+    "ruff",
+]
+transformers = ["transformers"]
+
+[tool.setuptools.packages.find]
+include = ["grid", "grid.*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501"]

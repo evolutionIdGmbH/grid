@@ -1,0 +1,29 @@
+# PostgreSQL-flavored CRUD subset (lowercase keywords, single statement).
+# L3 identifier categories: TABLE_NAME and COLUMN_NAME are schema-lexicon
+# terminals (DESIGN.md E3); in cfg parity mode they behave as plain IDENT.
+%start stmt
+%ignore WS
+WS: /[ \t\n]+/
+NUMBER: /[0-9]+/
+STRING: /'([^'\n])*'/
+TABLE_NAME: /[a-z_][a-z0-9_]*/
+COLUMN_NAME: /[a-z_][a-z0-9_]*/
+stmt: query ";"
+query: select_stmt | insert_stmt | update_stmt | delete_stmt
+select_stmt: "select" select_list "from" table_ref where_opt limit_opt
+select_list: "*" | column_list
+column_list: column_ref | column_list "," column_ref
+column_ref: COLUMN_NAME
+table_ref: TABLE_NAME
+where_opt: | "where" condition
+condition: predicate | condition "and" predicate | condition "or" predicate
+predicate: column_ref cmp value | "(" condition ")"
+cmp: "=" | "<" | ">" | "<=" | ">=" | "<>"
+value: NUMBER | STRING | column_ref
+limit_opt: | "limit" NUMBER
+insert_stmt: "insert" "into" table_ref "(" column_list ")" "values" "(" value_list ")"
+value_list: value | value_list "," value
+update_stmt: "update" table_ref "set" assign_list where_opt
+assign_list: assign | assign_list "," assign
+assign: column_ref "=" value
+delete_stmt: "delete" "from" table_ref where_opt

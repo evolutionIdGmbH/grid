@@ -1,0 +1,59 @@
+# Spider-dialect SELECT subset (lowercase canonical form, no trailing ';').
+# Covers Spider's SQL: joins with ON chains, aggregates (incl. count(*) and
+# distinct args), group by / having, order by [asc|desc] / limit, set ops
+# (union/intersect/except), nested subqueries in values, IN/NOT IN, (NOT) LIKE,
+# BETWEEN, arithmetic between column refs, and t1..t9 alias qualification.
+# TABLE_NAME / COLUMN_NAME are L3 schema-lexicon categories (DESIGN.md E3);
+# ALIAS shares their regex space only at t[0-9], where the lexicons steer the
+# contextual lexer's terminal choice (LESSONS 3.3).
+%start query
+%ignore WS
+WS: /[ \t\n]+/
+NUMBER: /-?[0-9]+(\.[0-9]+)?/
+STRING: /'([^'\n])*'/
+# COLUMN_NAME declared before TABLE_NAME: at positions where a name is both a
+# valid table and column of the schema (rare overlap), the tie breaks toward
+# the bare-column reading — table-qualified refs in Spider go through aliases.
+COLUMN_NAME: /[a-z_][a-z0-9_]*/
+TABLE_NAME: /[a-z_][a-z0-9_]*/
+ALIAS: /t[0-9]/
+query: select_stmt | query set_op select_stmt
+set_op: "union" | "intersect" | "except"
+select_stmt: "select" sel_quant sel_list "from" from_clause where_opt group_opt order_opt limit_opt
+sel_quant: | "distinct"
+sel_list: sel_item | sel_list "," sel_item
+sel_item: "*" | comparable
+comparable: val_unit | agg_expr
+agg_expr: agg_fn "(" agg_arg ")"
+agg_fn: "count" | "sum" | "avg" | "min" | "max"
+agg_arg: "*" | "distinct" col_ref | val_unit
+val_unit: col_ref | col_ref arith col_ref
+arith: "+" | "-" | "*" | "/"
+col_ref: COLUMN_NAME | qualifier "." COLUMN_NAME
+qualifier: TABLE_NAME | ALIAS
+from_clause: from_item join_list
+join_list: | join_list join_item
+join_item: "join" from_item on_opt
+on_opt: | "on" join_cond
+join_cond: jpred | join_cond "and" jpred | join_cond "or" jpred
+jpred: col_ref "=" col_ref
+from_item: TABLE_NAME as_opt | "(" query ")" as_opt
+as_opt: | "as" ALIAS
+where_opt: | "where" cond
+cond: pred | cond "and" pred | cond "or" pred
+pred: comparable cmp value
+    | comparable "in" "(" query ")"
+    | comparable "not" "in" "(" query ")"
+    | comparable "like" STRING
+    | comparable "not" "like" STRING
+    | comparable "between" value "and" value
+cmp: "=" | "!=" | "<>" | "<" | ">" | "<=" | ">="
+value: NUMBER | STRING | col_ref | "(" query ")"
+group_opt: | "group" "by" col_list having_opt
+col_list: col_ref | col_list "," col_ref
+having_opt: | "having" cond
+order_opt: | "order" "by" order_list
+order_list: order_item | order_list "," order_item
+order_item: comparable dir_opt
+dir_opt: | "asc" | "desc"
+limit_opt: | "limit" NUMBER

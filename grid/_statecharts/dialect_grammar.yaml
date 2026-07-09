@@ -1,0 +1,9 @@
+entity: DialectGrammar
+initial: DRAFT
+terminal: [FROZEN, INVALID]
+transitions:
+  - {from: DRAFT,     trigger: parse_ok,       to: PARSED}
+  - {from: DRAFT,     trigger: parse_error,    to: INVALID}
+  - {from: PARSED,    trigger: validate_ok,    to: VALIDATED}
+  - {from: PARSED,    trigger: validate_error, to: INVALID}
+  - {from: VALIDATED, trigger: freeze,         to: FROZEN}

@@ -1,0 +1,8 @@
+entity: RegistrySlot
+initial: PENDING
+terminal: [EVICTED]
+transitions:
+  - {from: PENDING, trigger: build_ok,    to: READY}
+  - {from: PENDING, trigger: build_error, to: FAILED}
+  - {from: READY,   trigger: superseded,  to: EVICTED}
+  - {from: FAILED,  trigger: ttl_expired, to: EVICTED}

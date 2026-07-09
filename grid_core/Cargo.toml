@@ -1,0 +1,15 @@
+[package]
+name = "grid_core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "grid_core"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.27", features = ["abi3-py311", "extension-module"] }
+
+[profile.release]
+lto = true
+codegen-units = 1

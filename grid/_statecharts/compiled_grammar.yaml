@@ -1,0 +1,8 @@
+entity: CompiledGrammar
+initial: COMPILING
+terminal: [RETIRED, FAILED]
+transitions:
+  - {from: COMPILING,  trigger: compile_ok,     to: READY}
+  - {from: COMPILING,  trigger: conflict,       to: FAILED}
+  - {from: READY,      trigger: superseded,     to: DEPRECATED}
+  - {from: DEPRECATED, trigger: last_pin_retired, to: RETIRED}

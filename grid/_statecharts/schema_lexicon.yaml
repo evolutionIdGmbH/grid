@@ -1,0 +1,9 @@
+entity: SchemaLexicon
+initial: DECLARED
+terminal: [RETIRED, INVALID]
+transitions:
+  - {from: DECLARED,      trigger: first_use,       to: MATERIALIZING}
+  - {from: MATERIALIZING, trigger: build_ok,        to: ACTIVE}
+  - {from: MATERIALIZING, trigger: build_error,     to: INVALID}
+  - {from: ACTIVE,        trigger: superseded,      to: DEPRECATED}
+  - {from: DEPRECATED,    trigger: last_pin_retired, to: RETIRED}

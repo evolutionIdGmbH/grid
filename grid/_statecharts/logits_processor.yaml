@@ -1,0 +1,9 @@
+entity: GridLogitsProcessor
+initial: FRESH
+terminal: [FINISHED]
+transitions:
+  - {from: FRESH,    trigger: first_call, to: ANCHORED}
+  - {from: ANCHORED, trigger: step,       to: ANCHORED}
+  - {from: ANCHORED, trigger: all_complete, to: FINISHED}
+  - {from: ANCHORED, trigger: finish,     to: FINISHED}
+  - {from: FRESH,    trigger: finish,     to: FINISHED}

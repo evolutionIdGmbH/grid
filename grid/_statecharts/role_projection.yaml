@@ -1,0 +1,10 @@
+entity: RoleProjection
+initial: DECLARED
+terminal: [CACHED, INVALID]
+transitions:
+  - {from: DECLARED, trigger: compose_ok,     to: COMPOSED}
+  - {from: DECLARED, trigger: compose_error,  to: INVALID}
+  - {from: COMPOSED, trigger: reduce_ok,      to: REDUCED}
+  - {from: REDUCED,  trigger: verify_ok,      to: VERIFIED}
+  - {from: REDUCED,  trigger: verify_error,   to: INVALID}
+  - {from: VERIFIED, trigger: register,       to: CACHED}

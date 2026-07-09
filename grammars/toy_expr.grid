@@ -1,0 +1,9 @@
+# Toy arithmetic grammar — M0 reference-guide bring-up and unit tests.
+%start expr
+%ignore WS
+WS: /[ \t\n]+/
+NUMBER: /[0-9]+/
+IDENT: /[a-z_][a-z0-9_]*/
+expr: term | expr "+" term | expr "-" term
+term: factor | term "*" factor
+factor: NUMBER | IDENT | "(" expr ")"

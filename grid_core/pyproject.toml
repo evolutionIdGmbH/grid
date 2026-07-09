@@ -1,0 +1,12 @@
+[build-system]
+requires = ["maturin>=1.7"]
+build-backend = "maturin"
+
+[project]
+name = "grid_core"
+version = "0.1.0"
+description = "GRID Rust kernels (DESIGN.md SS2): incremental-state trie walk"
+requires-python = ">=3.11"
+
+[tool.maturin]
+features = ["pyo3/abi3-py311"]
