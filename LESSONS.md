@@ -620,6 +620,38 @@ every one of these before any debugging session:
   correct oracle. Root-cause with an isolated ground truth before "fixing"
   parity, or the fix would have re-introduced the poisoning.
 
+### 6.8 The W10 runs: three real fixes, one exogenous ghost, one conservative pass
+- **Change:** admission warmup default-off (`GRID_ADMIT_WARM=0`; opt-in with a
+  per-fingerprint gate and `GRID_ADMIT_WARM_THREADS`); the v2 step-loop warm
+  pass mirrors the timed passes exactly (full length + a fresh-schema request
+  — Triton JIT compiles off the clock); driver GC hygiene in
+  `_step_loop_batch` (disable during timed legs, the G7 pattern) and a
+  one-shot `gc.freeze()` in the backend (engine-core resident).
+- **Why (measured on the H100 matrix):** warmup as shipped starved the live
+  engine via GIL-bound tier work — fresh TTFT 10× worse AND multi-second
+  batch stalls, so the "WAITING absorbs the cost" premise died on contact
+  with the GIL; the step loop JIT-compiled kernels inside timed windows;
+  and a once-per-leg 0.7–2 s frozen engine step remained that we exonerated
+  five ways — it fires in ALL-WARM baselines with zero grid work, is
+  invariant to defer/warmup/walk-threads/JIT-warming and to child- AND
+  driver-side GC control, and vanishes entirely with the engine in-process.
+  It is a vLLM-0.24 multiprocess-topology artifact that lands randomly
+  inside either metric's window (both metrics read +270–370% on the runs it
+  poisons, near-clean on the runs it misses).
+- **Result:** warm gates PASS solidly (batch-32 TPOT overhead +0.64–0.99%
+  across four record runs; TTFT 26–27 ms cold / 1.3 ms warm). In
+  artifact-free windows the adversarial pair PASSES with the full stack —
+  defer + genN + rayon threads=8: **−1.75% co-batched degradation, 23.9 ms
+  max step** — on the legacy lockstep leg, which is biased AGAINST the
+  design (it charges the fresh request's tail to the batch), making that a
+  conservative pass. Defer attribution (same leg, artifact-free windows):
+  +8.2%/24.5 ms with defer on vs +373%/65.7 ms off. Fresh-request UX:
+  TTFT ~145 ms, effective TPOT 1.00× warm.
+- **Lesson:** when a benchmark number refuses to move under any lever you
+  own, stop optimizing and start exonerating — the five-way elimination
+  (grid levers, JIT, child GC, driver GC, process topology) cost one hour
+  and prevented shipping "fixes" for an artifact that was never ours.
+
 ## Meta-lessons
 
 1. **Systematic, planned review at every phase paid for itself.** The Phase-1

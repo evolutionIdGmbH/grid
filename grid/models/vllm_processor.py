@@ -115,7 +115,7 @@ class _GuideRegistry:
         # all (producer.journal stays None — the walk-miss path is exactly
         # today's), and admission_warmup no-ops independently. Read at template
         # build, like the producer's own one-shot env reads.
-        journal = None if os.environ.get("GRID_ADMIT_WARM", "1") == "0" \
+        journal = None if os.environ.get("GRID_ADMIT_WARM", "0") == "0" \
             else self._journals.setdefault(dialect, ContextJournal())
 
         grammar = gspec.load(grammar_src)

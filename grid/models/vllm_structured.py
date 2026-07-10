@@ -152,7 +152,7 @@ def admission_warmup(guide, pool, deadline_ms: float | None = None) -> dict:
     stats = {"enabled": False, "initial": False, "tier_i": 0, "tier_ii": 0,
              "critical_done": False, "errors": 0, "deadline_ms": 0.0,
              "elapsed_ms": 0.0, "error": None}
-    if os.environ.get("GRID_ADMIT_WARM", "1") == "0":
+    if os.environ.get("GRID_ADMIT_WARM", "0") == "0":
         return stats
     t0 = time.perf_counter()
     stats["enabled"] = True
@@ -462,11 +462,42 @@ try:  # pragma: no cover - exercised on vllm hosts (next runner session)
             # instead of queueing; the warm path never schedules (see
             # GridGrammarSession.accept_tokens)
             self._prefetcher = MaskPrefetcher(max_workers=4)
-            # W5 admission-warmup pool (8 threads; walks are GIL-released Rust,
-            # so tier-ii fans out for real). Threads spawn lazily — with
-            # GRID_ADMIT_WARM=0 the pool is never touched.
+            # W5 admission-warmup pool. Sized small by default: tier-ii walks
+            # release the GIL but tier-i entry adoption/registration is
+            # GIL-bound Python — the first W10 H100 run measured an 8-thread
+            # pool starving live engine steps into the SECONDS (max step
+            # 6.2 s, warm TPOT +4.66%). GRID_ADMIT_WARM_THREADS tunes it.
+            try:
+                _ww = max(1, int(os.environ.get("GRID_ADMIT_WARM_THREADS", "2")))
+            except ValueError:
+                _ww = 2
             self._warmup_pool = ThreadPoolExecutor(
-                max_workers=8, thread_name_prefix="grid-warmup")
+                max_workers=_ww, thread_name_prefix="grid-warmup")
+            # warm ONCE per template: vLLM calls compile_grammar per REQUEST,
+            # so without this gate a batch of 32 requests fires 32 warmups —
+            # the same W10 run showed the storm poisoning even the all-warm
+            # cells. Producers are one-per-fingerprint (registry single-flight).
+            self._warmed_producers: set[int] = set()
+            self._gc_frozen = False
+
+        def _gc_freeze_once(self) -> None:
+            # The backend lives INSIDE the vLLM EngineCore process. Its gen-2
+            # GC scans the entire engine heap; the W10 step-timeline probe
+            # measured a 0.7-1.2 s frozen engine step ONCE PER GENERATE LEG,
+            # growing with heap, present even for all-warm batches with zero
+            # grid work — and absent entirely in-process where the driver
+            # could gc.freeze(). Freezing at the first compile (engine fully
+            # initialized by then) moves the static heap out of gen-2 scans,
+            # collapsing those pauses to the small runtime delta. Newer vLLM
+            # versions do this themselves; GRID_GC_FREEZE=0 opts out.
+            if self._gc_frozen:
+                return
+            self._gc_frozen = True
+            if os.environ.get("GRID_GC_FREEZE", "1") != "0":
+                import gc
+
+                gc.collect()
+                gc.freeze()
 
         def compile_grammar(
             self, request_type: StructuredOutputOptions, grammar_spec: str
@@ -480,12 +511,19 @@ try:  # pragma: no cover - exercised on vllm hosts (next runner session)
             # WARMUP errors are swallowed below.
             guide = self._registry.guide_for(_parse_spec(grammar_spec))
             try:
-                # W5: warm this template while the request waits off-batch.
+                self._gc_freeze_once()
+                # W5: warm this template while the request waits off-batch —
+                # ONCE per template (per-fingerprint), not per request. The
+                # id() key is stable: the registry holds the template (and its
+                # producer) alive for the backend's lifetime.
                 # admission_warmup already never raises; the belt-and-braces
                 # guard covers even its argument plumbing — a compile_grammar
                 # exception is engine-fatal in vLLM 0.24 (verified), so warmup
                 # failures must degrade to no-warmup, never raise.
-                admission_warmup(guide, self._warmup_pool)
+                pid = id(guide.producer)
+                if pid not in self._warmed_producers:
+                    self._warmed_producers.add(pid)
+                    admission_warmup(guide, self._warmup_pool)
             except Exception:
                 pass
             return _GridGrammar(

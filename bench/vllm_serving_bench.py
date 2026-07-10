@@ -436,7 +436,16 @@ def _step_loop_batch(llm, prompts, sampling_params, req_ids=None):  # pragma: no
     per-request token-arrival timestamps (seconds, relative to loop start).
     No lockstep assumption: a request absent from a round (deferred, finished)
     simply gets no timestamp that round. Returns (step_walls_s, token_times_s)
-    in the exact shape reduce_adversarial_v2 consumes."""
+    in the exact shape reduce_adversarial_v2 consumes.
+
+    GC is disabled in the DRIVER for the duration of the timed loop and a full
+    collection runs before/after (the G7 microharness pattern, RESULTS-r.md:
+    a gen-2 pause is not constraint cost). The W10 step-timeline probes
+    measured once-per-leg 0.7-2 s frozen steps in this process — present for
+    all-warm batches with zero grid work, absent after gc.freeze — i.e. the
+    driver's own gen-2 collections over the harness heap, landing inside
+    eng.step() walls and dwarfing the masking behavior under measurement."""
+    import gc
     import time
     eng = llm.llm_engine
     ids = list(req_ids) if req_ids is not None else [f"req-{i}" for i in range(len(prompts))]
@@ -445,18 +454,26 @@ def _step_loop_batch(llm, prompts, sampling_params, req_ids=None):  # pragma: no
     token_times = {rid: [] for rid in ids}
     seen = dict.fromkeys(ids, 0)
     step_walls_s = []
-    t_start = time.perf_counter()
-    while eng.has_unfinished_requests():
-        t0 = time.perf_counter()
-        outs = eng.step()
-        t1 = time.perf_counter()
-        step_walls_s.append(t1 - t0)
-        for out in outs:
-            n = len(out.outputs[0].token_ids)
-            new = n - seen.get(out.request_id, 0)
-            if new > 0:
-                seen[out.request_id] = n
-                token_times.setdefault(out.request_id, []).extend([t1 - t_start] * new)
+    gc.collect()
+    gc_was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        t_start = time.perf_counter()
+        while eng.has_unfinished_requests():
+            t0 = time.perf_counter()
+            outs = eng.step()
+            t1 = time.perf_counter()
+            step_walls_s.append(t1 - t0)
+            for out in outs:
+                n = len(out.outputs[0].token_ids)
+                new = n - seen.get(out.request_id, 0)
+                if new > 0:
+                    seen[out.request_id] = n
+                    token_times.setdefault(out.request_id, []).extend([t1 - t_start] * new)
+    finally:
+        if gc_was_enabled:
+            gc.enable()
+        gc.collect()
     return step_walls_s, token_times
 
 
@@ -518,6 +535,20 @@ def _adversarial_arm(args):  # pragma: no cover - GPU host
           "max_step_ms": step_max}
 
     # ---- metric v2 (per-request step loop; no lockstep assumption) ----
+    # JIT warm the step-loop path itself (untimed): the raw engine step loop
+    # triggers Triton kernel JIT compiles (apply_token_bitmask_inplace,
+    # _compute_slot_mapping) the first time each shape/config runs — observed
+    # as 1.4-3.8 s frozen engine steps in EVERY W10 matrix config, dwarfing
+    # the effect under test. The warm pass must MIRROR the timed passes
+    # exactly — full T and a fresh-schema request included, so the admission
+    # path and every step shape compile off the clock (a 16-token warm pass
+    # without a fresh request still left 5 in-timing JIT compiles and a
+    # 1.75 s max step, identical with defer on AND off — i.e. pure compiler
+    # noise). The criterion gates the steady state, not a once-per-process
+    # compiler event (v1's lockstep math silently smeared these freezes —
+    # v2's per-step timing exposed them).
+    p, s = _fresh_batch("jitwarm", 0)
+    _step_loop_batch(llm, p, s)
     # baseline: all-warm batch-32 on the SAME step-loop surface (warm caches —
     # the v1 leg above already ran the warm schemas to completion repeatedly)
     p, s = _build_batch("grid", grammar, schema_items, 32, T)
