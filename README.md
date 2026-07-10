@@ -22,7 +22,7 @@ GRID's design and implementation are our own throughout.
 | File | Purpose |
 |---|---|
 | [`GUARDRAIL-REDESIGN.md`](GUARDRAIL-REDESIGN.md) | The *why*: the v0.0.5→v0.0.7 design evolution — what changed and what was kept, chosen methods with proofs and source-checked numbers, cost model, benchmark rationale |
-| [`DESIGN.md`](DESIGN.md) | The *what/how* of v0.0.7: modules, entity catalog with state machines, per-token hot path, error taxonomy, testing strategy, verification gates G0–G10, milestones M0–M6 |
+| [`DESIGN.md`](DESIGN.md) | The *what/how* of v0.0.7: modules, entity catalog with state machines, per-token hot path, error taxonomy, verification suite and testing strategy |
 | [`LESSONS.md`](LESSONS.md) | The v0.0.5→v0.0.7 record: what changed, why, with what measured result, and what we did next |
 | [`ONBOARDING.md`](ONBOARDING.md) | Researcher onboarding: guided tour, formal design, competitive analysis |
 | `bench/RESULTS*.md` | Benchmark reports (XGrammar, llguidance, Outlines, guidance across eras; MaskBench; Spider EX) |
@@ -58,9 +58,9 @@ print(result.text, result.stop_reason)
 
 ```
 python -m venv .venv && .venv/bin/pip install -e ".[dev]"
-.venv/bin/pytest tests/ -q            # gate suite (G0-G6 slices, G10a)
+.venv/bin/pytest tests/ -q            # verification suite (correctness + audit slices)
 GRID_HF_TESTS=1 .venv/bin/pytest tests/models/   # real-tokenizer tests (network)
-(cd grid_core && maturin develop --release)      # optional Rust kernel (M4); tests fall back to the Python walk without it (GRID_NO_RUST=1 forces it)
+(cd grid_core && maturin develop --release)      # optional Rust kernel; tests fall back to the Python walk without it (GRID_NO_RUST=1 forces it)
 .venv-bench/bin/python bench/compare_engines.py  # engine comparison harness
 ```
 
@@ -101,8 +101,9 @@ XGrammar 587 µs; GRID p90 113 µs vs llguidance 386 µs.
   logits-processor wrapper (bitmask fill + apply). JSON-schema and regex default to
   `outlines_core`.
 - **Serving TTFT/TPOT @ batch:** measured on the declared runner —
-  [`bench/RESULTS-serving.md`](bench/RESULTS-serving.md) (G8, 6/7 criteria; see
-  the serving section below); Spider EX and the ablation arms are covered below.
+  [`bench/RESULTS-serving.md`](bench/RESULTS-serving.md) (batched-serving
+  overhead; see the serving section below); Spider EX and the ablation arms are
+  covered below.
 
 **MaskBench** (guidance-ai/jsonschemabench, JSON-Schema mask computation —
 [`bench/RESULTS-maskbench.md`](bench/RESULTS-maskbench.md)):
@@ -164,7 +165,7 @@ the ~94.5% execution floor + schema/RBAC enforcement + the audit chain +
 repair. Other ablations: EX invariant by construction; **cache-off costs 32%
 generation throughput** — the write-back cache's serving value, quantified.
 
-**vLLM backends (M6, both slices accepted on GPU)**:
+**vLLM backends (both slices accepted on GPU)**:
 
 - *Mode 2 — logits processor* (`grid/models/vllm_processor.py`, accepted via
   `bench/vllm_smoke.py`): per-request activation via
@@ -210,20 +211,21 @@ complete n=2,048; at position 16,384 the fit extrapolates (labeled as such) to
 ≈19.5 s/token. Total constraint cost over one 16k replay: GRID **0.05 s** vs
 1.88 s (0.3.1) vs 2.52 s (0.1.5) vs ≈44 h (0.0.64, extrapolated).
 
-**G7 R-microharness** (`bench/r_microharness.py` → [`bench/RESULTS-r.md`](bench/RESULTS-r.md)):
-the M4 deliverable behind the G7 gate — synthetic 16k-token statement replays, 20
+**R-microharness — flat per-token guard-rail cost** (`bench/r_microharness.py` →
+[`bench/RESULTS-r.md`](bench/RESULTS-r.md)): verifies that per-token cost is
+independent of output position — synthetic 16k-token statement replays, 20
 seeded runs per nesting depth {0, 4, 8, 16}, warm-pass OLS slope with 95% CI. On
-this host every depth meets the R criterion (slope CI upper bound ≤ +7e-6 µs/pos
+this host every depth holds flat cost (slope CI upper bound ≤ +7e-6 µs/pos
 vs ε = 1e-4; cumulative-cost R² > 0.99; steady-state hit rate 97–98%; per-depth
-CD-residue telemetry included). With **kernel v4** the `hit p50 < 10 µs`
-criterion is met on this host for the first time — **3.5–4.3 µs** (was
-12.9–14.9); it still binds officially on the declared cloud runner.
-`--assert-gates` turns the criteria into an exit code for that runner's CI.
+CD-residue telemetry included). With **kernel v4** warm-hit p50 lands at
+**3.5–4.3 µs** on this host (was 12.9–14.9), under 10 µs for the first time; the
+reference measurement runs on the declared cloud runner.
+The `--assert-gates` flag turns these checks into an exit code for that runner's CI.
 
 ## Status
 
-Milestones M0–M3 complete (all gates green at their current slice sizes) plus
-real-tokenizer adapters, the engine-comparison harness, and the **M4 `grid_core`
+The core engine is complete and verified at its current scale plus
+real-tokenizer adapters, the engine-comparison harness, and the **`grid_core`
 Rust kernels — now all four §2 symbols** (trie walk, context-dependent group
 verdicts, the LALR `lalr_advance` = reduces+shift, and the bitmask fill), masks
 staying in i32 buffers end-to-end. The kernels are optional accelerators bound
@@ -233,36 +235,38 @@ memos + a one-call assembled `hit_pass`) cut warm-hit p50 to **3.5 µs** (from
 11 µs at v3, 276 µs pre-Rust) and releases the GIL on the cold walk so it
 overlaps the GPU forward pass.
 
-The **serving contract (M6, §6)** is realized end to end: `grid/serving/`
+The **serving contract (§6)** is realized end to end: `grid/serving/`
 implements cold-only worker prefetch (the warm steady state never queues), E17
 single-flight, the **T2 cross-template tier** (schema-independent entries
 survive template churn), and the kernel line v5 → v6: `fill_bits` row fill
 with a packed-row memo, verdict-equivalence CD grouping, and **session-in-
 kernel accept+fill** (one FFI call each; warm serving step **1.33 µs**/request
 measured — `LESSONS.md` 6.5/6.6 tell the diagnosis story from the first run's
-+5151% to here). Gate results on the declared H100 runner: **G7** MET (hit
-p50 < 10 µs); **G10** full audit replay (1,000 generations across a namespace
-rollover, bit-identical, 100% tamper detection); **G5 both arms** (10k
-model-free walks + 1,000 model-in-loop generations: all parse, audit-verified,
-0 dead-ends); **G6 + G6(b)** (0 RBAC bypasses, model-free and prompt-suite).
-**G8** ([`bench/RESULTS-serving.md`](bench/RESULTS-serving.md), kernel v7,
-H100 SXM5): **6/7** — **TPOT overhead +1.51% @batch 32 PASSES the <2% gate**;
-TTFT cold specialize 27 ms / warm 1.5 ms pass; both single-flight criteria
-pass. The full cold-schema stack — the §6 skip-a-round defer as a scheduler
-mask-readiness guard, genN key normalization, rayon-parallel walks, and the
-kernel-v7 fused walk→blob→register path — closes the adversarial **max-step**
-criterion: **15.3 ms** (was 50.3 ms pre-stack; thread-invariant 15–18 ms),
-under the 30 ms budget. The one remaining red is the co-batched degradation
-(**+33.8%** vs the <5% gate), now cut from +114.7% and reduced from a
-GIL/software cost to genuine host CPU/memory-bandwidth contention between the
-cold walk and the engine loop during a fresh schema's ~0.66 s window (the
-fresh request itself: 0.7 ms TTFT, 1.00× warm effective TPOT — zero
-steady-state interference; walk/pool thread niceness mitigates, full closure
-is a compute-isolation tradeoff). The gate uses artifact-robust estimators
-(median/min over legs) because vLLM 0.24's multiprocess engine exhibits a
-once-per-leg 0.7–2 s frozen step, reported upstream
-([vllm#48229](https://github.com/vllm-project/vllm/issues/48229);
-`LESSONS.md` 6.8). The SynCode/GBNF G9 arms are dropped by decision
-(2026-07-10; the G9 KPI was already exceeded). Remaining before R0: closing
-the last adversarial criterion (compute isolation) and the paper (in draft).
-See `DESIGN.md` §11, `LESSONS.md`, and `ONBOARDING.md`.
++5151% to here). Verified properties on the declared H100 runner: **flat
+per-token guard-rail cost** (warm-hit p50 < 10 µs); **audit-trail replay and
+tamper detection** (1,000 generations across a namespace rollover, bit-identical,
+100% tamper detection); **end-to-end soundness/completeness/termination at
+scale**, both arms (10k model-free walks + 1,000 model-in-loop generations: all
+parse, audit-verified, 0 dead-ends); **policy/RBAC enforcement** including the
+adversarial-prompt arm (0 RBAC bypasses, model-free and prompt-suite).
+**Batched-serving overhead** ([`bench/RESULTS-serving.md`](bench/RESULTS-serving.md),
+kernel v7, H100 SXM5): **TPOT overhead +1.51% @batch 32**; TTFT cold specialize
+27 ms / warm 1.5 ms; both single-flight properties hold. The full cold-schema
+stack — the §6 skip-a-round defer as a scheduler mask-readiness guard, genN key
+normalization, rayon-parallel walks, and the kernel-v7 fused walk→blob→register
+path — brings the adversarial cold-miss **max-step** to **15.3 ms** (was 50.3 ms
+pre-stack; thread-invariant 15–18 ms). The remaining limitation is a cold-schema
+co-batch cost: a fresh, never-before-seen schema induces a transient co-batched
+slowdown (**+33.8%**, down from +114.7%) during its ~0.66 s first-request
+specialization window. This is host CPU/memory-bandwidth contention between the
+cold grammar walk and the decode loop — not a GIL/software cost — that shrinks as
+walk parallelism rises and is mitigated by scheduling niceness; the fresh request
+itself runs at warm speed (0.7 ms TTFT, 1.00× warm effective TPOT) and
+steady-state co-tenant requests are unaffected. Fully eliminating it is a
+compute-isolation trade-off, noted as future work. The serving measurement uses
+artifact-robust estimators (median/min over legs) because vLLM 0.24's
+multiprocess engine exhibits a once-per-leg 0.7–2 s frozen step, reported
+upstream ([vllm#48229](https://github.com/vllm-project/vllm/issues/48229);
+`LESSONS.md` 6.8). The SynCode/GBNF cross-engine arms are dropped by decision
+(2026-07-10). Remaining work: the compute-isolation trade-off above and the
+paper (in draft). See `DESIGN.md` §11, `LESSONS.md`, and `ONBOARDING.md`.

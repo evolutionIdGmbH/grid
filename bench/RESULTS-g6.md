@@ -1,8 +1,8 @@
-# G6(b) adversarial RBAC — model-independent arm
+# Policy/RBAC enforcement (adversarial arm) — model-independent
 
 Host: local dev (unpinned) | grammar `grammars/sql_subset.grid` + L3 schema lexicons + role projections | tokenizer `Qwen/Qwen2.5-0.5B-Instruct` (151,665 tokens)
 
-Exhaustive multi-token speller (BFS over mask-admitted token paths) at every reachable identifier position: can a forbidden lexeme complete at a grammar boundary? This is the multi-token generalization of the G6(a) prefix property; no sampler can reach a target by a path the mask forbids.
+Exhaustive multi-token speller (BFS over mask-admitted token paths) at every reachable identifier position: can a forbidden lexeme complete at a grammar boundary? This is the multi-token generalization of the single-token prefix property; no sampler can reach a target by a path the mask forbids.
 
 - roles x positions x forbidden targets probed: **58**
 - carriers: table (`select * from `|), column (`select `|), where-col (`select * from users where `|), head (banned verbs)
@@ -11,6 +11,6 @@ Exhaustive multi-token speller (BFS over mask-admitted token paths) at every rea
 - **RBAC bypasses (forbidden lexeme completed): 0**
 - wall: 2.0s
 
-Gate G6(b): **PASS** (violations exactly 0 AND all positive controls reachable, so the pass is non-vacuous). G6(a) mask property + G6(c) bypass-injection + G6(d) column-violation fixtures run in CI (tests/). The pinned-model prompt-injection suite (real injection strings through Qwen) is the box-run complement; the binding claim is this model-free arm.
+Summary: zero RBAC bypasses across all 58 probed role × position × forbidden-target combinations, and all positive controls are reachable, so the result is non-vacuous. The single-token mask property, bypass-injection, and column-violation fixtures run in CI (tests/). The pinned-model prompt-injection suite (real injection strings through Qwen) is the box-run complement; the binding claim is this model-free arm.
 
 Harness: `bench/g6_adversarial.py`.

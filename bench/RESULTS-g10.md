@@ -1,4 +1,4 @@
-# G10 audit replay — full-scale run (E14)
+# Audit-trail replay and tamper detection — full-scale run (E14)
 
 Host: local dev (unpinned) | grammar: `grammars/sql_subset.grid` | MockTokenizer (48 tokens) | mode-1 GRID-owned loop, max_tokens 40 | key format: v2
 
@@ -9,6 +9,6 @@ Host: local dev (unpinned) | grammar: `grammars/sql_subset.grid` | MockTokenizer
 - tamper property: **1000/1000 detected** (random record x random field per trial)
 - generation wall: 1.0s
 
-Gate G10: **PASS** (criteria: every step of >=1,000 generations replayed bit-identical across >=1 namespace rollover; tamper detection 100% over >=10^3 trials; v1-format logs replay bit-identical via the dual-key path).
+Summary: every step of 1,000 generations replays bit-identical across a namespace rollover, tamper detection is 100% over 1,000 trials, and v1-format logs replay bit-identical via the dual-key path.
 
-Harness: `bench/g10_replay.py` (G10a smoke-scale versions of these properties run in CI: tests/audit/test_audit.py).
+Harness: `bench/g10_replay.py` (smoke-scale versions of these properties run in CI: tests/audit/test_audit.py).

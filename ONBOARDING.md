@@ -1,4 +1,4 @@
-# GRID — Onboarding and Milestone Documentation
+# GRID — Onboarding and Technical Tour
 
 **Audience:** a new researcher joining the project. This document is a guided tour, not a
 new source of truth. The normative documents remain:
@@ -6,14 +6,14 @@ new source of truth. The normative documents remain:
 | Document | Role |
 |---|---|
 | `GUARDRAIL-REDESIGN.md` | The *why*: the v0.0.5→v0.0.7 design evolution, chosen methods, proofs, cost model, benchmark plan |
-| `DESIGN.md` | The *what/how* (normative spec): architecture §2, entity catalog §5, per-token hot path §6, gates §10, decision log §13 |
+| `DESIGN.md` | The *what/how* (normative spec): architecture §2, entity catalog §5, per-token hot path §6, verification §10, decision log §13 |
 | `LESSONS.md` | The retrospective: every phase's changes, the bugs found, measured results |
 | `bench/RESULTS*.md` | Committed benchmark reports (every number in this file is sourced from one of them or from `LESSONS.md`) |
 
 Where this document says "measured", the host is local dev (unpinned) unless stated;
-binding G7/G8/G9 numbers run on the declared cloud runner — a named provider
-instance type + image recorded in each report's host label (`DESIGN.md` §10;
-bare-metal pinning was dropped from the plan).
+binding flat-cost, batched-serving, and cross-engine-latency numbers run on the
+declared cloud runner — a named provider instance type + image recorded in each
+report's host label (`DESIGN.md` §10; bare-metal pinning was dropped from the plan).
 
 ---
 
@@ -28,9 +28,9 @@ prefix* of a role- and schema-projected grammar, hard-masks everything else
 (`logits = -inf`), gates EOS on actual sentence membership, reserves token budget so
 generations end grammatically instead of truncating, and appends a hash-chained,
 replayable audit record for every emitted token. Four guarantees — soundness,
-completeness, termination, and near-linear cost (requirement R) — are stated with
-explicit preconditions (`DESIGN.md` §1, `GUARDRAIL-REDESIGN.md` §4) and each is bound
-to a verification gate rather than asserted.
+completeness, termination, and near-linear cost — are stated with explicit
+preconditions (`DESIGN.md` §1, `GUARDRAIL-REDESIGN.md` §4) and each is bound to a
+verification test rather than asserted.
 
 ### 1.2 Origin: from v0.0.5 to v0.0.7
 
@@ -142,7 +142,8 @@ per-row state registry (no Θ(n) prefix hashing; `DESIGN.md` §4.3).
    live stack (`RustVerdicts.cd_pass`: arena LALR simulate/shift with `_StepMemo`-style
    memoization, returning passing token ids as an i32 buffer consumed zero-copy). The
    mask is `ci ∪ cd_pass ∪ {EOS if step 2 said legal}`.
-8. **Empty mask ⇒ `DeadEndError`** — unreachable by theorem; always a bug (G5 asserts
+8. **Empty mask ⇒ `DeadEndError`** — unreachable by theorem; always a bug (the
+   at-scale soundness/completeness/termination check asserts
    zero occurrences; `LESSONS.md` 5.2 is the one real-world time this fired, on a
    violated theorem precondition, and it produced a validation, not a workaround).
 9. **Singleton mask ⇒ jump-forward.** The maximal chain of singleton masks (bounded by
@@ -186,7 +187,7 @@ artifact fingerprints.
 | `grid/_statecharts/` | Statechart engine; §5 state machines are YAML-checked at boundaries |
 | `grid_core/` | Rust crate (pyo3): `RustWalker` (trie walk) + `RustVerdicts` (CD verdicts + LALR simulate) |
 | `grammars/` | `sql_subset.grid` (bench grammar), `sql_spider.grid` (Spider dialect, 100% dev-gold coverage), `toy_expr.grid` |
-| `tests/` | Gate suites; note `tests/trie/test_rust_parity.py` and `tests/mask/test_kernel_parity.py` (kernel ≡ spec) |
+| `tests/` | Verification suites; note `tests/trie/test_rust_parity.py` and `tests/mask/test_kernel_parity.py` (kernel ≡ spec) |
 | `bench/` | `compare_engines.py`, `r_microharness.py`, `maskbench_grid.py` + `json_schema_to_grid.py`, `spider_ex.py` + `spider_coverage.py`, `RESULTS*.md` |
 
 Spec-vs-code deltas a new reader should know (drift is documented, not hidden):
@@ -215,8 +216,8 @@ Two implementations of one semantics, bound by tests (`DESIGN.md` §2):
 This discipline caught, before any debugging session: byte-identical token aliases
 dropped from masks (completeness, `LESSONS.md` 3.1), lexicon-blind reserve completions
 (soundness, 3.2), Write-span audit-kind gaps (3.4), and a real Rust/Python divergence in
-the CD group key (4.5). The meta-lesson stands: every fast-path change since M2 shipped
-same-day because "bit-identical to the oracle" is a one-command check.
+the CD group key (4.5). The meta-lesson stands: every fast-path change since the first
+Rust port shipped same-day because "bit-identical to the oracle" is a one-command check.
 
 ### 1.6 Critical decisions, trade-offs, consequences
 
@@ -252,7 +253,7 @@ same-day because "bit-identical to the oracle" is a one-command check.
    on the stack — which no (lexer, A)-keyed entry can capture; caching it would violate
    key soundness *by construction* (`LESSONS.md` 2.5). So the walk returns a cacheable
    CI mask plus a CD list re-checked against the live stack every step. *Consequence:*
-   correctness held (G4 cache-on ≡ cache-off), but the uncached-by-design residue became
+   correctness held (cache-on ≡ cache-off in the cache-soundness differentials), but the uncached-by-design residue became
    the dominant hot-path cost — 189 ms hits on the first real benchmark — and drove
    two optimization rounds (memoization, publish-time grouping) and ultimately the
    second Rust kernel (`LESSONS.md` 4.2, 4.4a).
@@ -263,8 +264,8 @@ same-day because "bit-identical to the oracle" is a one-command check.
    enterprise deployment shape (`GUARDRAIL-REDESIGN.md` K2, §7.1). *Consequence:* the
    design is only rewarded where requests repeat configurations. One-shot protocols
    never warm it: MaskBench runs each schema once, so GRID's p90+ TBM tail there is
-   all cold misses (`bench/RESULTS-maskbench.md` reading notes). The serving bench
-   (G8) is where this choice is designed to pay.
+   all cold misses (`bench/RESULTS-maskbench.md` reading notes). The serving-under-batch-load
+   bench is where this choice is designed to pay.
 
 6. **The kernel bitmask bound: 64 → 512 terminals.** `grid_core` originally held
    candidate terminal sets as single `u64` bitmasks; on MaskBench 6% of compiled
@@ -286,7 +287,7 @@ same-day because "bit-identical to the oracle" is a one-command check.
    mechanism resolved JSON's property-key-vs-STRING overlap with no new code
    (`LESSONS.md` 5.1). Known recorded caveat: a viable terminal accepting only at a
    strictly shorter position than the union-longest match is not chosen; no grammar
-   has hit it, and the G3 differential will surface any that does
+   has hit it, and the mask-exactness differential will surface any that does
    (`grid/lexer/run.py` docstring).
 
 8. **L3 lexicons, and a theorem precondition that had to become a VALIDATION.** The
@@ -295,7 +296,7 @@ same-day because "bit-identical to the oracle" is a one-command check.
    admits tokens spelling *forbidden* identifiers, and the parser will not reject them
    later — silent RBAC violation; `GUARDRAIL-REDESIGN.md` §3.4). Its completeness
    precondition — **lexicon ⊆ terminal language** — was satisfied by every fixture and
-   validated by no gate, until Spider's `orchestra` database supplied a column named
+   checked by nothing, until Spider's `orchestra` database supplied a column named
    `Official_ratings_(millions)`: parentheses are outside `COLUMN_NAME`'s regex, every
    prefix passes `prefix_ok` (it *is* a lexicon-word prefix), no token can ever
    complete the lexeme, and the mask went empty — `DeadEndError`, the error class the
@@ -311,7 +312,7 @@ same-day because "bit-identical to the oracle" is a one-command check.
    per-table column policy (`GUARDRAIL-REDESIGN.md` §4.6). The mask guarantees
    **verb- and table-level** policy; `grid/policy/semantic.py` re-parses the completed
    statement's terminal stream and flags unknown tables and columns not belonging to
-   any referenced table (G6(d): 100% of column-violation fixtures flagged).
+   any referenced table (policy/RBAC enforcement: 100% of column-violation fixtures flagged).
 
 10. **Honest scope boundaries.** Out of mask scope by proof: column RBAC, semantic
     validity beyond the grammar. Out of v1 by decision, with reasons recorded
@@ -323,7 +324,7 @@ same-day because "bit-identical to the oracle" is a one-command check.
 ### 1.7 Working on the repo
 
 ```
-.venv/bin/pytest tests/ -q                        # gate suite (G0–G6 slices, G10a)
+.venv/bin/pytest tests/ -q                        # verification suite (correctness, soundness, RBAC, audit slices)
 GRID_NO_RUST=1 .venv/bin/pytest tests/ -q         # force the executable-spec path
 (cd grid_core && maturin develop --release)       # rebuild kernels
 .venv-bench/bin/python bench/compare_engines.py   # engine comparison (SQL)
@@ -375,14 +376,17 @@ build, the fast path, and the reference oracle — `DESIGN.md` E6).
 
 ### 2.2 The four guarantees, with preconditions
 
-Stated as in `GUARDRAIL-REDESIGN.md` §4 / `DESIGN.md` §1; every clause has a gate.
+Stated as in `GUARDRAIL-REDESIGN.md` §4 / `DESIGN.md` §1; every clause has its own
+verification.
 
 1. **Soundness.** Every emitted token keeps the detokenized output in
    `Prefix(L(G_role, schema))`. *Preconditions:* exact masks (no lookahead
    approximation); hard `-inf` masking (soft down-weighting voids it); the identifier
    composition rule (L3 intersection at identifier positions, structurally enforced by
-   type-distinct cache keys + `IdentifierMaskBypassError`). *Gates:* G3 (mask
-   exactness vs the trial-parse oracle), G5, G6(a).
+   type-distinct cache keys + `IdentifierMaskBypassError`). *Verified by:*
+   differential correctness (mask exactness vs the trial-parse oracle), the
+   end-to-end soundness/completeness/termination-at-scale checks, and
+   policy/RBAC enforcement.
 
 2. **Completeness.** No token is blocked whose byte string can extend the current
    viable prefix toward a member of `L`. *Preconditions:* (a) **byte-complete
@@ -394,8 +398,8 @@ Stated as in `GUARDRAIL-REDESIGN.md` §4 / `DESIGN.md` §1; every clause has a g
    (`LESSONS.md` 5.2: the one real-data violation produced an empty mask at a viable
    state within 100 Spider generations; `MaskProducer._validate_lexicons` closes it).
    Under (a)–(d), every viable prefix has ≥ 1 legal token: dead-end freedom
-   (`GUARDRAIL-REDESIGN.md` §3, dead-end theorem). *Gate:* G3's byte-fallback arm;
-   G5 `DeadEndError = 0`.
+   (`GUARDRAIL-REDESIGN.md` §3, dead-end theorem). *Verified by:* the mask-exactness
+   byte-fallback arm and the at-scale check that `DeadEndError = 0`.
 
 3. **Termination.** Output ∈ `L` on every non-error stop. EOS is legal **iff** the
    current output is a complete sentence — computed by simulating the reduce chain of
@@ -406,11 +410,13 @@ Stated as in `GUARDRAIL-REDESIGN.md` §4 / `DESIGN.md` §1; every clause has a g
    `LESSONS.md` 2.6), the trigger fires at
    `budget_remaining ≤ |completion| + RESERVE_SAFETY`, and the response is
    `Write(shortest legal completion + EOS)` — never a bare EOS away from ACCEPT
-   (`LESSONS.md` 2.1: the draft's bare-EOS reserve would have crashed its own gate).
-   *Gate:* G5 — EOS only at ACCEPT, every jump-complete stop parses, no
-   reserve-stopped generation exceeds `max_tokens`.
+   (`LESSONS.md` 2.1: the draft's bare-EOS reserve would have crashed its own
+   termination check). *Verified by:* the at-scale termination check — EOS only at
+   ACCEPT, every jump-complete stop parses, no reserve-stopped generation exceeds
+   `max_tokens`.
 
-4. **Requirement R (near-linear cost).** Amortized O(1) guard-rail cost per token,
+4. **Flat per-token guard-rail cost (latency independent of output position).**
+   Amortized O(1) guard-rail cost per token,
    total O(n); **per-step worst case bounded by nesting depth** (a single terminal can
    trigger a reduce cascade proportional to stack depth; SQL prefix operators are
    inherently right-recursive, so cascades cannot be linted away), **never by output
@@ -418,7 +424,7 @@ Stated as in `GUARDRAIL-REDESIGN.md` §4 / `DESIGN.md` §1; every clause has a g
    processor keys states incrementally (splitmix64 chaining, `DESIGN.md` §4.3), the
    config hash is a rolling O(1)-per-push mix, and mask cost is a function of the
    configuration, not the position. *Measured evidence:*
-   - `bench/RESULTS-r.md` (G7 R-microharness, gpt2, n = 16,000 tokens/stream, 20
+   - `bench/RESULTS-r.md` (flat-cost microharness, gpt2, n = 16,000 tokens/stream, 20
      seeded runs per depth, warm-pass OLS): slope mean ± 95% CI of
      **−0.000013 ± 0.000016 µs/pos** (depth 0), −0.000010 ± 0.000014 (4),
      −0.000011 ± 0.000018 (8), **−0.000003 ± 0.000009 (16)** — CI upper bounds two
@@ -429,7 +435,7 @@ Stated as in `GUARDRAIL-REDESIGN.md` §4 / `DESIGN.md` §1; every clause has a g
      **−0.006 µs/pos** (gpt2) and **−0.012 µs/pos** (Qwen), with first-half p50 equal
      to second-half p50 (10/10 µs and 29/29 µs). The negative *mixed-arm* table slopes
      (−24 to −56) are an artifact of cold misses clustering early in replays — the
-     warm-pass slope is the R statistic (`LESSONS.md` 4.3).
+     warm-pass slope is the flat-cost statistic (`LESSONS.md` 4.3).
 
 ### 2.3 The cache key and OBL-KEY1
 
@@ -452,12 +458,13 @@ is finer-or-equal — sound, recorded here as deliberate drift.
 classes of the (lexer product-DFA × allowed-terminal set × identifier-lexicon) product.
 The CD residue is exempt *because it is never cached* — that is the entire point of the
 split (`LESSONS.md` 2.5: without it the obligation is violated by construction, not
-merely unverified). Verified two ways: G4 differentials (cache-on ≡ cache-off), and a
+merely unverified). Verified two ways: the cache-soundness differentials
+(cache-on ≡ cache-off), and a
 runtime tripwire — publish is content-addressed, so a racing writer of the same key
 with a different mask trips `assert cur.entry_id == entry.entry_id`
 ("OBL-KEY1 violation") in `MaskCache.publish`.
 
-**Entry encoding** (E10, deterministic across implementations for G10 replay): payload
+**Entry encoding** (E10, deterministic across implementations for audit-trail replay): payload
 chosen among accept-list / reject-list / bitset by byte size
 (`4·|accept|` vs `4·(V−|accept|)` vs `⌈V/8⌉`, ties accept < reject < bitset), ids
 ascending; `entry_id = BLAKE2b-128(canonical key ‖ tag ‖ payload)` — racing writers
@@ -534,12 +541,13 @@ in-kernel; only group representatives cross the FFI boundary.
   step, `LESSONS.md` 3.4).
 - **Seal:** stop reason, chain head, artifact fingerprints, mode flags
   (processor-only downgrades, `stop_at` exclusions). `verify_chain()` recomputes the
-  chain; tamper detection measured 200/200 in the G10a slice (`LESSONS.md` 3.4).
+  chain; tamper detection measured 200/200 in the chain-integrity slice
+  (`LESSONS.md` 3.4).
 - **Replayability:** entry ids are content hashes over versioned, immutable cache
   entries, and the config hash pins the parser trajectory — so a log replays against
-  archived grammar artifacts to bit-identical masks (G10: ≥1,000 generations across a
-  namespace rollover; G10a — chain integrity + replay smoke — gates M3 exit and is
-  green at the current slice).
+  archived grammar artifacts to bit-identical masks (audit-trail replay: ≥1,000
+  generations across a namespace rollover; the chain-integrity + replay-smoke slice
+  is green at the current scale).
 
 ---
 
@@ -576,7 +584,7 @@ The substantive engine comparison is against llguidance itself (§3.4) and XGram
 1. **Mask-level RBAC and schema enforcement.** Per-role grammar projections (L2) and
    per-schema identifier lexicons (L3) make policy part of the *language*: identifiers
    are schema-valid **by construction**, forbidden tables are unreachable even spelled
-   byte-by-byte (G6 property tests, `LESSONS.md` 3.3). Evidence that the mechanism is
+   byte-by-byte (policy/RBAC enforcement property tests, `LESSONS.md` 3.3). Evidence that the mechanism is
    exact where it applies: **zero validation errors** on all 315 MaskBench schemas GRID
    compiles (every valid instance accepted — `bench/RESULTS-maskbench.md`), and on
    Spider the constrained arm's outputs all parse with schema-valid identifiers by
@@ -645,7 +653,7 @@ engine-universal:
   - **kernel v4's persistent interned-stack arena + one-call `hit_pass`** (6.1) —
     memoizing verdicts across token positions (parser configurations recur) and
     assembling the whole allowed-id buffer kernel-side took the warm hit
-    10.9 → 3.5 µs (gpt2), meeting the G7 `< 10 µs` gate on the dev host.
+    10.9 → 3.5 µs (gpt2), under 10 µs per hit on the dev host.
 - **Correctness posture** (`bench/RESULTS-maskbench.md`): XGrammar declares zero
   compile errors but shows **27 validation errors** (valid instances rejected) and 37
   invalidation errors — silent gaps; GRID declares 79 compile errors upfront
@@ -681,32 +689,32 @@ aspiration):
    the cold trie walk (TBM p90 ~28 ms) and, if demand prices it in, a table-build
    kernel for the residual TTFM gap.
 2. **Serving-cache amortization:** GRID's misses cluster at first-seen configurations
-   and the write-back cache carries them across requests — the G8 serving benchmark
-   (batching, CPU/GPU overlap, skip-a-round contract) is where the design choice pays,
-   and no one-shot protocol can show it. The Spider ablation prices the cache at
-   **32% of generation throughput** (`bench/RESULTS-spider-ablations.md`).
+   and the write-back cache carries them across requests — the serving-under-batch-load
+   benchmark (batching, CPU/GPU overlap, skip-a-round contract) is where the design
+   choice pays, and no one-shot protocol can show it. The Spider ablation prices the
+   cache at **32% of generation throughput** (`bench/RESULTS-spider-ablations.md`).
 3. **The feature set llguidance does not offer:** mask-level role/schema projection,
-   the replayable audit chain, guarantee statements with preconditions and gates, and
-   requirement R as a committed, CI-checked contract.
+   the replayable audit chain, guarantee statements with preconditions and verification,
+   and the flat per-token cost as a committed, CI-checked contract.
 
-### 3.5 State of the milestone
+### 3.5 Claims, evidence, and measured status
 
 | Claim | Evidence | Host / conditions | Status |
 |---|---|---|---|
-| Guarantees implemented and gate-tested (masks sound/complete/terminating, RBAC verb+table, audit chain) | gate suite `tests/` (G0–G6 slices, G10a); `LESSONS.md` "Where this leaves us" | local CI + declared-runner scale arms | proven at slice AND at scale (G5 both arms, G6/G6(b), G10 — see the full-scale row below) |
+| Guarantees implemented and verified (masks sound/complete/terminating, RBAC verb+table, audit chain) | verification suite `tests/` (correctness, soundness, RBAC, audit slices); `LESSONS.md` "Where this leaves us" | local CI + declared-runner scale arms | verified at slice AND at scale (soundness/completeness/termination both arms, policy/RBAC enforcement, audit-trail replay — see the full-scale row below) |
 | Kernels bit-identical to executable spec | `tests/trie/test_rust_parity.py`, `tests/mask/test_kernel_parity.py` (order-exact) | any (GRID_NO_RUST toggles) | proven |
-| SQL mask latency vs engines (p50 beats XGrammar both tokenizers; within ~2× llguidance) | `bench/RESULTS.md`, `bench/RESULTS-qwen.md` | local dev, unpinned | measured on laptop + declared cloud runner; G9 KPI exceeded (ratios host-invariant) |
-| Requirement R (flat cost vs position) | `bench/RESULTS-r.md` (slope CIs, 4 depths, n=16k, 20 seeds); warm-replay lines in `RESULTS*.md` | **H100 declared runner, kernel v4** | **Gate G7 MET on the binding host**: hit p50 7.6–8.9 µs (< 10 µs criterion; was 20.9–23.5 µs at v3), slope ≈ 0 all depths, R² ≥ 0.9989 |
+| SQL mask latency vs engines (p50 beats XGrammar both tokenizers; within ~2× llguidance) | `bench/RESULTS.md`, `bench/RESULTS-qwen.md` | local dev, unpinned | measured on laptop + declared cloud runner; cross-engine latency within 2× XGrammar p50 (ratios host-invariant) |
+| Flat per-token cost (latency independent of output position) | `bench/RESULTS-r.md` (slope CIs, 4 depths, n=16k, 20 seeds); warm-replay lines in `RESULTS*.md` | **H100 declared runner, kernel v4** | flat per-token cost confirmed on the binding host: hit p50 7.6–8.9 µs (was 20.9–23.5 µs at v3), slope ≈ 0 all depths, R² ≥ 0.9989 |
 | Kernel v4 (all four §2 symbols) | `grid_core/src/lib.rs` (persistent interned-stack arena + memos + `hit_pass`; `advance_frames` = `lalr_advance`), `tests/mask/test_kernel_parity.py` | any (GRID_NO_RUST toggles) | warm hit 11 → 3.5 µs; parity order-exact incl. config_hash |
 | Kernel v5 (`fill_bits`: scheduler-side bitmask row fill) | `grid_core/src/lib.rs` (pre-packed per-entry ci bit words ++ live CD-pass bits ++ EOS written into vLLM's row in ONE FFI call); parity + poisoned-row-overwrite tests in `tests/mask/test_kernel_parity.py`; serving wiring: cold-only prefetch + shared per-template producer (LESSONS 6.5) | H100, vLLM 0.24 in-engine probe | in-engine warm fills p50 3–13 µs, batch-32 step 708 → 16 ms; parity bit-exact |
-| Kernel v5.1 (verdict-equivalence CD grouping + shared DFS seg buffer + packed-row memo + bytes FFI) | `grid_core/src/lib.rs`, `grid/mask/cache.py`; soundness theorem in `tests/mask/test_verdict_equivalence.py` (group members verdict-indistinguishable at every configuration); `tests/mask/test_adaptive_encode.py` (numpy encode byte-identical, entry_id/G10-stable) | local M-series, Qwen 151k trie | cold CD-heavy mask build 124 → 13.3 ms (9.3×; ~55k singleton groups → ~1.4k verdict classes); warm fill p90 38 → 3.8 µs |
-| Kernel v6 (session-in-kernel accept+fill) | `grid_core/src/lib.rs` sessions (own root→top chain, gen-tagged kidx cache, rollback deltas, ported maximal-munch lexer, memoized status/EOS derivation, (kidx,remainder)→handle bindings); serving gate: kernel present ∧ `audit is None` (audit/processor paths stay v5; `GRID_NO_V6=1` forces v5); differential suite `tests/models/test_v6_session.py` + 200-seed×3-grammar lockstep fuzz (zero divergence); also fixes the v5 post-COMPLETE resurrection (a non-eos token after eos revived a terminated request under spec decode) | local M-series, Qwen 151k trie | warm serving step 7.39 → **1.33 µs**/request (accept 6.16 → 0.56, fill 1.22 → 0.77); confirmed on the declared H100 SXM5 runner: TPOT overhead +0.12/+0.23/**+1.02%** @ batch 1/8/32 — the <2% gate PASSES |
-| Kernel v7 (fused walk→blob→register) | `grid_core/src/lib.rs` `walk_payload`→`register_blob`: blob-build + `adaptive_encode` + blake2b entry_id + registration all inside one GIL-released call; Python gets a handle + thin `MaskEntryV7` shell; `RwLock` entry store (`&self` migration); walk/pool thread niceness (`GRID_WALK_NICE`/`GRID_POOL_NICE`). `GRID_V7` default ON; `=0` byte-identical (entry_id byte-equal, G10-stable); differential + entry-id-parity + cross-producer suites | H100 SXM5 declared runner | per-cold-entry Python GIL **6.8–8.7 → 0.003 ms** (boundary); G8 adversarial max step **50.3 → 15.3 ms PASS**, degradation 114.7 → 33.8%; MaskBench TBM p90 208 → 75 µs; warm path unmoved |
+| Kernel v5.1 (verdict-equivalence CD grouping + shared DFS seg buffer + packed-row memo + bytes FFI) | `grid_core/src/lib.rs`, `grid/mask/cache.py`; soundness theorem in `tests/mask/test_verdict_equivalence.py` (group members verdict-indistinguishable at every configuration); `tests/mask/test_adaptive_encode.py` (numpy encode byte-identical, entry_id/replay-stable) | local M-series, Qwen 151k trie | cold CD-heavy mask build 124 → 13.3 ms (9.3×; ~55k singleton groups → ~1.4k verdict classes); warm fill p90 38 → 3.8 µs |
+| Kernel v6 (session-in-kernel accept+fill) | `grid_core/src/lib.rs` sessions (own root→top chain, gen-tagged kidx cache, rollback deltas, ported maximal-munch lexer, memoized status/EOS derivation, (kidx,remainder)→handle bindings); serving-path condition: kernel present ∧ `audit is None` (audit/processor paths stay v5; `GRID_NO_V6=1` forces v5); differential suite `tests/models/test_v6_session.py` + 200-seed×3-grammar lockstep fuzz (zero divergence); also fixes the v5 post-COMPLETE resurrection (a non-eos token after eos revived a terminated request under spec decode) | local M-series, Qwen 151k trie | warm serving step 7.39 → **1.33 µs**/request (accept 6.16 → 0.56, fill 1.22 → 0.77); confirmed on the declared H100 SXM5 runner: batched TPOT overhead +0.12/+0.23/**+1.02%** @ batch 1/8/32 |
+| Kernel v7 (fused walk→blob→register) | `grid_core/src/lib.rs` `walk_payload`→`register_blob`: blob-build + `adaptive_encode` + blake2b entry_id + registration all inside one GIL-released call; Python gets a handle + thin `MaskEntryV7` shell; `RwLock` entry store (`&self` migration); walk/pool thread niceness (`GRID_WALK_NICE`/`GRID_POOL_NICE`). `GRID_V7` default ON; `=0` byte-identical (entry_id byte-equal, replay-stable); differential + entry-id-parity + cross-producer suites | H100 SXM5 declared runner | per-cold-entry Python GIL **6.8–8.7 → 0.003 ms** (boundary); adversarial cold-miss max step **50.3 → 15.3 ms**, co-batched degradation 114.7 → 33.8%; MaskBench TBM p90 208 → 75 µs; warm path unmoved |
 | JSON-Schema domain (MaskBench) | `bench/RESULTS-maskbench.md` (kernel v7): TBM p50/p75 28/34 µs (p75 parity with llg/xgr), **p90 75 µs** (v3 27.8 ms → v5.1 208 µs → v7 75 µs), p99 7.7 ms, kernels on 100% of schemas, 0 validation errors, 79 compile errors (byte-identical across kernels); TTFM p50 6.0 ms | local dev, llama-3.1 tokenizer, 315 schemas | measured; residual TTFM vs llguidance remains |
-| Spider execution accuracy + repair | 7B full dev (`RESULTS-spider.md`, `RESULTS-spider-repair.md`): grid 91.3%/53.7 EX (reproduced exactly across H100→A10); **grid-repair 94.5% executes / 55.2 EX (+2.3 over unconstrained)**, 21% retry conversion, +14% tokens; 0.5B (`RESULTS-spider-05b.md`): mask +13 EX but feedback worthless (LESSONS 5.4a/b — the capability symmetry, measured both directions). Ablations EX-invariant; cache-off −32% throughput | greedy, H100 + A10 declared runners | measured; grid-repair joins the standard G9 arm set |
-| Full-scale S/C/T + RBAC (G5/G6/G10) | `bench/RESULTS-g5-walk.md` (10k forced-random-walks: 10000/10000 parse, 0 dead-ends, 0 budget overruns, coverage quotas met), `bench/RESULTS-g10.md` (1k generations across a namespace rollover, bit-identical replay + 100% tamper detection), `bench/RESULTS-g6.md` (model-free adversarial speller: 0 RBAC bypasses, positive controls non-vacuous), `bench/RESULTS-g5-model.md` (model-in-loop, 1000/1000 parse + audit, 0 dead-ends), `bench/RESULTS-g6b.md` (12 injection prompts, 0 forbidden lexemes) | model-free: local dev; model-in-loop: H100 declared runner, Qwen2.5-0.5B | all arms green — Gate G5 (both arms), G6 + G6(b), G10 PASS |
-| Serving: vLLM V1 backends + §6 contract (M6) | Mode 2 (logits processor, requires `async_scheduling=False`) and the **scheduler-side backend** (`grid/models/vllm_structured.py` + kernel v5 `fill_bits`) accepted on GPU (H100 + A10). Serving contract realized (`grid/serving/`): cold-only prefetch + E17 single-flight; G8 harness `bench/vllm_serving_bench.py` (warm-through cells, adversarial cold-miss, single-flight; unit-tested metrics); first-run +5151% batched-TPOT pathology diagnosed and fixed (LESSONS 6.5) | vllm 0.24, H100 declared runner, Qwen2.5-7B | `bench/RESULTS-serving.md` (kernel v6, H100 SXM5, 5-repeat, warm-through): `bench/RESULTS-serving.md` (kernel v7, H100 SXM5): G8 **6/7** — TPOT +1.51% @32 PASS, TTFT cold 27.3 / warm 1.51 ms PASS, single-flight PASS; adversarial **max step 15.3 ms PASS** (50.3 pre-stack; thread-invariant 15–18 ms via the v7 fused path). One red: co-batched degradation **+33.8%** vs <5% (was +114.7%) — now genuine host CPU/membw contention between the cold walk and the engine loop in a fresh schema's ~0.66 s window (fresh request 0.7 ms TTFT, 1.00× warm; niceness mitigates, full closure is a compute-isolation tradeoff). Artifact-robust estimators (median/min over legs) over the exogenous vLLM-0.24 freeze, reported upstream (vllm#48229; LESSONS 6.8/6.9). Admission warmup measured GIL-harmful, defaults OFF. Suite 264 green |
-| Deferred by decision | `DESIGN.md` §13: GAD/CRANE, BIRD, byte-level jump-forward, Earley fallback, deadline fallbacks; T2 cache tier (since LANDED); SynCode/GBNF G9 arms (DROPPED by decision 2026-07-10 — G9 KPI already exceeded with the existing arms) | — | recorded with reasons |
+| Spider execution accuracy + repair | 7B full dev (`RESULTS-spider.md`, `RESULTS-spider-repair.md`): grid 91.3%/53.7 EX (reproduced exactly across H100→A10); **grid-repair 94.5% executes / 55.2 EX (+2.3 over unconstrained)**, 21% retry conversion, +14% tokens; 0.5B (`RESULTS-spider-05b.md`): mask +13 EX but feedback worthless (LESSONS 5.4a/b — the capability symmetry, measured both directions). Ablations EX-invariant; cache-off −32% throughput | greedy, H100 + A10 declared runners | measured; grid-repair joins the standard cross-engine comparison arm set |
+| Full-scale soundness/completeness/termination + RBAC + audit | `bench/RESULTS-g5-walk.md` (10k forced-random-walks: 10000/10000 parse, 0 dead-ends, 0 budget overruns, coverage quotas met), `bench/RESULTS-g10.md` (1k generations across a namespace rollover, bit-identical replay + 100% tamper detection), `bench/RESULTS-g6.md` (model-free adversarial speller: 0 RBAC bypasses, positive controls non-vacuous), `bench/RESULTS-g5-model.md` (model-in-loop, 1000/1000 parse + audit, 0 dead-ends), `bench/RESULTS-g6b.md` (12 injection prompts, 0 forbidden lexemes) | model-free: local dev; model-in-loop: H100 declared runner, Qwen2.5-0.5B | all arms verified clean — end-to-end soundness/completeness/termination (both arms), policy/RBAC enforcement (incl. adversarial-prompt arm), audit-trail replay and tamper detection |
+| Serving: vLLM V1 backends + §6 contract | Mode 2 (logits processor, requires `async_scheduling=False`) and the **scheduler-side backend** (`grid/models/vllm_structured.py` + kernel v5 `fill_bits`) accepted on GPU (H100 + A10). Serving contract realized (`grid/serving/`): cold-only prefetch + E17 single-flight; serving-under-batch-load harness `bench/vllm_serving_bench.py` (warm-through cells, adversarial cold-miss, single-flight; unit-tested metrics); first-run +5151% batched-TPOT pathology diagnosed and fixed (LESSONS 6.5) | vllm 0.24, H100 declared runner, Qwen2.5-7B | `bench/RESULTS-serving.md` (kernel v7, H100 SXM5, warm-through): batched TPOT overhead +1.51% @32, TTFT cold 27.3 / warm 1.51 ms, single-flight confirmed; adversarial cold-miss **max step 15.3 ms** (50.3 pre-stack; thread-invariant 15–18 ms via the v7 fused path). Remaining limitation: a fresh, never-before-seen schema induces a **+33.8%** co-batched slowdown (was +114.7%) during its ~0.66 s first-request specialization window — now genuine host CPU/memory-bandwidth contention between the cold grammar walk and the engine loop (fresh request 0.7 ms TTFT, 1.00× warm; niceness mitigates; full elimination is a compute-isolation trade-off, noted as future work). Artifact-robust estimators (median/min over legs) over the exogenous vLLM-0.24 freeze, reported upstream (vllm#48229; LESSONS 6.8/6.9). Admission warmup measured GIL-harmful, defaults OFF. Suite 264 green |
+| Deferred by decision | `DESIGN.md` §13: GAD/CRANE, BIRD, byte-level jump-forward, Earley fallback, deadline fallbacks; T2 cache tier (since LANDED); SynCode/GBNF comparison arms (DROPPED by decision 2026-07-10 — cross-engine latency already favorable with the existing arms) | — | recorded with reasons |
 
 ### Further reading, in order
 

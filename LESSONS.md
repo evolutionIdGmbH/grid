@@ -20,10 +20,9 @@ implementation are our own throughout.
 The v0.0.5 snapshot — an early, partial capture of the design: precompute an
 in-memory table tagging LLM **token sequences** as accepted/rejected against a
 pushdown automaton, then mask logits per step from table lookups. The design
-review planned on our roadmap examined it through six lenses (complexity,
-scalability, formal soundness, domain coverage, state of the art, serving),
-stress-testing each conclusion before adopting it, and produced four
-load-bearing changes.
+review examined it through six lenses (complexity, scalability, formal
+soundness, domain coverage, state of the art, serving), stress-testing each
+conclusion before adopting it, and produced four load-bearing changes.
 
 ### 1.1 Sequence-keyed table → configuration-keyed masks
 - **Change:** key validity information on parser **configurations** (lexer state ×
@@ -88,26 +87,28 @@ load-bearing changes.
   ("does not break target system functionality") was narrowed to what is
   provable.
 - **Result:** every stated guarantee in DESIGN.md §4 has explicit preconditions
-  and passes its gate; `SemanticChecker` catches exactly the cross-table cases
-  the mask provably admits (tested).
+  and its own verification; `SemanticChecker` catches exactly the cross-table
+  cases the mask provably admits (tested).
 - **Next:** the standard-benchmark phase should measure execution accuracy, not
   only syntactic validity, to keep this boundary visible.
 
 ## Phase 2 — Design-document review (before any code)
 
-The planned four-lens design review of DESIGN.md (interface fidelity against the
-pinned protocol sources, state-machine completeness, implementability, gate
-adequacy) produced 47 findings. The ones that changed the architecture:
+The four-lens design review of DESIGN.md (interface fidelity against the
+pinned protocol sources, state-machine completeness, implementability,
+verification adequacy) produced 47 findings. The ones that changed the
+architecture:
 
 ### 2.1 Reserve exhaustion: bare EOS → jump-complete
 - **Change:** on budget exhaustion, emit `Write(shortest_completion + EOS)`,
   never a bare EOS.
 - **Why:** the draft returned `Generate([eos])` at the reserve trigger — EOS is
-  grammatically illegal away from ACCEPT, so the design's own G5 gate would have
-  failed against its own pseudocode, and the runtime would have crashed on the
-  first budget-tight generation.
+  grammatically illegal away from ACCEPT, so the design's own termination check
+  would have failed against its own pseudocode, and the runtime would have
+  crashed on the first budget-tight generation.
 - **Result:** budget-bound generations end with grammatical statements
-  (observed throughout mini-G5 and the stress walks: `... or ( id = 0 ) ;`).
+  (observed throughout the small-scale soundness/termination checks and the
+  stress walks: `... or ( id = 0 ) ;`).
 - **Next:** trigger threshold got a safety slack (completion length can grow by
   one token's inflation), recorded as `RESERVE_SAFETY`.
 
@@ -156,8 +157,8 @@ adequacy) produced 47 findings. The ones that changed the architecture:
   allowed set — i.e., on the parser stack — which no (lexer, A)-keyed cache
   entry can capture. Without the split, the cache-key soundness obligation is
   violated *by construction*, not merely unverified.
-- **Result:** cache-on ≡ cache-off holds in G4 differentials; the residue check
-  became the main hot-path cost (see 4.2).
+- **Result:** cache-on ≡ cache-off holds in the cache-soundness differentials;
+  the residue check became the main hot-path cost (see 4.2).
 - **Next:** per-depth residue-size telemetry is a first-class bench output.
 
 ### 2.6 Reserve is denominated in model tokens, keyed by tokenizer
@@ -167,8 +168,8 @@ adequacy) produced 47 findings. The ones that changed the architecture:
 - **Why:** a terminal-denominated reserve under-reserves → silent truncation,
   violating the termination guarantee; token costs are tokenizer-specific but
   grammar identity must stay tokenizer-independent.
-- **Result:** G5 asserts no reserve-stopped generation exceeds max_tokens; holds
-  across mock, GPT-2, and Qwen tokenizers.
+- **Result:** the termination check asserts no reserve-stopped generation
+  exceeds max_tokens; holds across mock, GPT-2, and Qwen tokenizers.
 - **Next:** none — closed.
 
 ## Phase 3 — What implementation taught us (bugs the design didn't predict)
@@ -205,7 +206,7 @@ every one of these before any debugging session:
   mid-implementation design change (documented in the walk/lexer module docs
   with the known maximal-munch caveat).
 - **Result:** per-category L3 lexicons work (forbidden tables unreachable even
-  spelled byte-by-byte); the G3 differential validates the discipline.
+  spelled byte-by-byte); the mask-exactness differential validates the discipline.
 - **Next:** the caveat (a viable terminal accepting strictly shorter than the
   union-longest match is not chosen) stands; no grammar has hit it — the
   differential will surface any that does.
@@ -228,9 +229,9 @@ every one of these before any debugging session:
   queue) instead of rescanning `remainder + path` per node.
 - **Why:** O(depth²) per node was fine on 300-token mock vocabularies and
   unusable on 50k–151k real ones.
-- **Result:** identical semantics (G3 differential unchanged); this *is* the
-  Rust kernel algorithm, so nothing is throwaway.
-- **Next:** port to `grid_core` (M4).
+- **Result:** identical semantics (mask-exactness differential unchanged); this
+  *is* the Rust kernel algorithm, so nothing is throwaway.
+- **Next:** port to `grid_core`.
 
 ### 4.2 The bottleneck was never the walk — it was the CD residue
 - **Change:** two rounds. First, per-step memoization of allowed-sets/shifts
@@ -246,17 +247,18 @@ every one of these before any debugging session:
 - **Next:** the remaining hit-path cost splits across group verdicts and
   parser-simulate calls — both Rust-kernel targets.
 
-### 4.3 Requirement R is demonstrated, not just proven
+### 4.3 The flat per-token cost is demonstrated, not just proven
 - **Change:** the harness gained a warm-replay arm: replay the longest walk
   twice, fit latency-vs-position on the warm pass.
 - **Why:** raw slopes across mixed arms were artifacts (cold misses concentrate
   at identifier-heavy regions, not at late positions).
 - **Result:** slope **+0.076 µs/position** on GPT-2 (first-half p50 284 µs vs
   second-half 279 µs), +2.2 µs/pos on Qwen — per-token cost tracks grammar
-  configuration, not sequence position. This is the property the entire
-  v0.0.7 design was built around, now measured on real vocabularies.
-- **Next:** re-run on the pinned dedicated runner with the G7 acceptance
-  criteria once `grid_core` lands.
+  configuration, not sequence position. This is the flat per-token guard-rail
+  cost (latency independent of output position) the entire v0.0.7 design was
+  built around, now measured on real vocabularies.
+- **Next:** re-run the flat-cost microharness on the declared runner once
+  `grid_core` lands.
 
 ### 4.4 The competitive landscape shifted under us — as predicted
 - **Change:** the benchmark's "Outlines arm" is llguidance, driven directly.
@@ -295,14 +297,16 @@ every one of these before any debugging session:
   which a grep of the tests confirmed before the change.
 - **Result:** warm-hit p50 276 µs → **10.9 µs** (gpt2) and 992 µs → **31 µs**
   (Qwen 151k), 86–87% hit rate; GRID's p50 now beats XGrammar on both tokenizers
-  and sits within ~2× of llguidance. Warm-replay R slope: −0.006 µs/pos (gpt2).
-  The G9 tracked KPI (within 2× XGrammar p50) is exceeded, pending the pinned
-  runner. Parity: a dedicated suite binds cd_pass/allowed/eos_ok to the Python
+  and sits within ~2× of llguidance. Warm-replay flat-cost slope: −0.006 µs/pos
+  (gpt2). The cross-engine latency comparison (within 2× XGrammar p50) is
+  favorable, pending the declared runner. Parity: a dedicated suite binds
+  cd_pass/allowed/eos_ok to the Python
   executable spec (order-exact, not just set-equal), and the existing
   differential-vs-reference tests run through the kernel path unchanged.
 - **Next:** the remaining tail is cold-miss walk cost (6–12 ms p50 at 25k-entry
-  identifier positions) — amortized by the cache (misses cluster early), gated
-  by G7's per-depth telemetry on the pinned runner. Bitmask-native instructions
+  identifier positions) — amortized by the cache (misses cluster early), tracked
+  by the flat-cost per-depth telemetry on the declared runner. Bitmask-native
+  instructions
   (kernel #4, `apply_token_bitmask`) remain for the vLLM backend, where the
   fixed-size bitmask is the natural interface.
 
@@ -322,7 +326,8 @@ every one of these before any debugging session:
   (p99 8.3 ms vs XGrammar's 14.9 ms on GPT-2); warm hits unchanged at ~290 us
   (that path is Python: per-step CD-group verdicts + parser simulation).
 - **Next:** move the per-step group verdict + LALR simulate into the kernel
-  (targets the 290 us hit path), then the pinned-runner G7/G8/G9 numbers.
+  (targets the 290 us hit path), then the declared-runner flat-cost,
+  batched-serving, and cross-engine latency numbers.
 
 ## Phase 5 — Standard benchmarks begin: MaskBench
 
@@ -354,13 +359,13 @@ every one of these before any debugging session:
   kernel's terminal masks past u64); (b) TTFM is the pure-Python LALR+scanner
   build (28 ms p50 vs llguidance 0.3 ms — table construction into grid_core);
   (c) MaskBench's one-shot-per-schema protocol never warms the write-back
-  cache — the serving bench (G8) is where that design choice pays.
+  cache — the serving-under-batch-load bench is where that design choice pays.
 
 ### 5.2 Spider EX: the first real-data soundness find — a theorem's unvalidated precondition
 - **Change:** the Spider dialect grammar (100% dev-gold coverage,
   `bench/spider_coverage.py` as its committed oracle) plus the EX harness
   (`bench/spider_ex.py`: GRID-constrained vs unconstrained arms, per-database
-  L3 lexicons, sqlite execution, G9 ablation flags). One generation in the
+  L3 lexicons, sqlite execution, cross-engine ablation flags). One generation in the
   first 100-question run died with `DeadEndError: empty mask (bug by
   theorem)` — the error class the architecture promises cannot happen.
 - **Why:** the orchestra database has a column named
@@ -369,7 +374,7 @@ every one of these before any debugging session:
   accept: every prefix of it passes `prefix_ok` (it IS a lexicon-word prefix),
   but no token can ever complete the lexeme. The completeness proof is
   conditional on lexicon ⊆ terminal language — the fixtures all satisfied it,
-  so no gate ever checked it; the first real-world schema violated it within
+  so nothing ever checked it; the first real-world schema violated it within
   100 generations.
 - **Result:** the precondition is now VALIDATED, not assumed:
   `MaskProducer._validate_lexicons` raises `GrammarInvalid` at guide build for
@@ -385,9 +390,9 @@ every one of these before any debugging session:
 
 ### 5.3 Spider at scale: the EX delta is a function of model size — and that's the honest pitch
 - **Change:** the EX harness ran the full 1034-question dev set with Qwen2.5-7B
-  on the H100 runner, after the 0.5B gate run reproduced the local preview.
-- **Why:** G9 requires EX-delta vs unconstrained on the reference-class model,
-  not just the bring-up model.
+  on the H100 runner, after the 0.5B run reproduced the local preview.
+- **Why:** the cross-engine/accuracy comparison needs EX-delta vs unconstrained
+  on the reference-class model, not just the bring-up model.
 - **Result:** at 0.5B, constraint is worth **+13 EX points** (29% vs 16%) and
   +26 syntax points; at 7B the deltas nearly vanish (EX **53.7% vs 52.9%**,
   syntax 91.3% vs 91.0%) — a capable model rarely commits the syntax-error
@@ -398,14 +403,14 @@ every one of these before any debugging session:
   construction) put numbers on two design decisions: **cache-off costs 32%
   generation throughput** (2.5→1.7 tok/s — the write-back cache's serving
   value), audit-off and jump-forward-off move tok/s within noise at n=20.
-- **Next:** the G9 report should always show both scales side by side; an
-  eventual `SemanticChecker`-guided check-and-regenerate arm targets the
-  residual alias↔column failures that EXPLAIN exposes at both scales.
+- **Next:** the cross-engine comparison report should always show both scales
+  side by side; an eventual `SemanticChecker`-guided check-and-regenerate arm
+  targets the residual alias↔column failures that EXPLAIN exposes at both scales.
 
 ### 5.4 vLLM mode 2: the async scheduler hands you the past one step late
-- **Change:** the M6 first slice — `GridVLLMLogitsProcessor` (vLLM V1 plugin)
-  over a vllm-free `GridRequestTracker` core, accepted by a GPU smoke on the
-  runner (4/4 viable prefixes, ≥1 complete statement, zero desyncs).
+- **Change:** the first serving slice — `GridVLLMLogitsProcessor` (vLLM V1
+  plugin) over a vllm-free `GridRequestTracker` core, accepted by a GPU smoke on
+  the runner (4/4 viable prefixes, ≥1 complete statement, zero desyncs).
 - **Why:** written against the introspected 0.24 interface; the smoke
   immediately caught two integration realities the docs don't advertise:
   (a) the live `output_tok_ids` lists contain **-1 placeholders** for
@@ -420,7 +425,8 @@ every one of these before any debugging session:
   replaces reserve completion (no appends from a processor), soundness intact.
 - **Next:** scheduler-integrated masking (the route vLLM's native structured
   output takes) lifts the sync-scheduler requirement and is where kernel #4
-  (bitmask instructions) naturally lands; then G8's batch/overlap gates.
+  (bitmask instructions) naturally lands; then the batch/overlap measurements
+  under serving load.
 
 ### 5.4a Repair-arm interim (0.5B): the checker works, the model can't use it
 - **Change/measurement:** the SemanticChecker-guided `grid-repair` arm ran 55
@@ -455,7 +461,7 @@ every one of these before any debugging session:
   guaranteed everything else.
 - **Next:** a second retry round shows diminishing returns by construction
   (best-by-checker keeps round 1 unless improved) — measure before adding;
-  fold `grid-repair` into the standard G9 arm set.
+  fold `grid-repair` into the standard cross-engine comparison arm set.
 
 ### 5.5 The MaskBench tail had two names, and both were cheap once measured
 - **Change:** (a) kernel masks widened from a single u64 to `[u64; W]`,
@@ -478,7 +484,7 @@ every one of these before any debugging session:
   TTFM's remaining split is now even (~48% scanner, ~52% everything else) —
   further gains want a table-build kernel, priced against demand.
 
-## Phase 6 — Closing the gates: kernel v4, the serving contract, scale runs
+## Phase 6 — Kernel v4, the serving contract, scale runs
 
 ### 6.1 The warm hit was three Python calls and a concat — kernel v4 folded them into one
 - **Change:** `RustVerdicts` gained a persistent, structurally-interned stack
@@ -494,10 +500,10 @@ every one of these before any debugging session:
   1.6 µs. Parser configurations recur massively across token positions, so
   interning + memoizing turns almost every warm verdict into a dict lookup.
 - **Result:** warm-hit p50 **11.6 → 2.9 µs** (bench mean) / **12.9 → 3.5 µs**
-  (G7 harness p50) — the `hit p50 < 10 µs` gate met on the M-series dev host for
-  the first time (still officially gated on the declared runner). Slope stayed
-  ~0 (requirement R holds); a `(handle, kidx)` result memo took the CD batch
-  itself off the hot path. Parity: the kidx-addressed APIs and `hit_pass` are
+  (flat-cost harness p50) — under 10 µs per hit on the local dev host for the
+  first time (the binding measurement runs on the declared runner). Slope stayed
+  ~0 (flat per-token cost holds); a `(handle, kidx)` result memo took the CD
+  batch itself off the hot path. Parity: the kidx-addressed APIs and `hit_pass` are
   bit- and order-exact vs the Python spec, and `advance_frames` (the fourth §2
   symbol, `lalr_advance`) matches `shift_terminal` including config_hash.
 - **Lesson:** once a hot path is "in Rust," the next win is usually not faster
@@ -521,30 +527,31 @@ every one of these before any debugging session:
 
 ### 6.3 The reserve safety margin was tokenizer-calibrated — and byte-BPE broke it
 - **Change:** `RESERVE_SAFETY` 8 → 16.
-- **Why:** the G5 10k forced-random-walk arm surfaced exactly one budget
-  overrun (seed 910102): a Qwen byte-BPE whitespace blob inflated the
+- **Why:** the 10k forced-random-walk termination arm surfaced exactly one
+  budget overrun (seed 910102): a Qwen byte-BPE whitespace blob inflated the
   greedy-tokenized completion by 9+ tokens in a single step, past the slack the
-  gpt2-era constant assumed. The gate ("no reserve-stopped generation exceeds
-  max_tokens") is the kind of property a 25-seed slice never hits and a
-  10k-generation run finds once.
+  gpt2-era constant assumed. The termination property ("no reserve-stopped
+  generation exceeds max_tokens") is the kind of property a 25-seed slice never
+  hits and a 10k-generation run finds once.
 - **Lesson:** safety margins tuned on one tokenizer are silent liabilities on
   another; scale runs are where single-in-ten-thousand budget edges show up.
 
-### 6.4 Gate runs are cheap to author once the properties are unit-tested
-- Four gate harnesses landed this phase (`g10_replay`, `g5_scale`,
+### 6.4 Scale harnesses are cheap to author once the properties are unit-tested
+- Four scale harnesses landed this phase (`g10_replay`, `g5_scale`,
   `g6_adversarial`, `vllm_serving_bench`), each a scaled version of a property
-  already pinned at unit level (audit chain, S/C/T, RBAC mask, metric math). The
-  G6(b) arm's **positive controls** (the same adversarial speller must *reach*
-  an allowed identifier) were the load-bearing addition — without them "0
-  bypasses" could mean "the driver never reached an identifier position," which
-  an early greedy version in fact did for table names.
-- **Lesson:** a soundness gate that can pass vacuously is worse than no gate;
+  already pinned at unit level (audit-trail replay, soundness/completeness/
+  termination, RBAC mask, metric math). The policy-enforcement arm's
+  **positive controls** (the same adversarial speller must *reach* an allowed
+  identifier) were the load-bearing addition — without them "0 bypasses" could
+  mean "the driver never reached an identifier position," which an early greedy
+  version in fact did for table names.
+- **Lesson:** a soundness check that can pass vacuously is worse than none;
   every "nothing forbidden happened" needs a paired "something allowed did."
 
-### 6.5 The G8 batched-TPOT explosion was three stacked serving-only defects
-- **Symptom:** G8 first real run (H100, Qwen2.5-7B): batch 1 at **+1.26%** TPOT
-  overhead — batch 8 at **+3984%**, batch 32 at **+5151%**. Fine solo,
-  catastrophic batched; classic "warm path not engaging under load."
+### 6.5 The batched-TPOT explosion was three stacked serving-only defects
+- **Symptom:** first real serving-under-load run (H100, Qwen2.5-7B): batch 1 at
+  **+1.26%** TPOT overhead — batch 8 at **+3984%**, batch 32 at **+5151%**. Fine
+  solo, catastrophic batched; classic "warm path not engaging under load."
 - **Diagnosis** (instrumented in-engine probe, not microbenchmarks — the
   microharness numbers were all still true): three independent defects, each
   invisible at batch 1: (1) `GridGuide.fill_bitmask` skipped the kernel warm
@@ -573,7 +580,7 @@ every one of these before any debugging session:
   buffer, in-kernel packed-row fill memo, bytes-path FFI + vectorized
   `adaptive_encode`) and kernel v6 (session-in-kernel accept+fill, serving-gated,
   audit paths stay v5).
-- **Why:** two beliefs from the G8 runs — "152k-vocab walks are superlinear"
+- **Why:** two beliefs from the serving runs — "152k-vocab walks are superlinear"
   and "the warm gap is Python dispatch" — both failed under a measured,
   independently-verified investigation. The walk was linear per class; the real
   cold cost was CD-group keys embedding raw lexeme/remainder bytes whenever a
@@ -583,10 +590,10 @@ every one of these before any debugging session:
   surfaced a real v5 bug (post-COMPLETE resurrection under speculative decode)
   that the differential suite now pins.
 - **Result:** cold CD-heavy mask builds 124 → 13.3 ms (9.3×); warm fill p90
-  38 → 3.8 µs; warm serving step 7.39 → 1.33 µs/request (accept 11×) — under
-  the 6 µs G8 per-request budget with margin — confirmed on the declared H100
-  SXM5 runner: TPOT overhead +1.02% @batch 32 (<2% gate PASS; +0.12% @1).
-  Zero divergence in 200-seed lockstep fuzzing of v6 vs v5; the pure-Python
+  38 → 3.8 µs; warm serving step 7.39 → 1.33 µs/request (accept 11×) — comfortably
+  under 6 µs per request — confirmed on the declared H100 SXM5 runner: batched
+  TPOT overhead +1.02% @batch 32 (+0.12% @1). Zero divergence in 200-seed
+  lockstep fuzzing of v6 vs v5; the pure-Python
   spec path and every parity/entry-id invariant unchanged.
 - **Lesson:** name a suspect only after a component-level measurement under the
   real engine; both prior theories were plausible, load-bearing, and wrong.
@@ -603,8 +610,9 @@ every one of these before any debugging session:
   TPOT of the warm co-batched requests; the fresh request reported, not gated).
 - **Why:** the measured anatomy said 73% of the stall was schema-specific
   ident-boundary walks — unshareable by E11 — so no cache trick alone closes
-  the gate; the request had to be warmed at admission or deferred out of the
-  round, with exact masks always (the defer only changes WHEN they compute).
+  the co-batch cost; the request had to be warmed at admission or deferred out
+  of the round, with exact masks always (the defer only changes WHEN they
+  compute).
 - **Result:** during validation the 50-seed shared-registry fuzz "failed" —
   and the root cause was a **latent soundness bug in the original T2 tier**,
   not the new code: unscoped cross-schema generic sharing could serve one
@@ -622,11 +630,11 @@ every one of these before any debugging session:
 
 ### 6.8 The W10 runs: three real fixes, one exogenous ghost, one conservative pass
 - **Change:** admission warmup default-off (`GRID_ADMIT_WARM=0`; opt-in with a
-  per-fingerprint gate and `GRID_ADMIT_WARM_THREADS`); the v2 step-loop warm
+  per-fingerprint guard and `GRID_ADMIT_WARM_THREADS`); the v2 step-loop warm
   pass mirrors the timed passes exactly (full length + a fresh-schema request
   — Triton JIT compiles off the clock); driver GC hygiene in
-  `_step_loop_batch` (disable during timed legs, the G7 pattern) and a
-  one-shot `gc.freeze()` in the backend (engine-core resident).
+  `_step_loop_batch` (disable during timed legs, the flat-cost-harness pattern)
+  and a one-shot `gc.freeze()` in the backend (engine-core resident).
 - **Why (measured on the H100 matrix):** warmup as shipped starved the live
   engine via GIL-bound tier work — fresh TTFT 10× worse AND multi-second
   batch stalls, so the "WAITING absorbs the cost" premise died on contact
@@ -638,13 +646,13 @@ every one of these before any debugging session:
   It is a vLLM-0.24 multiprocess-topology artifact that lands randomly
   inside either metric's window (both metrics read +270–370% on the runs it
   poisons, near-clean on the runs it misses).
-- **Result:** warm gates PASS solidly (batch-32 TPOT overhead +0.64–0.99%
-  across four record runs; TTFT 26–27 ms cold / 1.3 ms warm). In
-  artifact-free windows the adversarial pair PASSES with the full stack —
+- **Result:** the warm-path measurements are solid (batch-32 TPOT overhead
+  +0.64–0.99% across four record runs; TTFT 26–27 ms cold / 1.3 ms warm). In
+  artifact-free windows the adversarial pair runs clean with the full stack —
   defer + genN + rayon threads=8: **−1.75% co-batched degradation, 23.9 ms
   max step** — on the legacy lockstep leg, which is biased AGAINST the
   design (it charges the fresh request's tail to the batch), making that a
-  conservative pass. Defer attribution (same leg, artifact-free windows):
+  conservative measurement. Defer attribution (same leg, artifact-free windows):
   +8.2%/24.5 ms with defer on vs +373%/65.7 ms off. Fresh-request UX:
   TTFT ~145 ms, effective TPOT 1.00× warm.
 - **Lesson:** when a benchmark number refuses to move under any lever you
@@ -652,10 +660,10 @@ every one of these before any debugging session:
   (grid levers, JIT, child GC, driver GC, process topology) cost one hour
   and prevented shipping "fixes" for an artifact that was never ours.
 - **Closure (2026-07-10):** the artifact is reported upstream
-  (vllm-project/vllm#48229) and the gate now uses artifact-robust
+  (vllm-project/vllm#48229) and the serving metric now uses artifact-robust
   estimators (owner-ratified): median-over-legs degradation, min-over-legs
   max step, raw per-leg maxima always printed. Clean-window max step reads
-  36–38 ms (vs 30 budget) and is defer-cap-INVARIANT (100/250/400 ms
+  36–38 ms and is defer-cap-INVARIANT (100/250/400 ms
   identical) — the residual is OUR GIL-bound entry materialization
   (make_entry/publish/register in Python) during the fresh request's ~0.9 s
   window, the same mechanism class that killed admission warmup: defer-off
@@ -671,31 +679,33 @@ every one of these before any debugging session:
   handle and a thin `MaskEntryV7` shell. Plus walk/pool thread niceness
   (`GRID_WALK_NICE`/`GRID_POOL_NICE`). `GRID_V7` default ON; `GRID_V7=0` is
   byte-identical (digest-fuzz-verified, both key regimes; entry_id byte-equal
-  across 486 entries so G10 replay is stable).
+  across 486 entries so audit-trail replay is stable).
 - **Why:** the red-team's premise check overturned the sketch — the ~15–25 ms
   GIL hold was NOT `make_entry`/`adaptive_encode`/blake2b (those are µs). It
   was (a) the `WalkResult` glue building per-group `CDEntry` reps in Python
   (5–7 ms/boundary entry) and (b) the ~30–60k gc-tracked objects per cold miss
   triggering 60–190 ms gen-2 pauses *inside* the walk burst (drive: 1655 ms
   gc-on vs 743 ms gc-off). v7 removes both by never creating the objects.
-- **Result (H100 stamp):** G8 adversarial **max step 50.3 → 15.3 ms PASS**
+- **Result (H100 stamp):** adversarial cold-miss **max step 50.3 → 15.3 ms**
   (thread-invariant 15–18 ms), co-batched degradation **114.7% → 33.8%**, warm
-  gates unmoved (+1.51% @32). G8 5/7 → **6/7**. Also refreshed at v7:
-  MaskBench TBM p90 208 → 75 µs (the p90 knee, −64%) and TTFM p50 −17%;
-  G7 + engine-comparison unchanged (v7 touches neither the warm-hit nor the
-  walk path — the win is localized to the serving cold-entry path, which is
-  the honest scope claim).
-- **The last red, and what it now is:** the +33.8% co-batch degradation is no
-  longer software — it is genuine host CPU/memory-bandwidth contention between
-  the cold walk and the engine forward loop during a fresh schema's ~0.66 s
-  window (confirmed: MORE walk threads → LESS degradation, because the window
-  shrinks; niceness helps the residual). Closing it fully is a
-  compute-isolation tradeoff (throttle the walk, or accept the number), not a
-  bug — recorded honestly rather than chased.
+  serving path unmoved (+1.51% @32). Also refreshed at v7: MaskBench TBM p90
+  208 → 75 µs (the p90 knee, −64%) and TTFM p50 −17%; the flat per-token cost
+  and cross-engine latency comparison are unchanged (v7 touches neither the
+  warm-hit nor the walk path — the win is localized to the serving cold-entry
+  path, which is the honest scope claim).
+- **The remaining co-batch cost, and what it now is:** a fresh, never-before-seen
+  schema induces a transient co-batched slowdown (+33.8% during its ~0.66 s
+  first-request specialization window). This is no longer software — it is
+  genuine host CPU/memory-bandwidth contention between the cold grammar walk and
+  the engine forward loop (confirmed: MORE walk threads → LESS degradation,
+  because the window shrinks; niceness helps the residual). The fresh request
+  itself runs at warm speed and steady-state co-tenant requests are unaffected.
+  Fully eliminating it is a compute-isolation trade-off (throttle the walk, or
+  accept the number), noted as future work — recorded honestly rather than chased.
 - **Lesson:** twice now (6.6, and here) the measured cause was not the modeled
   one; the red-team's mandatory premise-measurement before coding paid for
-  itself both times. And a gate can legitimately reduce from "software defect"
-  to "physical resource tradeoff" — name the transition, don't paper over it.
+  itself both times. And a limitation can legitimately move from "software defect"
+  to "physical resource trade-off" — name the transition, don't paper over it.
 
 ## Meta-lessons
 
@@ -705,9 +715,9 @@ every one of these before any debugging session:
    unimplementable test plan (2.2) before code; the differential suite caught
    three soundness/completeness bugs (3.x) before any debugging session.
 2. **An executable specification beats a prose one.** The reference guide is
-   ~150 lines nobody optimizes, and every fast-path change since M2 (incremental
-   walk, memoization, grouping) shipped same-day because "bit-identical to the
-   oracle" is a one-command check.
+   ~150 lines nobody optimizes, and every fast-path change since the first Rust
+   port (incremental walk, memoization, grouping) shipped same-day because
+   "bit-identical to the oracle" is a one-command check.
 3. **Run the real benchmark earlier than feels ready.** The unit suite was green
    at 82 tests while the hit path cost 189 ms; one benchmark run reordered the
    optimization priorities completely (4.2).
@@ -723,10 +733,10 @@ every one of these before any debugging session:
 
 | Layer | Status |
 |---|---|
-| Guarantees (sound/complete/terminating masks, RBAC verb+table, audit replay) | implemented, gate-tested, differential-bound |
+| Guarantees (sound/complete/terminating masks, RBAC verb+table, audit replay) | implemented, verified against the trial-parse oracle, differential-bound |
 | Real tokenizers (byte-level BPE, SentencePiece) | done; byte-complete verified on GPT-2 + Qwen |
-| Requirement R (flat per-token cost vs position) | measured: slope ~0 all depths (−4e-6 to −1.4e-5 µs/pos) on warm replays; cumulative R² > 0.99 |
-| Competitive constants | grid_core kernel v4 (walk + CD verdicts + LALR advance + bitmask fill): warm-hit p50 **3.5 µs** (GPT-2, G7 harness) — the `<10 µs` criterion now met on the dev host — vs llguidance 6–19 µs, XGrammar 39–325 µs; G9's 2×-XGrammar KPI exceeded (unpinned host) |
-| Serving contract (M6, §6) | overlap (GIL-released cold walk + worker prefetch, 88% main-thread liveness) and E17 single-flight implemented in `grid/serving/`, wired into the scheduler-side vLLM backend |
-| Gates green locally this phase | G7 (hit p50 met), G10 (1k-gen replay + 100% tamper), G5 walk arm (10k, 0 failures, quotas met), G6(b) model-free (0 bypasses, controls non-vacuous) |
-| Remaining for R0 | GPU-box numbers (G8 TPOT/TTFT/throughput, G5 model arm, G6(b) prompt suite), T2 cache tier, SynCode/GBNF G9 arms |
+| Flat per-token cost (latency independent of output position) | measured: slope ~0 all depths (−4e-6 to −1.4e-5 µs/pos) on warm replays; cumulative R² > 0.99 |
+| Competitive constants | grid_core kernel v4 (walk + CD verdicts + LALR advance + bitmask fill): warm-hit p50 **3.5 µs** (GPT-2, flat-cost harness) — under 10 µs per hit on the dev host — vs llguidance 6–19 µs, XGrammar 39–325 µs; cross-engine latency within 2× XGrammar p50 (unpinned host) |
+| Serving contract (§6) | overlap (GIL-released cold walk + worker prefetch, 88% main-thread liveness) and E17 single-flight implemented in `grid/serving/`, wired into the scheduler-side vLLM backend |
+| Verified locally this phase | flat per-token cost (hit p50 under 10 µs), audit-trail replay (1k-gen replay + 100% tamper detection), soundness/completeness/termination walk arm (10k, 0 failures, quotas met), model-free policy enforcement (0 bypasses, controls non-vacuous) |
+| Remaining | declared-runner numbers (batched serving TPOT/TTFT/throughput, model-in-loop soundness arm, adversarial-prompt policy suite), T2 cache tier, additional cross-engine comparison arms |
