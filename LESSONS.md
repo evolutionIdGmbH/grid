@@ -664,6 +664,39 @@ every one of these before any debugging session:
   materialization in Rust); until then the cost is bounded, transient
   (once per never-seen schema), and documented rather than hidden.
 
+### 6.9 Kernel v7: the fused walk→blob→register path, and where the wall really was
+- **Change:** the cold mask miss now stays in Rust end to end — `walk_payload`
+  returns (ci bytes, an opaque group blob), `register_blob` parses+builds+
+  encodes+hashes+registers all inside one GIL-released call; Python gets a
+  handle and a thin `MaskEntryV7` shell. Plus walk/pool thread niceness
+  (`GRID_WALK_NICE`/`GRID_POOL_NICE`). `GRID_V7` default ON; `GRID_V7=0` is
+  byte-identical (digest-fuzz-verified, both key regimes; entry_id byte-equal
+  across 486 entries so G10 replay is stable).
+- **Why:** the red-team's premise check overturned the sketch — the ~15–25 ms
+  GIL hold was NOT `make_entry`/`adaptive_encode`/blake2b (those are µs). It
+  was (a) the `WalkResult` glue building per-group `CDEntry` reps in Python
+  (5–7 ms/boundary entry) and (b) the ~30–60k gc-tracked objects per cold miss
+  triggering 60–190 ms gen-2 pauses *inside* the walk burst (drive: 1655 ms
+  gc-on vs 743 ms gc-off). v7 removes both by never creating the objects.
+- **Result (H100 stamp):** G8 adversarial **max step 50.3 → 15.3 ms PASS**
+  (thread-invariant 15–18 ms), co-batched degradation **114.7% → 33.8%**, warm
+  gates unmoved (+1.51% @32). G8 5/7 → **6/7**. Also refreshed at v7:
+  MaskBench TBM p90 208 → 75 µs (the p90 knee, −64%) and TTFM p50 −17%;
+  G7 + engine-comparison unchanged (v7 touches neither the warm-hit nor the
+  walk path — the win is localized to the serving cold-entry path, which is
+  the honest scope claim).
+- **The last red, and what it now is:** the +33.8% co-batch degradation is no
+  longer software — it is genuine host CPU/memory-bandwidth contention between
+  the cold walk and the engine forward loop during a fresh schema's ~0.66 s
+  window (confirmed: MORE walk threads → LESS degradation, because the window
+  shrinks; niceness helps the residual). Closing it fully is a
+  compute-isolation tradeoff (throttle the walk, or accept the number), not a
+  bug — recorded honestly rather than chased.
+- **Lesson:** twice now (6.6, and here) the measured cause was not the modeled
+  one; the red-team's mandatory premise-measurement before coding paid for
+  itself both times. And a gate can legitimately reduce from "software defect"
+  to "physical resource tradeoff" — name the transition, don't paper over it.
+
 ## Meta-lessons
 
 1. **Systematic, planned review at every phase paid for itself.** The Phase-1

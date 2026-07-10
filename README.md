@@ -101,7 +101,7 @@ XGrammar 587 µs; GRID p90 113 µs vs llguidance 386 µs.
   logits-processor wrapper (bitmask fill + apply). JSON-schema and regex default to
   `outlines_core`.
 - **Serving TTFT/TPOT @ batch:** measured on the declared runner —
-  [`bench/RESULTS-serving.md`](bench/RESULTS-serving.md) (G8, 5/7 criteria; see
+  [`bench/RESULTS-serving.md`](bench/RESULTS-serving.md) (G8, 6/7 criteria; see
   the serving section below); Spider EX and the ablation arms are covered below.
 
 **MaskBench** (guidance-ai/jsonschemabench, JSON-Schema mask computation —
@@ -115,14 +115,15 @@ GRID participates via a JSON-Schema→`.grid` compiler
 (`bench/json_schema_to_grid.py`) and a protocol-exact runner
 (`bench/maskbench_grid.py`; arms: GRID, llguidance, XGrammar-compliant;
 llama-3.1 tokenizer; 315-schema stratified sample of the 11.3k corpus).
-Headlines at kernel v6 (refreshed 2026-07-10; correctness columns byte-identical
+Headlines at kernel v7 (refreshed 2026-07-10; correctness columns byte-identical
 to the v3-era record, comparison arms moved <10%):
-**TBM p50/p75 31/38 µs** vs llguidance 10/21 and XGrammar 11/30 — parity
+**TBM p50/p75 28/34 µs** vs llguidance 10/21 and XGrammar 11/30 — parity
 through p75, kernels active on **100%** of compiled schemas; **TBM p90
-208 µs / p99 8.3 ms** (was 27.8 ms / 30.2 ms at v3 — the cold trie-walk tail
-the old report named as the next target, cut 134×/3.6× by the v5.1
-verdict-equivalence grouping); TBM average 683 µs (was 4.4 ms); **TTFM p50
-7.2 ms** (was 13 ms) / p99 320 ms — still behind llguidance's 0.3 ms but far
+75 µs / p99 7.7 ms** (was 27.8 ms / 30.2 ms at v3 — the cold trie-walk tail
+the old report named as the next target, cut by the v5.1 verdict-equivalence
+grouping (→208 µs p90) then the v7 fused walk→blob→register path (208→75 µs,
+a further 2.8× on the p90 knee); TBM average 562 µs (was 4.4 ms); **TTFM p50
+6.0 ms** (was 13 ms) / p99 302 ms — still behind llguidance's 0.3 ms but far
 ahead of XGrammar's p75+ blowups (2.4 ms → 13.4 s); **zero validation
 errors** on every schema GRID compiles — the only engine that never falsely
 rejected a valid instance (llguidance 3, XGrammar 27); honest compile-error
@@ -244,18 +245,24 @@ p50 < 10 µs); **G10** full audit replay (1,000 generations across a namespace
 rollover, bit-identical, 100% tamper detection); **G5 both arms** (10k
 model-free walks + 1,000 model-in-loop generations: all parse, audit-verified,
 0 dead-ends); **G6 + G6(b)** (0 RBAC bypasses, model-free and prompt-suite).
-**G8** ([`bench/RESULTS-serving.md`](bench/RESULTS-serving.md), kernel v6,
-H100 SXM5): **5/7** — **TPOT overhead +1.02% @batch 32 (+0.12% @1, +0.23% @8)
-PASSES the <2% gate**; TTFT cold specialize ~26 ms / warm ~1.3 ms pass; both
-single-flight criteria pass. The adversarial cold-miss pair passes with the
-full cold-schema stack — the §6 skip-a-round defer realized as a scheduler
-mask-readiness guard, genN key normalization, and rayon-parallel walks:
-**−1.75% co-batched degradation, 23.9 ms max step** in artifact-free windows
-(the gate uses artifact-robust estimators — median/min over legs — because
-vLLM 0.24's multiprocess engine exhibits a once-per-leg 0.7–2 s frozen step
-that fires with zero grid work and is reported upstream; `LESSONS.md` 6.8).
-A fresh schema pays ~145 ms TTFT and then runs at 1.00× warm speed — zero
-co-tenant interference by design. The SynCode/GBNF G9 arms are dropped by
-decision (2026-07-10; the G9 KPI was already exceeded with the existing
-arms). Remaining before the R0 release gate: the paper (in draft). See
-`DESIGN.md` §11, `LESSONS.md`, and `ONBOARDING.md`.
+**G8** ([`bench/RESULTS-serving.md`](bench/RESULTS-serving.md), kernel v7,
+H100 SXM5): **6/7** — **TPOT overhead +1.51% @batch 32 PASSES the <2% gate**;
+TTFT cold specialize 27 ms / warm 1.5 ms pass; both single-flight criteria
+pass. The full cold-schema stack — the §6 skip-a-round defer as a scheduler
+mask-readiness guard, genN key normalization, rayon-parallel walks, and the
+kernel-v7 fused walk→blob→register path — closes the adversarial **max-step**
+criterion: **15.3 ms** (was 50.3 ms pre-stack; thread-invariant 15–18 ms),
+under the 30 ms budget. The one remaining red is the co-batched degradation
+(**+33.8%** vs the <5% gate), now cut from +114.7% and reduced from a
+GIL/software cost to genuine host CPU/memory-bandwidth contention between the
+cold walk and the engine loop during a fresh schema's ~0.66 s window (the
+fresh request itself: 0.7 ms TTFT, 1.00× warm effective TPOT — zero
+steady-state interference; walk/pool thread niceness mitigates, full closure
+is a compute-isolation tradeoff). The gate uses artifact-robust estimators
+(median/min over legs) because vLLM 0.24's multiprocess engine exhibits a
+once-per-leg 0.7–2 s frozen step, reported upstream
+([vllm#48229](https://github.com/vllm-project/vllm/issues/48229);
+`LESSONS.md` 6.8). The SynCode/GBNF G9 arms are dropped by decision
+(2026-07-10; the G9 KPI was already exceeded). Remaining before R0: closing
+the last adversarial criterion (compute isolation) and the paper (in draft).
+See `DESIGN.md` §11, `LESSONS.md`, and `ONBOARDING.md`.
