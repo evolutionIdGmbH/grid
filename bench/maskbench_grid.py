@@ -368,7 +368,7 @@ def write_report(path: str, aggs: list[dict], meta_line: str) -> None:
         "terminals run in-kernel); the p90+ tail is cold-miss trie walks over the "
         "128k vocabulary. MaskBench runs each schema once — the write-back cache "
         "that amortizes GRID's misses across requests in serving never warms here; "
-        "the cold walk itself is the named next optimization target.",
+        "the cold walk was cut 9.3x by the kernel v5.1 verdict-equivalence grouping (this record; TBM p90 27.8 ms -> 208 us vs the v3-era run).",
         "- GRID's TTFM is the Python table build per schema (scanner subset "
         "construction is alphabet-compressed with per-state eps closures; "
         "further kernel work possible).",

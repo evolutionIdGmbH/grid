@@ -29,3 +29,10 @@ tmp/
 
 # Rust build artifacts
 grid_core/target/
+
+# LaTeX build artifacts
+paper/*.aux
+paper/*.log
+paper/*.bbl
+paper/*.blg
+paper/*.out

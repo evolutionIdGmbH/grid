@@ -29,6 +29,7 @@ Run:  .venv-bench/bin/python bench/compare_engines.py --out bench/RESULTS.md
 from __future__ import annotations
 
 import argparse
+import os
 import pathlib
 import random
 import statistics
@@ -341,8 +342,9 @@ def write_report(path: str, tokenizer: str, replays, results: dict) -> None:
         "# GRID vs XGrammar vs llguidance vs Outlines — SQL-subset constrained decoding",
         "",
         f"Tokenizer: `{tokenizer}` | replays: {len(replays)} "
-        f"({sum(len(s) for _, s in replays)} steps total) | host: local dev (unpinned — "
-        "G7/G9 bind on the declared cloud runner)",
+        f"({sum(len(s) for _, s in replays)} steps total) | host: "
+        + os.environ.get("GRID_HOST_LABEL",
+                         "local dev (unpinned — G7/G9 bind on the declared cloud runner)"),
         "",
         "GRID's hot path runs in grid_core Rust kernels: the trie walk (in-kernel CD "
         "grouping + alias expansion) and the per-step CD-group verdicts + LALR simulate; "

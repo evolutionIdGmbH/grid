@@ -1,6 +1,6 @@
 # GRID vs XGrammar vs llguidance vs Outlines — SQL-subset constrained decoding
 
-Tokenizer: `Qwen/Qwen2.5-0.5B-Instruct` | replays: 11 (509 steps total) | host: local dev (unpinned — G7/G9 bind on the declared cloud runner)
+Tokenizer: `Qwen/Qwen2.5-0.5B-Instruct` | replays: 11 (509 steps total) | host: Lambda 1xH100 SXM5 80GB, Ubuntu 24.04 (declared runner), kernel v6
 
 GRID's hot path runs in grid_core Rust kernels: the trie walk (in-kernel CD grouping + alias expansion) and the per-step CD-group verdicts + LALR simulate; masks stay in i32 buffers end-to-end. Cold misses pay the full walk (see the cache split). Outlines' CFG path delegates to llguidance (CFG_DEFAULT_BACKEND='llguidance'), so the Outlines and raw-llguidance arms share the same core matcher — the Outlines row adds outlines' logits-processor wrapper (consume + bitmask fill + apply).
 

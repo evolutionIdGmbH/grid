@@ -115,17 +115,19 @@ GRID participates via a JSON-Schema→`.grid` compiler
 (`bench/json_schema_to_grid.py`) and a protocol-exact runner
 (`bench/maskbench_grid.py`; arms: GRID, llguidance, XGrammar-compliant;
 llama-3.1 tokenizer; 315-schema stratified sample of the 11.3k corpus).
-Headlines after the 512-terminal kernel widening and the scanner-build fixes:
-**TBM p50/p75 27/39 µs** (was 32/459) vs llguidance 10/21 and XGrammar 10/29 —
-parity through p75, with kernels active on **100%** of compiled schemas;
-**TBM p99 30 ms** (was 202 ms; the remaining p90+ is cold trie-walk cost, the
-named next target); **TTFM p50 13 ms / p99 359 ms** (was 28 ms / 854 ms) —
-still behind llguidance's 0.3 ms but 15-35× ahead of XGrammar's p75+ blowups
-(207 ms → 13 s); **zero validation errors** on every schema GRID compiles — the
-only engine that never falsely rejected a valid instance (llguidance 3,
-XGrammar 27); honest compile-error boundary (79/315 — allOf, patternProperties,
-if/then/else…), llguidance-style. Chart regenerates via
-`bench/plot_maskbench.py`.
+Headlines at kernel v6 (refreshed 2026-07-10; correctness columns byte-identical
+to the v3-era record, comparison arms moved <10%):
+**TBM p50/p75 31/38 µs** vs llguidance 10/21 and XGrammar 11/30 — parity
+through p75, kernels active on **100%** of compiled schemas; **TBM p90
+208 µs / p99 8.3 ms** (was 27.8 ms / 30.2 ms at v3 — the cold trie-walk tail
+the old report named as the next target, cut 134×/3.6× by the v5.1
+verdict-equivalence grouping); TBM average 683 µs (was 4.4 ms); **TTFM p50
+7.2 ms** (was 13 ms) / p99 320 ms — still behind llguidance's 0.3 ms but far
+ahead of XGrammar's p75+ blowups (2.4 ms → 13.4 s); **zero validation
+errors** on every schema GRID compiles — the only engine that never falsely
+rejected a valid instance (llguidance 3, XGrammar 27); honest compile-error
+boundary (79/315 — allOf, patternProperties, if/then/else…),
+llguidance-style. Chart regenerates via `bench/plot_maskbench.py`.
 
 **Execution accuracy (Spider)** (`bench/spider_ex.py` →
 [`bench/RESULTS-spider.md`](bench/RESULTS-spider.md), full 1034-question dev set,

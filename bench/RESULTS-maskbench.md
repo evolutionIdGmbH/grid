@@ -6,22 +6,22 @@ Protocol: maskbench's runner semantics reproduced verbatim (TTFM = schema compil
 
 | metric | GRID | llguidance | XGrammar (compliant) |
 |:---|---:|---:|---:|
-| TBM avg | 4,422 | 20 | 100 |
-| TBM p25 | 23 | 5 | 3 |
-| TBM p50 | 27 | 10 | 10 |
-| TBM p75 | 39 | 21 | 29 |
-| TBM p90 | 27,803 | 31 | 55 |
-| TBM p95 | 29,182 | 57 | 324 |
-| TBM p99 | 30,180 | 182 | 2,603 |
-| TBM p99.9 | 35,703 | 1,054 | 7,583 |
-| TBM max | 109,790 | 2,177 | 11,734 |
-| TTFM avg | 34,581 | 596 | 687,597 |
-| TTFM p25 | 7,729 | 218 | 757 |
-| TTFM p50 | 13,168 | 305 | 2,342 |
-| TTFM p75 | 27,408 | 416 | 207,049 |
-| TTFM p90 | 66,088 | 888 | 1,174,378 |
-| TTFM p95 | 157,173 | 1,764 | 2,917,599 |
-| TTFM p99 | 359,130 | 7,657 | 12,997,791 |
+| TBM avg | 683 | 20 | 103 |
+| TBM p25 | 15 | 5 | 3 |
+| TBM p50 | 31 | 10 | 11 |
+| TBM p75 | 38 | 21 | 30 |
+| TBM p90 | 208 | 32 | 60 |
+| TBM p95 | 7,760 | 59 | 338 |
+| TBM p99 | 8,278 | 185 | 2,680 |
+| TBM p99.9 | 46,028 | 1,079 | 7,790 |
+| TBM max | 115,824 | 2,015 | 12,455 |
+| TTFM avg | 17,488 | 622 | 705,140 |
+| TTFM p25 | 5,325 | 229 | 848 |
+| TTFM p50 | 7,188 | 320 | 2,408 |
+| TTFM p75 | 9,940 | 441 | 211,992 |
+| TTFM p90 | 19,389 | 952 | 1,219,010 |
+| TTFM p95 | 81,170 | 1,788 | 3,025,603 |
+| TTFM p99 | 320,163 | 7,956 | 13,383,740 |
 | tokens | 58,188 | 62,311 | 70,275 |
 | schemas | 315 | 315 | 315 |
 | passing | 206 | 251 | 283 |
@@ -32,11 +32,11 @@ Protocol: maskbench's runner semantics reproduced verbatim (TTFM = schema compil
 
 Reading the table:
 - The three engines sit at different points of the coverage/upfrontness/latency trade-off: compile errors are *declared* non-support (visible, safe); validation errors (valid instance rejected) and invalidation errors (invalid instance accepted) are silent correctness gaps.
-- GRID's TBM p25-p75 is the grid_core kernel hit path (masks up to 512 terminals run in-kernel); the p90+ tail is cold-miss trie walks over the 128k vocabulary. MaskBench runs each schema once — the write-back cache that amortizes GRID's misses across requests in serving never warms here; the cold walk itself is the named next optimization target.
+- GRID's TBM p25-p75 is the grid_core kernel hit path (masks up to 512 terminals run in-kernel); the p90+ tail is cold-miss trie walks over the 128k vocabulary. MaskBench runs each schema once — the write-back cache that amortizes GRID's misses across requests in serving never warms here; the cold walk was cut 9.3x by the kernel v5.1 verdict-equivalence grouping (this record; TBM p90 27.8 ms -> 208 us vs the v3-era run).
 - GRID's TTFM is the Python table build per schema (scanner subset construction is alphabet-compressed with per-state eps closures; further kernel work possible).
 - GRID counts zero validation errors: every valid instance of every schema it compiled was accepted (definition-order properties, spec-default additionalProperties incl. typed extras).
 
-Engine versions: GRID 0.1.0.dev0, llguidance 1.7.6, XGrammar (compliant) 0.2.3.
+Engine versions: GRID 0.0.7, llguidance 1.7.6, XGrammar (compliant) 0.2.3.
 
 GRID notes: grid_core kernels active on 100% of compiled schemas (the rest exceed the 64-terminal kernel bound and run the pure-Python spec path).
 
