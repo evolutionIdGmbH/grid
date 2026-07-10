@@ -10,9 +10,9 @@ repair of the residual (provably mask-unenforceable) failure class.
 
 | Version | What |
 |---|---|
-| **v0.0.5** (designed Aug 2023) | an early, partial design snapshot: precomputed token-sequence validity table over a pushdown automaton, decode-time logit masking |
-| **v0.0.6** | The first planned revision of the snapshot — already outperformed guidance (its July-2023 release) on the scaling benchmarks of that era |
-| **v0.0.7** (this repository) | The research program's result, reached by planned iteration: viable-prefix masks keyed on parser *configurations* instead of token sequences (a full sequence-keyed table scales combinatorially), acceptance semantics replaced by prefix-viability (acceptance leaves the step-1 mask empty), plus the byte-level token↔terminal bridge, Rust kernels, the write-back cache, RBAC/schema projections, the audit chain, and SemanticChecker-guided repair — each step test- and benchmark-validated. v0.0.7 is the line the final patent application followed; the work has kept improving since. |
+| **v0.0.5** - July 2023 | an early, partial design snapshot: precomputed token-sequence validity table over a pushdown automaton, decode-time logit masking |
+| **v0.0.6** - September 2023| The first planned revision of the snapshot — already outperformed guidance (its July-2023 release) on the scaling benchmarks of that era |
+| **v0.0.7** - November 2023| The research program's result, reached by planned iteration: viable-prefix masks keyed on parser *configurations* instead of token sequences (a full sequence-keyed table scales combinatorially), acceptance semantics replaced by prefix-viability (acceptance leaves the step-1 mask empty), plus the byte-level token↔terminal bridge, Rust kernels, the write-back cache, RBAC/schema projections, the audit chain, and SemanticChecker-guided repair — each step test- and benchmark-validated. v0.0.7 is the line the final patent application followed; the work has kept improving since. |
 
 The design drew inspiration from published work (notably the Outlines paper);
 GRID's design and implementation are our own throughout.
