@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import warnings
 
 import torch
@@ -72,6 +73,11 @@ class _GuideRegistry:
         # (the G8 adversarial cold-miss cost). The adapter is fixed per
         # registry, so the grammar source alone scopes a pool.
         self._t2_pools: dict[str, object] = {}
+        # ContextJournals (W4), same per-dialect scope as the T2 pools: every
+        # producer of a dialect records its cold walks into ONE journal, so
+        # admission warmup (W5) can precompute a fresh schema's configurations
+        # while its request waits off-batch. Keys/contexts only, never masks.
+        self._journals: dict[str, object] = {}
 
     @property
     def stats(self) -> dict:
@@ -101,11 +107,16 @@ class _GuideRegistry:
         from grid.lalr.compile import compile_tables
         from grid.lexer.dfa import build_scanner
         from grid.mask.cache import MaskCacheT2
+        from grid.serving import ContextJournal
 
-        t2 = self._t2_pools.setdefault(
-            hashlib.blake2b(grammar_src.encode(), digest_size=12).hexdigest(),
-            MaskCacheT2(),
-        )
+        dialect = hashlib.blake2b(grammar_src.encode(), digest_size=12).hexdigest()
+        t2 = self._t2_pools.setdefault(dialect, MaskCacheT2())
+        # GRID_ADMIT_WARM=0 is the W4+W5 kill switch: no journal is wired at
+        # all (producer.journal stays None — the walk-miss path is exactly
+        # today's), and admission_warmup no-ops independently. Read at template
+        # build, like the producer's own one-shot env reads.
+        journal = None if os.environ.get("GRID_ADMIT_WARM", "1") == "0" \
+            else self._journals.setdefault(dialect, ContextJournal())
 
         grammar = gspec.load(grammar_src)
         if verbs:
@@ -129,7 +140,7 @@ class _GuideRegistry:
             tables=tables, dfa=dfa, trie=self.trie, adapter=self.adapter,
             lexicons=lexicons, schema_fingerprint=fingerprint,
             reserve=None, audit=None,  # mode 2: no appends, audit opt-in later
-            mask_t2=t2,
+            mask_t2=t2, mask_journal=journal,
         )
 
 

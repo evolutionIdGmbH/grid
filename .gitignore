@@ -22,8 +22,8 @@ Cargo.lock.bak
 .idea/
 .vscode/
 
-# Local artifacts
-audit/
+# Local artifacts (root-level runtime dir; NOT tests/audit or grid/audit)
+/audit/
 *.local.*
 tmp/
 

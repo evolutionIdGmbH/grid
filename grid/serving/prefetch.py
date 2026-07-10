@@ -62,6 +62,17 @@ class MaskPrefetcher:
         # No audit records are written on the mask path (only _advance appends).
         guide._mask_ids(state)
 
+    def done(self, state) -> bool:
+        """Non-blocking readiness probe (W6 defer chassis): True when no
+        build for `state` is in flight, or the in-flight build has finished
+        (including errored — fill's `wait` swallows the error and the fill
+        path recomputes synchronously, so a dead future must read ready).
+        No side effects: the entry stays in `_inflight` for wait() to
+        consume."""
+        with self._lock:
+            got = self._inflight.get(id(state))
+        return got is None or got[1].done()
+
     def wait(self, state, timeout: float | None = None) -> float:
         """Block until `state`'s scheduled build completes (no-op when none is
         in flight). Returns the milliseconds actually waited — the residual

@@ -69,6 +69,7 @@ class GridGuide:
         j_max: int = 8,
         mask_cache=None,
         mask_t2=None,
+        mask_journal=None,
         producer: MaskProducer | None = None,
     ) -> None:
         self.tables = tables
@@ -88,7 +89,7 @@ class GridGuide:
         self.producer = producer if producer is not None else MaskProducer(
             tables=tables, dfa=dfa, trie=trie, vocab_size=self.vocab_size,
             lexicons=lexicons, schema_fingerprint=schema_fingerprint, cache=mask_cache,
-            t2=mask_t2,
+            t2=mask_t2, journal=mask_journal,
         )
         self.reserve = reserve
         self.audit = audit

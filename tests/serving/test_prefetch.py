@@ -104,6 +104,87 @@ def test_session_skips_schedule_for_warm_successor(guide):
     pf.shutdown()
 
 
+class _GatedBuild:
+    """Stub guide/state for done() unit tests: the 'build' blocks on a gate
+    (optionally raising after it opens), so in-flight vs finished is fully
+    controlled."""
+
+    def __init__(self, raise_after=False):
+        import threading
+
+        self.gate = threading.Event()
+        self.started = threading.Event()
+        self.raise_after = raise_after
+
+    def _mask_ids(self, _state):
+        self.started.set()
+        assert self.gate.wait(10)
+        if self.raise_after:
+            raise RuntimeError("poisoned build")
+
+
+def _spin_until(pred, timeout=10.0):
+    import time
+
+    t0 = time.perf_counter()
+    while not pred():
+        if time.perf_counter() - t0 > timeout:
+            raise AssertionError("condition never became true")
+        time.sleep(0.001)
+
+
+def test_done_true_when_never_scheduled():
+    pf = MaskPrefetcher()
+    assert pf.done(object()) is True
+    pf.shutdown()
+
+
+def test_done_false_inflight_true_after_completion():
+    pf = MaskPrefetcher()
+    stub = _GatedBuild()
+    state = object()
+    pf.schedule(stub, state)
+    assert stub.started.wait(10)
+    assert pf.done(state) is False, "blocked build must read not-ready"
+    # non-blocking + side-effect free: the entry stays for wait() to consume
+    assert id(state) in pf._inflight
+    stub.gate.set()
+    _spin_until(lambda: pf.done(state))
+    assert id(state) in pf._inflight, "done() must not consume the entry"
+    assert pf.wait(state, timeout=10) >= 0.0
+    assert pf.stats["waits"] == 1 and pf.stats["errors"] == 0
+    pf.shutdown()
+
+
+def test_done_true_after_drop():
+    pf = MaskPrefetcher()
+    stub = _GatedBuild()
+    state = object()
+    pf.schedule(stub, state)
+    assert stub.started.wait(10)
+    pf.drop(state)
+    assert pf.done(state) is True, "dropped target must read ready"
+    stub.gate.set()
+    pf.shutdown()
+
+
+def test_done_true_on_errored_future():
+    """A dead/errored build must read ready — the fill's wait() swallows the
+    error and the fill path recomputes synchronously (liveness under pool
+    failure, never an approximate mask)."""
+    pf = MaskPrefetcher()
+    stub = _GatedBuild(raise_after=True)
+    state = object()
+    pf.schedule(stub, state)
+    assert stub.started.wait(10)
+    assert pf.done(state) is False
+    stub.gate.set()
+    _spin_until(lambda: pf.done(state))
+    pf.wait(state, timeout=10)  # swallows; the fill would recompute exactly
+    assert pf.stats["errors"] == 1
+    pf.shutdown()
+
+
 def test_walk_runs_from_worker_thread(guide):
     """The GIL-released walk is callable off the main thread (overlap smoke)."""
     import threading

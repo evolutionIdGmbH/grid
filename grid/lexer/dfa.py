@@ -235,6 +235,30 @@ class ScannerDFA:
                 return DEAD
         return st
 
+    def scan_with_last_accept(self, remainder: bytes) -> tuple[int, int, int]:
+        """One-pass scan returning ``(q, l, p)``:
+
+        - ``q``: state after the FULL remainder (DEAD if the scan dies; every
+          longer prefix of a dead scan is dead too, so ``l``/``p`` are final),
+        - ``l``: length of the LONGEST accepting prefix (0 if none — the empty
+          prefix never accepts: empty-matching terminals are rejected at build),
+        - ``p``: state after ``remainder[:l]`` (-1 when no prefix accepts).
+
+        Foundation for the genN cache-key normal form (mask/producer.cache_key):
+        under the lexicon-visibility guard, remainders with equal ``(p, q)`` and
+        equal post-accept suffix ``v = remainder[l:]`` are walk-indistinguishable.
+        Pure; differentially bound to per-prefix re-scanning in
+        tests/lexer/test_scan_last_accept.py."""
+        st = self.start
+        length, p = 0, -1
+        for i, b in enumerate(remainder):
+            st = self.trans[st][b]
+            if st == DEAD:
+                return DEAD, length, p
+            if self.accept[st] != -1:
+                length, p = i + 1, st
+        return st, length, p
+
 
 def build_scanner(terminals: dict[str, Terminal], terminal_order: tuple[str, ...]) -> ScannerDFA:
     """Combined NFA over all terminals -> subset-construction byte DFA."""

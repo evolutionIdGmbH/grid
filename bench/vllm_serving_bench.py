@@ -16,7 +16,15 @@ Gate criteria (G8):
 - TTFT: cold role+schema specialize < 50 ms, warm < 5 ms;
 - adversarial cold-miss arm (cache cleared, maximal identifier position,
   injected into batch-32): co-batched TPOT degradation < 5% and bounded max
-  step delay via the §6 skip-a-round/overlap contract;
+  step delay via the §6 skip-a-round/overlap contract. TWO metrics are always
+  reported side by side: v1 (legacy two-point lockstep wall — valid only while
+  the batch advances in lockstep) and v2 (per-request TPOT over the 31 warm
+  co-batched requests via a raw engine step loop + max engine-step wall +
+  the fresh request's TTFT / completion / effective TPOT, reported not gated,
+  with a soft bound effective-TPOT <= 3x warm). The GATE evaluates v2 by
+  default (RATIFIED 2026-07-09: v2 measures the criterion's intent - the warm
+  co-batched requests' experience - which lockstep math cannot measure under
+  the defer); --adversarial-metric v1 keeps the legacy gating for comparison;
 - concurrent cold start: single-flight (1 build, N waiters, same error on FAILED).
 
 vLLM has no macOS wheels, so the real run is on the declared GPU runner
@@ -100,6 +108,94 @@ def overhead_pct(arm_tpot_ms: float, base_tpot_ms: float) -> float:
     return 100.0 * (arm_tpot_ms - base_tpot_ms) / base_tpot_ms
 
 
+def reduce_adversarial_v2(step_walls_s: list[float],
+                          token_times_s: dict[str, list[float]],
+                          fresh_id: str | None) -> dict:
+    """Pure metric-v2 reduction for ONE step-loop run — unit-tested.
+
+    step_walls_s: wall time of each engine step (seconds).
+    token_times_s: req_id -> arrival time (seconds, relative to loop start) of
+        every generated token. A request deferred out of some rounds simply has
+        no timestamps in those rounds; an early-finishing request has a shorter
+        list — per-request TPOT (t_last - t_first)/(T-1) is exact either way,
+        with no lockstep assumption. Requests with < 2 tokens are excluded from
+        the warm mean (TPOT undefined).
+    fresh_id: the adversarial (never-warmed) request; every other request is a
+        warm co-batched request. None => all requests are warm (baseline run).
+    """
+    warm_tpots = []
+    for rid, ts in token_times_s.items():
+        if rid == fresh_id or len(ts) < 2:
+            continue
+        warm_tpots.append(1000.0 * (ts[-1] - ts[0]) / (len(ts) - 1))
+    warm_mean = float(statistics.fmean(warm_tpots)) if warm_tpots else float("nan")
+    fresh = token_times_s.get(fresh_id, []) if fresh_id is not None else []
+    fresh_ttft = 1000.0 * fresh[0] if fresh else float("nan")
+    fresh_completion = 1000.0 * fresh[-1] if fresh else float("nan")
+    fresh_tpot = (1000.0 * (fresh[-1] - fresh[0]) / (len(fresh) - 1)
+                  if len(fresh) >= 2 else float("nan"))
+    ratio = fresh_tpot / warm_mean if warm_mean > 0 else float("nan")  # nan-safe: nan>0 is False
+    return {
+        "warm_tpot_mean_ms": warm_mean,
+        "warm_tpots_ms": warm_tpots,
+        "n_warm": len(warm_tpots),
+        "max_step_ms": 1000.0 * max(step_walls_s) if step_walls_s else float("nan"),
+        "fresh_ttft_ms": fresh_ttft,
+        "fresh_completion_ms": fresh_completion,
+        "fresh_effective_tpot_ms": fresh_tpot,
+        "fresh_tpot_ratio": ratio,
+    }
+
+
+def _nanmean(vals: list[float]) -> float:
+    valid = [v for v in vals if v == v]
+    return float(statistics.fmean(valid)) if valid else float("nan")
+
+
+def aggregate_adversarial_v2(reductions: list[dict],
+                             baseline_warm_tpot_ms: float) -> dict:
+    """Combine per-repeat v2 reductions into the reported v2 block — unit-tested.
+
+    Degradation is the warm co-batched TPOT (mean over repeats) vs the all-warm
+    baseline's per-request TPOT from the same step-loop surface. Fresh-request
+    metrics are transparency metrics (reported, not gated) with a soft bound
+    effective TPOT <= 3x warm; repeats where the fresh request never reached 2
+    tokens (starvation-cap edge) contribute nan and are skipped in the means —
+    the ratio then reads nan and the soft bound reads False, never silently OK.
+    """
+    warm = _nanmean([r["warm_tpot_mean_ms"] for r in reductions])
+    steps = [r["max_step_ms"] for r in reductions if r["max_step_ms"] == r["max_step_ms"]]
+    fresh_tpot = _nanmean([r["fresh_effective_tpot_ms"] for r in reductions])
+    ratio = fresh_tpot / warm if warm > 0 else float("nan")
+    return {
+        "tpot_degradation_pct": overhead_pct(warm, baseline_warm_tpot_ms),
+        "warm_tpot_mean_ms": warm,
+        "baseline_warm_tpot_ms": baseline_warm_tpot_ms,
+        "n_warm": max((r["n_warm"] for r in reductions), default=0),
+        "max_step_ms": max(steps) if steps else float("nan"),
+        "fresh_ttft_ms": _nanmean([r["fresh_ttft_ms"] for r in reductions]),
+        "fresh_completion_ms": _nanmean([r["fresh_completion_ms"] for r in reductions]),
+        "fresh_effective_tpot_ms": fresh_tpot,
+        "fresh_tpot_ratio": ratio,
+        "soft_bound_ok": bool(ratio == ratio and ratio <= 3.0),
+        "n_repeats": len(reductions),
+    }
+
+
+def build_adversarial_result(v1: dict, v2: dict, metric: str,
+                             budget_ms: float) -> dict:
+    """Both metric blocks + top-level gating values from the selected metric.
+
+    evaluate_gates reads only the top-level keys, so the gate follows `metric`
+    (--adversarial-metric, default v2 - ratified) while the report always prints both.
+    """
+    sel = v2 if metric == "v2" else v1
+    return {"metric": metric, "budget_ms": budget_ms,
+            "tpot_degradation_pct": sel["tpot_degradation_pct"],
+            "max_step_ms": sel["max_step_ms"],
+            "v1": v1, "v2": v2}
+
+
 def evaluate_gates(cells: dict, adversarial: dict | None,
                    singleflight: dict | None) -> list[tuple[str, bool, str]]:
     """cells[(arm, batch)] -> summary dict. Returns (criterion, pass, detail)."""
@@ -119,10 +215,15 @@ def evaluate_gates(cells: dict, adversarial: dict | None,
                        grid1.get("ttft_warm_p50_ms", 1e9) < 5.0,
                        f"{grid1.get('ttft_warm_p50_ms', float('nan')):.2f} ms"))
     if adversarial:
-        checks.append(("adversarial cold-miss: co-batched TPOT degradation < 5%",
+        # top-level values mirror the GATING metric (adversarial["metric"],
+        # default v1); both blocks are printed side by side in the report
+        metric = adversarial.get("metric", "v1")
+        tag = (" [gating metric v2: per-request TPOT over warm co-batched requests]"
+               if metric == "v2" else " [gating metric v1: legacy two-point lockstep wall]")
+        checks.append(("adversarial cold-miss: co-batched TPOT degradation < 5%" + tag,
                        adversarial["tpot_degradation_pct"] < 5.0,
                        f"{adversarial['tpot_degradation_pct']:+.2f}%"))
-        checks.append(("adversarial cold-miss: max step delay bounded (skip-a-round)",
+        checks.append(("adversarial cold-miss: max step delay bounded (skip-a-round)" + tag,
                        adversarial["max_step_ms"] < adversarial["budget_ms"],
                        f"{adversarial['max_step_ms']:.1f} < {adversarial['budget_ms']:.0f} ms"))
     if singleflight:
@@ -135,7 +236,27 @@ def evaluate_gates(cells: dict, adversarial: dict | None,
 
 
 # ------------------------------------------------------------------ mock arm
-def mock_cells(batches, arms):
+def mock_adversarial(metric="v1", budget_ms=30.0):
+    """Fabricated adversarial arm exercising the REAL v2 reduction/aggregation
+    math (deferred rounds, an early-finishing warm request, a solo fresh tail)
+    plus a fixed v1 block. Gate-passing by construction; NOT a perf claim."""
+    T, dt = 20, 0.0063          # 20 tokens, 6.3 ms warm cadence
+    step_walls = [dt] * (T + 6)
+    step_walls[2] = 0.008       # worst engine step 8 ms (< 30 ms budget)
+    token_times = {}
+    for i in range(31):
+        n = 12 if i == 30 else T                      # one early finisher
+        token_times[f"warm-{i}"] = [dt * (k + 1) for k in range(n)]
+    # fresh request: deferred 2 rounds (absent from steps 1-2), then a slower
+    # effective cadence that runs past the warm batch into a solo tail
+    token_times["fresh"] = [3 * dt + 0.012 * k for k in range(T)]
+    red = reduce_adversarial_v2(step_walls, token_times, "fresh")
+    v2 = aggregate_adversarial_v2([red], baseline_warm_tpot_ms=6.2)
+    v1 = {"tpot_degradation_pct": 3.1, "max_step_ms": 4.2}
+    return build_adversarial_result(v1, v2, metric, budget_ms)
+
+
+def mock_cells(batches, arms, metric="v1"):
     """Deterministic fabricated timings that satisfy the gate shape — exercises
     the metric + report path only. NOT a performance claim (labeled in report).
     Numbers modeled on the A10 mode-2 acceptance run + constant-overhead priors."""
@@ -159,7 +280,7 @@ def mock_cells(batches, arms):
             wall = decoded * tpot / 1000.0 / max(1, b)  # batched
             cells[(arm, b)] = summarize_arm(ttfts, tpots, steps, decoded, wall,
                                             cold_ttfts_ms=cold, warm_ttfts_ms=warm)
-    adversarial = {"tpot_degradation_pct": 3.1, "max_step_ms": 4.2, "budget_ms": 30.0}
+    adversarial = mock_adversarial(metric=metric)
     singleflight = {"builds": 1, "waiters": 8, "same_error": True}
     return cells, adversarial, singleflight
 
@@ -167,9 +288,16 @@ def mock_cells(batches, arms):
 # ----------------------------------------------------------------- real arm
 # vLLM 0.24 V1 does not surface per-request RequestOutput.metrics, so TPOT is
 # measured by a two-point wall-clock method (standard for offline throughput
-# benchmarking): run the batch at max_tokens=T and at max_tokens=1; the batch
-# advances in lockstep, so inter-token latency (TPOT, per request) is
-# (wall_T - wall_1) / (T - 1) and decode throughput is B*(T-1)/(wall_T-wall_1).
+# benchmarking): run the batch at max_tokens=T and at max_tokens=1, and take
+# (wall_T - wall_1) / (T - 1) per request, B*(T-1)/(wall_T-wall_1) throughput.
+# CAVEAT (metric v1): that division ASSUMES the batch advances in lockstep —
+# every request present in every step. The moment a request is legitimately
+# deferred out of a round (the §6 skip-a-round contract / GRID_DEFER), the
+# batch is non-lockstep and the two-point wall conflates the deferred
+# request's own tail with co-batched TPOT. The homogeneous warm cells keep
+# lockstep, so v1 stays valid there; the adversarial arm therefore ALSO
+# measures metric v2 via _step_loop_batch (per-request token timestamps on
+# the raw engine step loop — no lockstep assumption).
 # TTFT-specialize (the gate's "role+schema specialize" cost — grammar compile +
 # first mask, NOT the model prefill) is measured at the GRID backend level,
 # which is what the criterion is about; it is reported separately from the
@@ -302,15 +430,56 @@ def real_run(args):  # pragma: no cover - GPU host only
     return cells, adversarial, singleflight
 
 
+def _step_loop_batch(llm, prompts, sampling_params, req_ids=None):  # pragma: no cover - GPU host
+    """Drive the V1 engine step loop directly (llm.llm_engine.add_request +
+    step() until no unfinished requests), recording per-step wall times and
+    per-request token-arrival timestamps (seconds, relative to loop start).
+    No lockstep assumption: a request absent from a round (deferred, finished)
+    simply gets no timestamp that round. Returns (step_walls_s, token_times_s)
+    in the exact shape reduce_adversarial_v2 consumes."""
+    import time
+    eng = llm.llm_engine
+    ids = list(req_ids) if req_ids is not None else [f"req-{i}" for i in range(len(prompts))]
+    for rid, prompt, sp in zip(ids, prompts, sampling_params, strict=True):
+        eng.add_request(rid, prompt, sp)
+    token_times = {rid: [] for rid in ids}
+    seen = dict.fromkeys(ids, 0)
+    step_walls_s = []
+    t_start = time.perf_counter()
+    while eng.has_unfinished_requests():
+        t0 = time.perf_counter()
+        outs = eng.step()
+        t1 = time.perf_counter()
+        step_walls_s.append(t1 - t0)
+        for out in outs:
+            n = len(out.outputs[0].token_ids)
+            new = n - seen.get(out.request_id, 0)
+            if new > 0:
+                seen[out.request_id] = n
+                token_times.setdefault(out.request_id, []).extend([t1 - t_start] * new)
+    return step_walls_s, token_times
+
+
 def _adversarial_arm(args):  # pragma: no cover - GPU host
     """Cold-miss injected into batch-32: compare co-batched TPOT of an all-warm
     batch-32 (grid) against a batch-32 where one request carries a fresh,
     never-warmed schema (its mask must be built cold, mid-batch). The overlap
-    contract (worker-thread prefetch, GIL-released walk) should keep the
-    co-batched TPOT degradation < 5% and the max step bounded."""
+    contract (worker-thread prefetch, GIL-released walk, §6 skip-a-round)
+    should keep the co-batched TPOT degradation < 5% and the max step bounded.
+
+    Reports BOTH metrics; --adversarial-metric selects which one gates:
+      v1 (legacy): two-point lockstep wall, math unchanged — valid only while
+          the batch is lockstep (defer makes it legitimately non-lockstep).
+      v2: raw engine step loop — per-request TPOT over the 31 warm co-batched
+          requests, max engine-step wall, and the fresh request's TTFT /
+          completion / effective TPOT as transparency metrics (soft bound
+          effective TPOT <= 3x warm, reported not gated).
+    Acceptance (plan W9): with defer disabled and no adversary, v1 and v2
+    agree within noise."""
     import time
 
-    from vllm import LLM
+    from vllm import LLM, SamplingParams
+    from vllm.sampling_params import StructuredOutputsParams
 
     grammar = GRAMMAR_SQL.read_text()
     schema_items = list(SCHEMAS.items())
@@ -318,19 +487,22 @@ def _adversarial_arm(args):  # pragma: no cover - GPU host
               max_model_len=args.max_model_len, enforce_eager=False,
               structured_outputs_config={"backend": "grid"})
     T = args.max_tokens
-    # baseline: all-warm batch-32
-    base = _measure_cell(llm, "grid", grammar, schema_items, 32, T, args.repeats)
-    # adversarial: swap request 0 for a fresh schema each repeat (cold compile+walk)
-    from vllm import SamplingParams
-    from vllm.sampling_params import StructuredOutputsParams
-    deg_tpots, step_max = [], 0.0
-    for r in range(args.repeats):
+
+    def _fresh_batch(prefix, r):
+        # a never-warmed schema per repeat; prefix keeps the v1/v2 legs disjoint
         p, s = _build_batch("grid", grammar, schema_items, 32, T)
-        fresh = {f"z_tbl_{r}": [f"z_col_{r}_{j}" for j in range(6)]}  # never warmed
+        fresh = {f"{prefix}_tbl_{r}": [f"{prefix}_col_{r}_{j}" for j in range(6)]}
         p[0] = PROMPT + json.dumps(fresh)
         s[0] = SamplingParams(temperature=0.0, max_tokens=T,
                               structured_outputs=StructuredOutputsParams(
                                   grammar=json.dumps({"grammar": grammar, "schema": fresh})))
+        return p, s
+
+    # ---- metric v1 (legacy two-point lockstep wall; math unchanged) ----
+    base = _measure_cell(llm, "grid", grammar, schema_items, 32, T, args.repeats)
+    deg_tpots, step_max = [], 0.0
+    for r in range(args.repeats):
+        p, s = _fresh_batch("z", r)
         t0 = time.perf_counter()
         llm.generate(p, s, use_tqdm=False)
         wall_T = time.perf_counter() - t0
@@ -341,11 +513,26 @@ def _adversarial_arm(args):  # pragma: no cover - GPU host
         tpot = 1000.0 * max(0.0, wall_T - wall_1) / max(1, T - 1)
         deg_tpots.append(tpot)
         step_max = max(step_max, tpot)
+    v1 = {"tpot_degradation_pct": overhead_pct(statistics.fmean(deg_tpots),
+                                               base["tpot_mean_ms"]),
+          "max_step_ms": step_max}
+
+    # ---- metric v2 (per-request step loop; no lockstep assumption) ----
+    # baseline: all-warm batch-32 on the SAME step-loop surface (warm caches —
+    # the v1 leg above already ran the warm schemas to completion repeatedly)
+    p, s = _build_batch("grid", grammar, schema_items, 32, T)
+    walls, times = _step_loop_batch(llm, p, s)
+    base_v2 = reduce_adversarial_v2(walls, times, fresh_id=None)
+    reductions = []
+    for r in range(args.repeats):
+        p, s = _fresh_batch("zz", r)   # "zz": disjoint from the v1 leg's "z"
+        ids = ["fresh"] + [f"warm-{i}" for i in range(1, 32)]
+        walls, times = _step_loop_batch(llm, p, s, req_ids=ids)
+        reductions.append(reduce_adversarial_v2(walls, times, fresh_id="fresh"))
+    v2 = aggregate_adversarial_v2(reductions, base_v2["warm_tpot_mean_ms"])
     del llm
-    adv_tpot = statistics.fmean(deg_tpots)
-    deg = overhead_pct(adv_tpot, base["tpot_mean_ms"])
-    return {"tpot_degradation_pct": deg, "max_step_ms": step_max,
-            "budget_ms": args.step_budget_ms}
+    return build_adversarial_result(v1, v2, args.adversarial_metric,
+                                    args.step_budget_ms)
 
 
 def _singleflight_probe(args):  # pragma: no cover - GPU host
@@ -419,12 +606,43 @@ def write_report(cells, adversarial, singleflight, checks, out_path, mock):
                   f"**{grid1['ttft_cold_p50_ms']:.1f} ms**, warm "
                   f"**{grid1.get('ttft_warm_p50_ms', float('nan')):.2f} ms**."]
     if adversarial:
-        lines += ["", "**Adversarial cold-miss arm** (cache cleared, maximal identifier "
-                  "position, injected into batch-32): co-batched TPOT degradation "
-                  f"**{adversarial['tpot_degradation_pct']:+.2f}%**, max step "
-                  f"**{adversarial['max_step_ms']:.1f} ms** "
-                  f"(budget {adversarial['budget_ms']:.0f} ms) — the §6 "
-                  "skip-a-round/overlap contract holds."]
+        v1, v2 = adversarial.get("v1"), adversarial.get("v2")
+        if v1 or v2:
+            metric = adversarial.get("metric", "v1")
+            budget = adversarial["budget_ms"]
+            lines += ["", "**Adversarial cold-miss arm** (fresh never-warmed schema "
+                      "injected into batch-32; both metrics reported, gating metric: "
+                      f"**{metric}**, budget {budget:.0f} ms):", ""]
+            if v1:
+                lines.append(
+                    "- **metric v1 — legacy two-point lockstep wall** (assumes every "
+                    "request advances every step; conflates a deferred request's tail "
+                    "into the batch wall): co-batched TPOT degradation "
+                    f"**{v1['tpot_degradation_pct']:+.2f}%**, max step "
+                    f"**{v1['max_step_ms']:.1f} ms**.")
+            if v2:
+                lines.append(
+                    f"- **metric v2 — per-request, no lockstep assumption** (raw engine "
+                    f"step loop; TPOT = (t_last−t_first)/(T−1) per request over the "
+                    f"{v2.get('n_warm', 31)} warm co-batched requests): co-batched TPOT "
+                    f"degradation **{v2['tpot_degradation_pct']:+.2f}%**, max engine-step "
+                    f"wall **{v2['max_step_ms']:.1f} ms**.")
+                lines.append(
+                    "- **fresh request (reported, not gated)**: TTFT "
+                    f"**{v2['fresh_ttft_ms']:.1f} ms**, completion "
+                    f"**{v2['fresh_completion_ms']:.1f} ms**, effective TPOT "
+                    f"**{v2['fresh_effective_tpot_ms']:.2f} ms** "
+                    f"({v2['fresh_tpot_ratio']:.2f}x warm; soft bound <= 3x warm: "
+                    f"{'OK' if v2.get('soft_bound_ok') else 'EXCEEDED'}).")
+            lines += ["", "The §6 skip-a-round/overlap contract is gated on the "
+                      f"metric-{metric} values above."]
+        else:  # legacy single-metric dict (pre-v2 runs)
+            lines += ["", "**Adversarial cold-miss arm** (cache cleared, maximal identifier "
+                      "position, injected into batch-32): co-batched TPOT degradation "
+                      f"**{adversarial['tpot_degradation_pct']:+.2f}%**, max step "
+                      f"**{adversarial['max_step_ms']:.1f} ms** "
+                      f"(budget {adversarial['budget_ms']:.0f} ms) — the §6 "
+                      "skip-a-round/overlap contract holds."]
     if singleflight:
         lines += ["", f"**Concurrent cold start**: {singleflight['builds']} build / "
                   f"{singleflight['waiters']} waiters, "
@@ -456,6 +674,13 @@ def main() -> int:
     ap.add_argument("--gpu-mem", type=float, default=0.9)
     ap.add_argument("--repeats", type=int, default=3)
     ap.add_argument("--step-budget-ms", type=float, default=30.0)
+    ap.add_argument("--adversarial-metric", choices=("v1", "v2"), default="v2",
+                    help="which adversarial metric GATES (both are always "
+                         "measured and printed). v2 is RATIFIED as the binding "
+                         "metric (2026-07-09): per-request TPOT over the warm "
+                         "co-batched requests + max engine-step wall; the "
+                         "fresh request is reported, not gated. v1 keeps the "
+                         "legacy lockstep math for comparison.")
     ap.add_argument("--assert-gates", action="store_true")
     ap.add_argument("--out", default=str(BENCH_DIR / "RESULTS-serving.md"))
     args = ap.parse_args()
@@ -463,7 +688,8 @@ def main() -> int:
     if args.mock:
         arms = args.arms.split(",")
         batches = [int(b) for b in args.batches.split(",")]
-        cells, adversarial, singleflight = mock_cells(batches, arms)
+        cells, adversarial, singleflight = mock_cells(batches, arms,
+                                                      metric=args.adversarial_metric)
     else:  # pragma: no cover - GPU host
         cells, adversarial, singleflight = real_run(args)
 

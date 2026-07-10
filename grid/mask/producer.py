@@ -5,10 +5,18 @@ the grammar fingerprint scopes the whole cache instance. Identifier positions
 (A intersects L3 identifier categories) REQUIRE the schema fingerprint in the
 key; consulting an entry whose key lacks it raises IdentifierMaskBypassError in
 all builds (the identifier composition rule, DESIGN.md E3/E11).
+
+Non-identifier positions normalize to the genN key form (``cache_key``): the
+raw remainder bytes are replaced by the scanner normal form ``(p, q, v)``
+whenever the lexicon-visibility guard proves the walk cannot observe the
+pre-accept prefix bytes — remainders indistinguishable to the walk share one
+T1/T2 entry (kill switch: GRID_GENN_KEYS=0 restores the legacy raw keys
+byte-for-byte).
 """
 
 from __future__ import annotations
 
+import os
 import threading
 from dataclasses import dataclass
 
@@ -107,11 +115,18 @@ class MaskProducer:
     schema_fingerprint: str | None = None
     cache: MaskCache | None = None
     t2: MaskCacheT2 | None = None  # cross-template tier (DESIGN §E10); registry-scoped
+    journal: object | None = None  # ContextJournal (W4); registry-scoped per dialect
 
     def __post_init__(self) -> None:
         if self.cache is None:
             self.cache = MaskCache()
         self._validate_lexicons()
+        # genN key normalization (cache_key): the lexicon-constrained terminal
+        # ids are the guard alphabet — normalize only where the walk provably
+        # never consults an allow-list on prefix-derived bytes. Kill switch
+        # GRID_GENN_KEYS=0 restores the legacy raw generic keys exactly.
+        self._LEX = frozenset() if self.lexicons is None else frozenset(self.lexicons.allowed)
+        self._genn_keys = os.environ.get("GRID_GENN_KEYS", "1") != "0"
         self._priority = {
             tid: (0 if tid in self.tables.literal_terminal_ids else 1, tid)
             for tid in range(self.tables.n_terminals)
@@ -256,9 +271,64 @@ class MaskProducer:
     # -- cache key (E11) ----------------------------------------------------
 
     def cache_key(self, remainder: bytes, A: frozenset[int]) -> tuple:
+        """T1/T2 key for the configuration (remainder, A).
+
+        Identifier positions keep the legacy schema_fp-carrying key
+        byte-for-byte (E11). Non-ident positions normalize to
+        ``("genN", p, q, v, sorted(A), schema_fp)`` with ``(q, l, p)`` from
+        dfa.scan_with_last_accept and ``v = remainder[l:]`` verbatim when
+        p >= 0 else ``b""`` — sound ONLY under the lexicon-visibility guard
+        ``(live[q] | accepts_all[p]) & LEX == {}``: every terminal the walk's
+        lexeme_ok/prefix_ok predicates can consult on REMAINDER-derived bytes
+        lies in that set, so under the guard those checks are lexicon-inert
+        and the walk future is a function of (p, q, v, A) and the lexicons.
+        The lexicons stay in scope because WALKED bytes cross lexeme
+        boundaries: post-boundary pending lexemes are lexeme_ok/prefix_ok
+        filtered at walk time (grid/mask/cache.py make_entry, kernel
+        walk_raw), so CD partitions embed schema words — hence the
+        ``schema_fp`` component (None when no lexicons: dialect-wide sharing
+        stays). Without it the per-dialect T2 served one schema's CD
+        partition to another (50-seed fuzz counterexample: whitespace
+        remainder, A={LPAREN}, '('-continuations of schema words). Guard
+        failure — and a DEAD full-remainder scan, where live[q] is undefined
+        — falls back to the legacy raw ("generic", ...) key. The ``v``
+        component is load-bearing: b"1e"/b"1E" share (q, l, p) but requeue
+        different suffix bytes (tests/mask/test_genn_keys.py). In the v2
+        regime the raw FALLBACK key is schema-scoped too — ("generic", r,
+        sorted(A), schema_fp) — because the same walk-time CD poisoning
+        applies to byte-identical raw remainders across schemas (a fresh
+        schema T2-adopting another schema's b"select" boundary entry loses
+        its own words' continuations; caught by the 50-seed shared-registry
+        fuzz, tests/mask/test_genn_keys.py::test_raw_fallback_is_schema_
+        scoped_v2). Kill switch GRID_GENN_KEYS=0 restores the legacy keys
+        byte-for-byte, INCLUDING the pre-existing unscoped fallback (and with
+        it the latent pre-stage cross-schema T2 sharing hazard — documented,
+        not fixed, on the kill-switch path to preserve byte-identity)."""
         ident_position = bool(A & self.tables.identifier_terminal_ids) and self.lexicons is not None
-        key_schema = self.schema_fingerprint if ident_position else None
-        return ("ident" if ident_position else "generic", remainder, tuple(sorted(A)), key_schema)
+        if ident_position:
+            return ("ident", remainder, tuple(sorted(A)), self.schema_fingerprint)
+        if self._genn_keys:
+            q, acc_len, p = self.dfa.scan_with_last_accept(remainder)
+            if q != DEAD:
+                vis = self.dfa.live[q] if p < 0 else self.dfa.live[q] | self.dfa.accepts_all[p]
+                if not (vis & self._LEX):
+                    return ("genN", p, q, remainder[acc_len:] if p >= 0 else b"",
+                            tuple(sorted(A)), self.schema_fingerprint)
+            return ("generic", remainder, tuple(sorted(A)), self.schema_fingerprint)
+        return ("generic", remainder, tuple(sorted(A)), None)
+
+    def set_genn_keys(self, on: bool) -> None:
+        """Flip the genN key format at runtime (G10 dual-key replay and tests
+        ONLY; production reads GRID_GENN_KEYS once at construction). The
+        (kidx, remainder) alias memo and the kernel v6 session bindings are
+        format-agnostic caches OVER cache_key results, so a flip drops them —
+        no path may serve an entry resolved under the other format's key."""
+        if on == self._genn_keys:
+            return
+        self._genn_keys = on
+        self._entry_memo.clear()
+        if self._kernel is not None:
+            self._kernel.clear_bindings()
 
     def _guard_key(self, key: tuple, A: frozenset[int]) -> None:
         ident_position = bool(A & self.tables.identifier_terminal_ids) and self.lexicons is not None
@@ -389,7 +459,60 @@ class MaskProducer:
             ))
             if self.t2 is not None:
                 self.t2.publish(entry)
+            if self.journal is not None:
+                self._journal_miss(key, remainder, A)
         return entry
+
+    def _journal_miss(self, key: tuple, remainder: bytes, A: frozenset[int]) -> None:
+        """W4 hook (true walk-miss path only — T2 handovers were journaled at
+        their own first walk): record the configuration's KEY SHAPE for
+        admission warmup. Generic/genN keys are recorded verbatim (tier-i);
+        identifier positions are recorded word-abstracted, and only when the
+        remainder is a complete lexicon word of a terminal in A — the
+        expensive BOUNDARY class (tier-ii). Mid-lexeme ident prefixes stay
+        un-journaled by design (cheap, content-dependent, un-enumerable).
+        Never raises: the journal is a warm-hint, not a mask dependency."""
+        try:
+            if key[0] != "ident":
+                self.journal.record_generic(key)
+                return
+            lex = self.lexicons
+            if lex is not None and any(
+                    tid in A and remainder in words
+                    for tid, words in lex.allowed.items()):
+                self.journal.record_ident_context(A)
+        except Exception:  # pragma: no cover - defensive (hot miss path)
+            pass
+
+    def warm_from_t2(self, keys) -> int:
+        """W4/W5 tier-i warmup: adopt already-built T2 entries into THIS
+        producer's T1 and register them with the kernel — no walks (a key with
+        no T2 donor is skipped; tier-i never builds cold). Exactly the
+        _entry_for handover (t2.get -> cache.publish -> _ensure_handle) minus
+        the walk fallback. Thread-safe from warmup-pool threads: publish is
+        idempotent by content hash (OBL-KEY1) and registration is
+        single-flight per entry_id. Returns the number of entries warmed."""
+        t2 = self.t2
+        if t2 is None:
+            return 0
+        assert self.cache is not None
+        n = 0
+        for key in keys:
+            if key[0] == "genN" and key[5] != self.schema_fingerprint:
+                continue  # foreign-schema genN key: this producer can never
+                # look it up (cache_key embeds OUR fingerprint) — registering
+                # its entry would be dead weight in T1 and the kernel
+            if key[0] == "generic" and key[3] is not None \
+                    and key[3] != self.schema_fingerprint:
+                continue  # foreign-schema scoped raw fallback key: same story
+            got = t2.get(key)
+            if got is None:
+                continue
+            entry = self.cache.publish(got)
+            if self._kernel is not None:
+                self._ensure_handle(entry)
+            n += 1
+        return n
 
     def _ensure_handle(self, entry) -> int:
         """Register the entry's CD groups + ci ids with the kernel once
@@ -502,8 +625,12 @@ class MaskProducer:
         """Pool-thread cold build for a kernel-session successor from pure
         (remainder, A) walk inputs — no session state is touched off the
         scheduler thread (protocol-safe by construction). Publishes to T1/T2
-        and registers the entry; the scheduler thread binds at fill time."""
-        self._ensure_handle(self._entry_for(remainder, A))
+        and registers the entry; the scheduler thread binds at fill time.
+        Also the W5 admission-warmup tier-ii primitive — on the no-kernel spec
+        path (GRID_NO_RUST) it builds/publishes without registration."""
+        entry = self._entry_for(remainder, A)
+        if self._kernel is not None:
+            self._ensure_handle(entry)
 
     def fold_session_stats(self) -> dict:
         """Kernel session counters, with warm fills folded into cache.hits

@@ -591,6 +591,35 @@ every one of these before any debugging session:
 - **Lesson:** name a suspect only after a component-level measurement under the
   real engine; both prior theories were plausible, load-bearing, and wrong.
 
+### 6.7 The cold-schema fix — and the fuzz "failure" that was a soundness catch
+- **Change:** the cold-schema-into-hot-batch stack, all levers kill-switched:
+  genN key normalization (`("genN", p, q, v, A, schema_fp)` — remainders the
+  walk provably cannot distinguish share one entry), a per-dialect
+  ContextJournal + admission-time warmup inside `compile_grammar` (the request
+  absorbs its own warmup while WAITING), the §6 skip-a-round realized as a
+  scheduler mask-readiness defer (patch site 4 in our own patch file + a
+  drafted upstream vLLM PR), rayon-parallel walks (bit-identical, 2.05× at 8
+  threads locally), and the ratified adversarial **metric v2** (per-request
+  TPOT of the warm co-batched requests; the fresh request reported, not gated).
+- **Why:** the measured anatomy said 73% of the stall was schema-specific
+  ident-boundary walks — unshareable by E11 — so no cache trick alone closes
+  the gate; the request had to be warmed at admission or deferred out of the
+  round, with exact masks always (the defer only changes WHEN they compute).
+- **Result:** during validation the 50-seed shared-registry fuzz "failed" —
+  and the root cause was a **latent soundness bug in the original T2 tier**,
+  not the new code: unscoped cross-schema generic sharing could serve one
+  schema's continuations to another (walk-time CD filtering embeds schema
+  words). Isolated-process ground truth matched the NEW side. Generic keys are
+  now schema-scoped; the unsound legacy behavior survives only behind
+  `GRID_GENN_KEYS=0` for old-log replay. Honest local payoff: with sharing
+  soundly scoped, admission warmup recovers ~20% of stall (44% of the ident
+  class) in a harness that cannot exercise the defer — the defer is the
+  primary co-batch protection and only the H100 W10 matrix can measure it.
+- **Lesson:** a differential fuzz that fails against the OLD behavior is not
+  automatically a regression — sometimes the fuzz has finally been given a
+  correct oracle. Root-cause with an isolated ground truth before "fixing"
+  parity, or the fix would have re-introduced the poisoning.
+
 ## Meta-lessons
 
 1. **Systematic, planned review at every phase paid for itself.** The Phase-1

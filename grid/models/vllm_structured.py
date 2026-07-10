@@ -48,6 +48,8 @@ from __future__ import annotations
 
 import json
 import os
+import time
+from concurrent.futures import ThreadPoolExecutor, wait
 
 import numpy as np
 
@@ -112,6 +114,76 @@ class _PrefetchBuild:
         self.producer.prefetch_build(self.remainder, self.A)
 
 
+def admission_warmup(guide, pool, deadline_ms: float | None = None) -> dict:
+    """W5: journal-driven admission warmup (the vllm-free core behind
+    GridStructuredBackend.compile_grammar). Runs while the request is legally
+    parked in WAITING — vLLM 0.24 holds it off-batch during compile with no
+    timeout (verified), so the cost lands on this request's TTFT and never on
+    the RUNNING batch:
+
+    (a) the initial-position mask, built synchronously (Rust walk,
+        GIL-released, on vLLM's grammar executor thread) — the one fill no
+        defer can cover, because it precedes the first accept_tokens;
+    (b) tier-i: warm_from_t2 for every journaled generic/genN key, fanned out
+        per-key on `pool` — T2->T1 adoption + kernel registration, no walks
+        (kills the ~30 ms per-template registration stall of T2-warm entries);
+    (c) tier-ii: prefetch_build(word, A) on `pool` for every journaled ident
+        A-context x this schema's lexicon words — the schema-fingerprint-keyed
+        BOUNDARY walk class (73% of the measured stall) that no cache tier can
+        share across schemas, walked before the request turns RUNNING.
+
+    The return is COMPLETION-GATED on the critical set — (a) plus all of (c)
+    — with GRID_ADMIT_WARM_MS (default 400) as the outer deadline measured
+    from warmup start; on expiry the grammar is released and the remaining
+    builds finish in the background (soundness-neutral: a later fill blocks on
+    the exact mask, never approximates — warmup only moves WHEN exact entries
+    are built). Tier-i is not awaited (registration-only, no fill correctness
+    dependency).
+
+    NEVER raises: everything is inside a blanket guard because a
+    compile_grammar exception kills the vLLM 0.24 engine (verified) — any
+    warmup failure degrades to today's no-warmup behavior. Worker-side
+    failures stay inside their futures (counted in ``errors``). Kill switch
+    GRID_ADMIT_WARM=0 skips everything: byte-identical behavior to today.
+
+    Returns a stats dict (telemetry/tests): enabled, initial, tier_i, tier_ii,
+    critical_done, errors, deadline_ms, elapsed_ms, error.
+    """
+    stats = {"enabled": False, "initial": False, "tier_i": 0, "tier_ii": 0,
+             "critical_done": False, "errors": 0, "deadline_ms": 0.0,
+             "elapsed_ms": 0.0, "error": None}
+    if os.environ.get("GRID_ADMIT_WARM", "1") == "0":
+        return stats
+    t0 = time.perf_counter()
+    stats["enabled"] = True
+    try:
+        if deadline_ms is None:
+            deadline_ms = float(os.environ.get("GRID_ADMIT_WARM_MS", "400"))
+        stats["deadline_ms"] = deadline_ms
+        prod = guide.producer
+        # (a) initial-position config (critical, synchronous)
+        guide._mask_ids(guide.initial_state)
+        stats["initial"] = True
+        critical = []
+        journal = getattr(prod, "journal", None)
+        if journal is not None:
+            tier_i, tier_ii = journal.plan(guide.lexicons)
+            for key in tier_i:  # (b) registration prewarm; not awaited
+                pool.submit(prod.warm_from_t2, (key,))
+            stats["tier_i"] = len(tier_i)
+            critical = [pool.submit(prod.prefetch_build, w, A)
+                        for w, A in tier_ii]  # (c) the critical set
+            stats["tier_ii"] = len(tier_ii)
+        remaining = deadline_ms / 1e3 - (time.perf_counter() - t0)
+        done, not_done = wait(critical, timeout=max(0.0, remaining))
+        stats["critical_done"] = not not_done
+        stats["errors"] = sum(1 for f in done if f.exception() is not None)
+    except Exception as exc:  # blanket guard: warmup must degrade, never raise
+        stats["error"] = repr(exc)
+    stats["elapsed_ms"] = (time.perf_counter() - t0) * 1e3
+    return stats
+
+
 class GridGrammarSession:
     """The six-method structured-output contract over a GridGuide.
 
@@ -150,6 +222,18 @@ class GridGrammarSession:
         self._sid = None
         self._complete = False
         self._pf_target = None
+        # W6 defer chassis: GRID_DEFER=0 kills the lever (mask_ready always
+        # True — the scheduler guard becomes a no-op, byte-identical to
+        # today); GRID_DEFER_MS (default 100, time-based) bounds starvation.
+        # _defer_t0 is (re)armed whenever a cold walk is scheduled; the 0.0
+        # default reads as cap-expired => ready => blocking exact fill (the
+        # sound direction).
+        self._defer_on = os.environ.get("GRID_DEFER", "1") != "0"
+        try:
+            self._defer_ms = float(os.environ.get("GRID_DEFER_MS", "100"))
+        except ValueError:  # engine-fatal to raise from compile_grammar
+            self._defer_ms = 100.0
+        self._defer_t0 = 0.0
         prod = guide.producer
         if (not _force_v5
                 and guide.audit is None  # E14: audit-enabled guides stay on v5
@@ -182,6 +266,7 @@ class GridGrammarSession:
             self.num_processed_tokens += 1
         if (self.prefetcher is not None and self.states[-1].status != COMPLETE
                 and not self.guide.is_mask_warm(self.states[-1])):
+            self._defer_t0 = time.monotonic()  # W6: cap armed with the walk
             self.prefetcher.schedule(self.guide, self.states[-1])
         return True
 
@@ -252,6 +337,38 @@ class GridGrammarSession:
         del self.states[1:]
         self.num_processed_tokens = 0
 
+    def mask_ready(self) -> bool:
+        """W6 defer chassis (§6 skip-a-round, non-blocking): is the NEXT
+        fill's mask ready without blocking? While False, the patched vLLM
+        scheduler (patch site 4, bench/vllm_grid_patch.py) skips this RUNNING
+        request for the round — absent from num_scheduled_tokens means no
+        bitmask row, no sampled token, KV intact; the cold walk overlaps the
+        other requests' steps. Masks are never approximated: defer only moves
+        WHEN the exact mask is computed.
+
+        True when the session is complete, no cold build was scheduled (warm
+        successor or no prefetcher), or the scheduled build has finished
+        (including errored — fill's wait swallows and recomputes
+        synchronously). Starvation bound: once GRID_DEFER_MS (default 100,
+        time-based so tail-of-batch empty rounds cannot burn it) has elapsed
+        since the cold walk was scheduled, this returns True regardless and
+        the next fill_bitmask BLOCKS on the exact mask. GRID_DEFER=0 kills
+        the lever: always True (the guard is a no-op, identical to today)."""
+        pf = self.prefetcher
+        if not self._defer_on or pf is None:
+            return True
+        if self._sid is not None:  # v6 kernel session
+            if self._complete or self._pf_target is None:
+                return True
+            target = self._pf_target
+        else:  # v5/spec path: the schedule key is the current state
+            if self.states[-1].status == COMPLETE:
+                return True
+            target = self.states[-1]
+        if pf.done(target):
+            return True
+        return (time.monotonic() - self._defer_t0) * 1e3 >= self._defer_ms
+
     # -- v6 internals ----------------------------------------------------------
 
     def _accept_v6(self, tokens: list[int]) -> bool:
@@ -283,6 +400,7 @@ class GridGrammarSession:
         elif self.prefetcher is not None:
             self._drop_prefetch()  # supersede any unconsumed older build
             self._pf_target = _PrefetchBuild(prod, remainder, A)
+            self._defer_t0 = time.monotonic()  # W6: cap armed with the walk
             self.prefetcher.schedule(self._pf_target, self._pf_target)
 
     def _drop_prefetch(self) -> None:
@@ -320,6 +438,13 @@ try:  # pragma: no cover - exercised on vllm hosts (next runner session)
         def is_terminated(self) -> bool:
             return self.session.is_terminated()
 
+        def is_ready(self) -> bool:
+            # W6/patch site 4 hook: False while the next mask's cold build is
+            # in flight — the scheduler skips this request for the round
+            # (never an approximate mask). Backends without this attr default
+            # to ready in the guard (getattr default-True shape).
+            return self.session.mask_ready()
+
         def reset(self):
             self.session.reset()
 
@@ -337,6 +462,11 @@ try:  # pragma: no cover - exercised on vllm hosts (next runner session)
             # instead of queueing; the warm path never schedules (see
             # GridGrammarSession.accept_tokens)
             self._prefetcher = MaskPrefetcher(max_workers=4)
+            # W5 admission-warmup pool (8 threads; walks are GIL-released Rust,
+            # so tier-ii fans out for real). Threads spawn lazily — with
+            # GRID_ADMIT_WARM=0 the pool is never touched.
+            self._warmup_pool = ThreadPoolExecutor(
+                max_workers=8, thread_name_prefix="grid-warmup")
 
         def compile_grammar(
             self, request_type: StructuredOutputOptions, grammar_spec: str
@@ -345,7 +475,19 @@ try:  # pragma: no cover - exercised on vllm hosts (next runner session)
                 raise ValueError(
                     f"grid backend supports GRAMMAR requests only, got {request_type}"
                 )
+            # guide_for stays OUTSIDE the warmup guard: an invalid grammar
+            # raises GrammarInvalid/LALRConflictError exactly as today — only
+            # WARMUP errors are swallowed below.
             guide = self._registry.guide_for(_parse_spec(grammar_spec))
+            try:
+                # W5: warm this template while the request waits off-batch.
+                # admission_warmup already never raises; the belt-and-braces
+                # guard covers even its argument plumbing — a compile_grammar
+                # exception is engine-fatal in vLLM 0.24 (verified), so warmup
+                # failures must degrade to no-warmup, never raise.
+                admission_warmup(guide, self._warmup_pool)
+            except Exception:
+                pass
             return _GridGrammar(
                 session=GridGrammarSession(guide, prefetcher=self._prefetcher)
             )
@@ -356,6 +498,9 @@ try:  # pragma: no cover - exercised on vllm hosts (next runner session)
             )
 
         def destroy(self):
+            if getattr(self, "_warmup_pool", None) is not None:
+                self._warmup_pool.shutdown(wait=False, cancel_futures=True)
+                self._warmup_pool = None
             if getattr(self, "_prefetcher", None) is not None:
                 self._prefetcher.shutdown()
                 self._prefetcher = None

@@ -24,7 +24,7 @@
 
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::collections::{HashMap, HashSet};
 
 const DEAD: i32 = -1;
@@ -117,6 +117,56 @@ fn width_for(n_terminals: usize) -> Option<usize> {
     }
 }
 
+// ------------------------------------------------- walk threads (W8, rayon)
+//
+// GRID_WALK_THREADS (read per walk call; unset/0/1/invalid = 0) is the kill
+// switch for rayon intra-walk parallelism: at 0 the walk is the sequential
+// `walk_raw`, byte-for-byte the pre-W8 code path. >= 2 dispatches to
+// `walk_raw_par` on a dedicated pool of min(GRID_WALK_THREADS, ncpu) threads,
+// lazily (re)built per PID so a forked vLLM worker never touches pool threads
+// that died with its parent. GRID_WALK_PAR_MIN (default 4096 trie nodes;
+// test-tunable) keeps small tries inline where task overhead would exceed the
+// walk itself. Parallel output is bit-identical to sequential
+// (tests/trie/test_walk_threads.py differential corpus).
+
+const WALK_PAR_MIN_DEFAULT: usize = 4096;
+
+fn env_usize(name: &str, default: usize) -> usize {
+    match std::env::var(name) {
+        Ok(s) => s.trim().parse::<usize>().unwrap_or(default),
+        Err(_) => default,
+    }
+}
+
+#[allow(clippy::type_complexity)]
+static WALK_POOL: Mutex<Option<(u32, usize, Arc<rayon::ThreadPool>)>> = Mutex::new(None);
+
+/// Dedicated walk pool: `threads` capped at ncpu; None when the cap leaves
+/// < 2 threads or the pool cannot be built (callers fall back to sequential).
+fn walk_pool(threads: usize) -> Option<Arc<rayon::ThreadPool>> {
+    let ncpu = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let want = threads.min(ncpu);
+    if want < 2 {
+        return None;
+    }
+    let pid = std::process::id();
+    let mut slot = WALK_POOL.lock().unwrap();
+    if let Some((p, n, pool)) = slot.as_ref() {
+        if *p == pid && *n == want {
+            return Some(Arc::clone(pool));
+        }
+        if *p != pid {
+            // forked child: the parent's pool threads do not exist here — never
+            // run Drop on the inherited registry (leak is bounded: once per
+            // fork); rebuild lazily below.
+            std::mem::forget(slot.take());
+        }
+    }
+    let pool = Arc::new(rayon::ThreadPoolBuilder::new().num_threads(want).build().ok()?);
+    *slot = Some((pid, want, Arc::clone(&pool)));
+    Some(pool)
+}
+
 // ------------------------------------------------------------------ walker
 
 struct RustWalkerImpl<const W: usize> {
@@ -163,7 +213,8 @@ struct Ev<const W: usize> {
 }
 
 type WalkGroups = Vec<(Vec<(Vec<u64>, u32)>, Vec<Py<PyBytes>>, Py<PyBytes>, Vec<u32>)>;
-type WalkGroupsRaw = Vec<(Vec<(Vec<u64>, u32)>, Vec<Vec<u8>>, Vec<u8>, Vec<u32>)>;
+type WalkGroupRaw = (Vec<(Vec<u64>, u32)>, Vec<Vec<u8>>, Vec<u8>, Vec<u32>);
+type WalkGroupsRaw = Vec<WalkGroupRaw>;
 
 impl<const W: usize> RustWalkerImpl<W> {
     #[inline]
@@ -248,6 +299,10 @@ impl<const W: usize> RustWalkerImpl<W> {
     /// GIL-free (kernel v4): callers detach() around this so ms-scale cold
     /// walks overlap Python work (SS6 batch scheduling contract); PyBytes
     /// wrapping happens after reattach.
+    ///
+    /// W8: `walk_range` below is a lockstep transcript of this per-node body
+    /// (the rayon path). Any change here MUST land there too —
+    /// tests/trie/test_walk_threads.py binds the two bit-for-bit.
     fn walk_raw(&self, remainder: &[u8], a_mask: &[u64; W]) -> (Vec<u32>, WalkGroupsRaw) {
         let n = self.nodes.len();
         let mut ci: Vec<u32> = Vec::new();
@@ -509,6 +564,337 @@ impl<const W: usize> RustWalkerImpl<W> {
         ci.sort_unstable();
         (ci, groups)
     }
+
+    /// Env-gated dispatch (W8): the sequential `walk_raw` (GRID_WALK_THREADS
+    /// unset/0/1 — the kill switch — or a sub-threshold trie or pool failure)
+    /// or the rayon `walk_raw_par`. Output is bit-identical either way.
+    fn walk_auto(&self, remainder: &[u8], a_mask: &[u64; W]) -> (Vec<u32>, WalkGroupsRaw) {
+        let threads = env_usize("GRID_WALK_THREADS", 0);
+        if threads >= 2 {
+            let par_min = env_usize("GRID_WALK_PAR_MIN", WALK_PAR_MIN_DEFAULT).max(1);
+            if self.nodes.len() >= par_min {
+                if let Some(pool) = walk_pool(threads) {
+                    return self.walk_raw_par(remainder, a_mask, &pool, par_min);
+                }
+            }
+        }
+        self.walk_raw(remainder, a_mask)
+    }
+
+    /// W8 rayon walk: the DFS splits at TOP-LEVEL trie children. Every
+    /// top-level subtree is walked with exactly the state the sequential DFS
+    /// reaches it with (the root frame: `seed(remainder)`, empty events,
+    /// n_real = 0 — walk_raw pops/truncates back to it at every top-level
+    /// boundary, so subtrees are independent given the root frame). Contiguous
+    /// subtrees are chunked to bound task overhead, and chunk outputs merge IN
+    /// TRIE ORDER: ci concatenated then globally sort_unstable exactly like
+    /// walk_raw's final sort; groups re-interned first-encounter-first, so the
+    /// group order, each group's representative (globally first encounter) and
+    /// each group's tid append order are byte-identical to sequential.
+    fn walk_raw_par(
+        &self,
+        remainder: &[u8],
+        a_mask: &[u64; W],
+        pool: &rayon::ThreadPool,
+        par_min: usize,
+    ) -> (Vec<u32>, WalkGroupsRaw) {
+        use rayon::prelude::*;
+        let n = self.nodes.len();
+        let target = (n / (pool.current_num_threads() * 8).max(1))
+            .max(par_min / 8)
+            .max(1);
+        let mut chunks: Vec<(usize, usize)> = Vec::new();
+        {
+            let mut start = 0usize;
+            let mut i = 0usize;
+            while i < n {
+                i += (self.nodes[i] >> 32) as usize; // top-level sibling hop
+                if i - start >= target || i >= n {
+                    chunks.push((start, i.min(n)));
+                    start = i;
+                }
+            }
+        }
+        if chunks.len() <= 1 {
+            return self.walk_raw(remainder, a_mask);
+        }
+        let seed = self.seed(remainder);
+        let mut a_or_ign = *a_mask;
+        for i in 0..W {
+            a_or_ign[i] |= self.ignored[i];
+        }
+        let results: Vec<(Vec<u32>, Vec<(Vec<u8>, WalkGroupRaw)>)> = pool.install(|| {
+            chunks
+                .par_iter()
+                .map(|&(lo, hi)| self.walk_range(remainder, a_mask, &a_or_ign, seed, lo, hi))
+                .collect()
+        });
+        let mut ci: Vec<u32> = Vec::new();
+        let mut group_ix: HashMap<Vec<u8>, usize> = HashMap::new();
+        let mut groups: WalkGroupsRaw = Vec::new();
+        for (ci_part, keyed) in results {
+            ci.extend_from_slice(&ci_part);
+            for (key, g) in keyed {
+                match group_ix.get(&key) {
+                    Some(&gi) => groups[gi].3.extend_from_slice(&g.3),
+                    None => {
+                        group_ix.insert(key, groups.len());
+                        groups.push(g);
+                    }
+                }
+            }
+        }
+        ci.sort_unstable();
+        (ci, groups)
+    }
+
+    /// One walk_raw_par task: the walk_raw DFS restricted to the top-level
+    /// subtree window [lo, hi) (both are top-level sibling boundaries), seeded
+    /// from the shared root frame. The per-node body is a LOCKSTEP TRANSCRIPT
+    /// of walk_raw (any change there must land here too — the differential
+    /// tests in tests/trie/test_walk_threads.py bind them); the only deltas:
+    /// ci is unsorted (caller sorts globally) and groups carry their interning
+    /// KEY out so the caller can merge chunks into walk_raw's global
+    /// first-encounter group order.
+    #[allow(clippy::type_complexity)]
+    fn walk_range(
+        &self,
+        remainder: &[u8],
+        a_mask: &[u64; W],
+        a_or_ign: &[u64; W],
+        seed: (i32, usize, i32),
+        lo: usize,
+        hi: usize,
+    ) -> (Vec<u32>, Vec<(Vec<u8>, WalkGroupRaw)>) {
+        let mut ci: Vec<u32> = Vec::new();
+        let lex_sensitive = self.lex_allowed.is_some();
+        let mut group_ix: HashMap<Vec<u8>, usize> = HashMap::new();
+        let mut groups: Vec<(Vec<u8>, WalkGroupRaw)> = Vec::new();
+
+        let mut events: Vec<Ev<W>> = Vec::new();
+        let mut path: Vec<u8> = Vec::with_capacity(remainder.len() + 64);
+        path.extend_from_slice(remainder);
+        let (s_state, s_len, s_last) = seed;
+        let mut stack: Vec<Frame> = vec![Frame {
+            end: hi + 1,
+            dfa_state: s_state,
+            seg_start: 0,
+            seg_len: remainder.len(),
+            last_len: s_len,
+            last_state: s_last,
+            events_len: 0,
+            n_real: 0,
+            cd_flag: false,
+        }];
+
+        let mut i = lo;
+        while i < hi {
+            while stack.len() > 1 && i >= stack.last().unwrap().end {
+                stack.pop();
+            }
+            {
+                let f = stack.last().unwrap();
+                events.truncate(f.events_len);
+                path.truncate(f.seg_start + f.seg_len);
+            }
+            let word = self.nodes[i];
+            let byte = (word & 0xFF) as u8;
+            let tid_raw = ((word >> 8) & 0xFF_FFFF) as i64 - 1;
+            let size = (word >> 32) as usize;
+
+            let parent = stack.last().unwrap();
+            let mut cur = parent.dfa_state;
+            let mut seg_start = parent.seg_start;
+            let mut seg_len = parent.seg_len;
+            let base = seg_start + seg_len;
+            debug_assert_eq!(base, path.len());
+            let mut last_len = parent.last_len;
+            let mut last_state = parent.last_state;
+            let mut n_real = parent.n_real;
+            let mut cd_flag = parent.cd_flag;
+            let mut reject = false;
+            let events_base = events.len();
+
+            let mut pending: Vec<u8> = vec![byte];
+            let mut idx = 0usize;
+            while idx < pending.len() {
+                let b = pending[idx];
+                idx += 1;
+                let nx = self.tr(cur, b);
+                if nx != DEAD {
+                    path.push(b);
+                    seg_len += 1;
+                    cur = nx;
+                    if self.accept[nx as usize] != -1 {
+                        last_len = seg_len;
+                        last_state = nx;
+                    }
+                    continue;
+                }
+                if last_state == -1 {
+                    reject = true;
+                    break;
+                }
+                let cands = self.accepts_all[last_state as usize];
+                let lexeme: Vec<u8> = path[seg_start..seg_start + last_len].to_vec();
+                if n_real == 0 {
+                    match self.pick_viable(&cands, &lexeme, a_mask) {
+                        None => {
+                            reject = true;
+                            break;
+                        }
+                        Some(t) => {
+                            if !m_bit(&self.ignored, t) {
+                                n_real = 1;
+                            }
+                        }
+                    }
+                } else {
+                    let pure_ignored =
+                        m_and_any(&cands, &self.ignored) && !m_any(&m_and_not(&cands, &self.ignored));
+                    if !pure_ignored {
+                        cd_flag = true;
+                    }
+                }
+                let (pass, ign_pick) = if lex_sensitive {
+                    let mut p = [0u64; W];
+                    m_find(&cands, |t| {
+                        if self.lexeme_ok(t, &lexeme) {
+                            m_set(&mut p, t);
+                        }
+                        false
+                    });
+                    (p, self.pick_first(&m_and(&cands, &self.ignored)))
+                } else {
+                    ([0u64; W], -1)
+                };
+                events.push(Ev { cands, lexeme, pass, ign_pick });
+                let rest_len = seg_len - last_len;
+                let mut tail: Vec<u8> = Vec::with_capacity(rest_len + 1 + pending.len() - idx);
+                tail.extend_from_slice(&path[seg_start + last_len..seg_start + seg_len]);
+                tail.push(b);
+                tail.extend_from_slice(&pending[idx..]);
+                pending = tail;
+                idx = 0;
+                cur = self.dfa_start;
+                path.truncate(base);
+                seg_start = base;
+                seg_len = 0;
+                last_len = 0;
+                last_state = -1;
+            }
+
+            if reject {
+                events.truncate(events_base);
+                i += size;
+                continue;
+            }
+
+            let seg = &path[seg_start..seg_start + seg_len];
+            let verdict_ci: Option<bool> = if n_real == 0 {
+                if !seg.is_empty() && !self.partial_viable(seg, cur, a_or_ign) {
+                    events.truncate(events_base);
+                    i += size;
+                    continue;
+                }
+                Some(true)
+            } else if cd_flag || n_real >= 2 {
+                Some(false)
+            } else if seg.is_empty() {
+                Some(true)
+            } else if self.partial_viable(seg, cur, &self.ignored) {
+                Some(true)
+            } else {
+                Some(false)
+            };
+
+            if tid_raw >= 0 {
+                let tid = tid_raw as u32;
+                match verdict_ci {
+                    Some(true) => match self.aliases.get(&tid) {
+                        Some(all) => ci.extend_from_slice(all),
+                        None => ci.push(tid),
+                    },
+                    Some(false) => {
+                        let mut key: Vec<u8> = Vec::with_capacity(
+                            events.len() * (8 * W + 8) + 2 + 16 * W,
+                        );
+                        if lex_sensitive {
+                            for e in events.iter() {
+                                for w in e.pass.iter() {
+                                    key.extend_from_slice(&w.to_le_bytes());
+                                }
+                                key.extend_from_slice(&e.ign_pick.to_le_bytes());
+                            }
+                            if seg.is_empty() {
+                                key.push(0);
+                            } else {
+                                key.push(1);
+                                let lv = self.live[cur as usize];
+                                let mut allow = [0u64; W];
+                                m_find(&lv, |t| {
+                                    if self.prefix_ok(t, seg) {
+                                        m_set(&mut allow, t);
+                                    }
+                                    false
+                                });
+                                for w in lv.iter() {
+                                    key.extend_from_slice(&w.to_le_bytes());
+                                }
+                                for w in allow.iter() {
+                                    key.extend_from_slice(&w.to_le_bytes());
+                                }
+                                key.push(m_and_any(&lv, &self.ignored) as u8);
+                            }
+                        } else {
+                            for e in events.iter() {
+                                for w in e.cands.iter() {
+                                    key.extend_from_slice(&w.to_le_bytes());
+                                }
+                            }
+                            for w in self.live[cur as usize].iter() {
+                                key.extend_from_slice(&w.to_le_bytes());
+                            }
+                        }
+                        let gi = match group_ix.get(&key) {
+                            Some(&gi) => gi,
+                            None => {
+                                let evs: Vec<(Vec<u64>, u32)> = events
+                                    .iter()
+                                    .map(|e| (e.cands.to_vec(), e.lexeme.len() as u32))
+                                    .collect();
+                                let segs: Vec<Vec<u8>> =
+                                    events.iter().map(|e| e.lexeme.clone()).collect();
+                                group_ix.insert(key.clone(), groups.len());
+                                groups.push((key, (evs, segs, seg.to_vec(), Vec::new())));
+                                groups.len() - 1
+                            }
+                        };
+                        let ids = &mut groups[gi].1 .3;
+                        match self.aliases.get(&tid) {
+                            Some(all) => ids.extend_from_slice(all),
+                            None => ids.push(tid),
+                        }
+                    }
+                    None => {}
+                }
+            }
+
+            stack.push(Frame {
+                end: i + size,
+                dfa_state: cur,
+                seg_start,
+                seg_len,
+                last_len,
+                last_state,
+                events_len: events.len(),
+                n_real,
+                cd_flag,
+            });
+            i += 1;
+        }
+        (ci, groups)
+    }
 }
 
 fn wrap_groups(py: Python<'_>, raw: WalkGroupsRaw) -> WalkGroups {
@@ -661,7 +1047,9 @@ impl RustWalker {
     /// open-literal giants was the last O(V) Python cost on the cold path.
     /// The walk itself runs with the GIL released (SS6 overlap contract):
     /// ms-scale cold walks scheduled on a worker thread no longer stall the
-    /// scheduler thread's Python work.
+    /// scheduler thread's Python work. GRID_WALK_THREADS >= 2 additionally
+    /// parallelizes the walk itself on the dedicated rayon pool (walk_auto;
+    /// still inside detach), bit-identical to the sequential walk.
     #[pyo3(signature = (remainder, a_mask))]
     #[allow(clippy::type_complexity)]
     fn walk(
@@ -679,7 +1067,7 @@ impl RustWalker {
             ) -> (Py<PyBytes>, WalkGroups) {
                 let mask = m_from_words::<W>(a_mask);
                 let (ci, raw) = py.detach(move || {
-                    let (ci, raw) = w.walk_raw(&remainder, &mask);
+                    let (ci, raw) = w.walk_auto(&remainder, &mask);
                     // i32-le serialization inside detach: ids are < 2^24
                     // (24-bit trie tid field), so u32 -> i32 is lossless
                     let mut ci_bytes: Vec<u8> = Vec::with_capacity(ci.len() * 4);

@@ -1,0 +1,112 @@
+From: GRID authors <mohsen.arjmandi@evolutionid.com>
+Subject: [Draft PR] [Core] Structured output: let a grammar defer its own
+ scheduling while its bitmask is not ready (is_ready hook + RUNNING-loop
+ guard + starvation cap)
+
+DRAFT — NOT APPLIED by bench/vllm_grid_patch.py. This is the upstream vLLM
+PR that retires the downstream patch site 4 ("grid mask-readiness defer").
+Hunks are written against vLLM v0.24.0.
+
+Motivation
+----------
+The V1 scheduler gates grammar readiness only for WAITING requests
+(WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR). Once a structured request is
+RUNNING, every scheduled step fills its bitmask row before sampling
+(EngineCore.step: the fill joins before sample_tokens), so a backend whose
+next-token mask is still being computed (e.g. on a background thread,
+overlapped with the forward pass) stalls the WHOLE batch for that step:
+fill time is max()'d against the forward. Backends have no way to say
+"skip me this round; give me one more forward window".
+
+Mechanism
+---------
+1. StructuredOutputGrammar.is_ready() -> bool, default True (non-abstract:
+   existing backends are unaffected).
+2. Scheduler RUNNING loop: a request whose grammar reports is_ready() False
+   is skipped for the step, exactly like the next_decode_eligible_step
+   defer at the same position. It is absent from num_scheduled_tokens,
+   therefore absent from structured_output_request_ids: no bitmask row is
+   filled, no token sampled, KV blocks intact. Relaxed FCFS is already
+   tolerated at this loop position (see the num_new_tokens == 0 comment).
+3. Starvation cap: a per-request deadline (GRAMMAR_DEFER_CAP_S, default
+   0.1 s) forces scheduling after the cap; fill_bitmask then blocks on the
+   grammar exactly as today. Deadline entries are popped whenever the
+   request is scheduled; a request aborted while deferred leaves at most
+   one stale dict entry (bounded by max_num_seqs; can be cleaned in
+   _free_request if reviewers prefer).
+
+Soundness: the skipped request receives no mask and no token that round;
+when scheduled it always gets the exact mask — no approximation anywhere.
+An empty schedule step is already legal (same path WAITING-grammar polling
+uses).
+---
+ vllm/v1/core/sched/scheduler.py              | 22 ++++++++++++++++++++++
+ vllm/v1/structured_output/backend_types.py   |  8 ++++++++
+ 2 files changed, 30 insertions(+)
+
+diff --git a/vllm/v1/structured_output/backend_types.py b/vllm/v1/structured_output/backend_types.py
+--- a/vllm/v1/structured_output/backend_types.py
++++ b/vllm/v1/structured_output/backend_types.py
+@@ -88,6 +88,14 @@ class StructuredOutputGrammar(ABC):
+             bool: True if the process is terminated, False otherwise.
+         """
+
++    def is_ready(self) -> bool:
++        """Whether the grammar can fill its next-token bitmask without
++        blocking. The scheduler MAY skip a RUNNING request for a step while
++        this returns False (bounded by the scheduler's starvation cap);
++        backends that compute masks inline just inherit this default.
++        """
++        return True
++
+     @abstractmethod
+     def reset(self):
+         """
+diff --git a/vllm/v1/core/sched/scheduler.py b/vllm/v1/core/sched/scheduler.py
+--- a/vllm/v1/core/sched/scheduler.py
++++ b/vllm/v1/core/sched/scheduler.py
+@@ -66,6 +66,9 @@ logger = init_logger(__name__)
+
+ class Scheduler(SchedulerInterface):
++    # Structured output: max time a RUNNING request may be deferred while
++    # its grammar reports not-ready (see the RUNNING-loop guard below).
++    GRAMMAR_DEFER_CAP_S: float = 0.1
++
+     def __init__(
+         self,
+         vllm_config: VllmConfig,
+@@ -276,6 +279,8 @@ class Scheduler(SchedulerInterface):
+         # cadence (`next_decode_eligible_step`).
+         self.current_step = 0
++        # Structured output defer (see GRAMMAR_DEFER_CAP_S): request_id ->
++        # monotonic deadline after which the request is scheduled regardless.
++        self._grammar_defer_deadline: dict[str, float] = {}
+         # DP prefill balancing: Flag to track whether the last cadence-aligned
+         # prefill batch fully drained the waiting queue. Prefill throttling
+         # is disabled in this case.
+@@ -451,6 +456,21 @@ class Scheduler(SchedulerInterface):
+                 req_index += 1
+                 continue
+
++            # Structured output: a RUNNING request whose grammar reports its
++            # next-token bitmask is not ready yet (e.g. still building on a
++            # background thread) is skipped for this step, like the decode-
++            # cadence defer above — absent from num_scheduled_tokens means no
++            # bitmask row, no sampled token, KV blocks intact. A per-request
++            # deadline caps starvation; on expiry the request is scheduled
++            # and fill_bitmask blocks on the grammar exactly as today.
++            so_request = request.structured_output_request
++            if so_request is not None and so_request.grammar is not None:
++                if not so_request.grammar.is_ready():
++                    now = time.monotonic()
++                    deadline = self._grammar_defer_deadline.setdefault(
++                        request.request_id, now + self.GRAMMAR_DEFER_CAP_S
++                    )
++                    if now < deadline:
++                        req_index += 1
++                        continue
++                self._grammar_defer_deadline.pop(request.request_id, None)
++
+             if defer_prefills and request.is_prefill_chunk:
+                 # DP prefill balancing: defer this in-progress prefill chunk to a
+                 # cadence-aligned step; decodes still run to fill this step.
