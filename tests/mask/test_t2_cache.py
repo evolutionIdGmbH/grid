@@ -25,6 +25,11 @@ def test_generic_entries_cross_schemas_without_walk(sql_source, sql_tokenizer, m
     calls = []
     orig = P.walk
     monkeypatch.setattr(P, "walk", lambda *a, **k: calls.append(1) or orig(*a, **k))
+    # count the kernel-v7 cold-build entrypoint too (under GRID_V7=1 the miss
+    # path is _v7_build, never walk(); one cold build = one count either way)
+    orig_v7 = P.MaskProducer._v7_build
+    monkeypatch.setattr(P.MaskProducer, "_v7_build",
+                        lambda self, *a, **k: calls.append(1) or orig_v7(self, *a, **k))
 
     gb = reg.guide_for({"grammar": sql_source, "schema": {"orders": ["total", "qty"]}})
     gb.producer.set_genn_keys(False)

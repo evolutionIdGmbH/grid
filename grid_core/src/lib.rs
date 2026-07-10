@@ -21,11 +21,29 @@
 //! W in {1, 2, 4, 8} (up to 512 terminals; W=1 compiles to the original scalar
 //! ops). The width is chosen from `n_terminals` at construction and exposed as
 //! `.width`; masks cross the FFI as little-endian word lists.
+//!
+//! Kernel v7: cold-miss materialization moves in-kernel. `RustWalker::
+//! walk_payload` returns the walk as (ci i32-le bytes, opaque blob v1);
+//! `RustVerdicts::register_blob` parses the blob, builds the VGroups,
+//! adaptive-encodes the ci payload, hashes the entry id (BLAKE2b-128, byte-
+//! identical to the Python hashlib construction) and registers the entry —
+//! all inside ONE GIL-released call, deduplicated kernel-side by entry id.
+//! The blob doubles as the cross-producer export payload: a foreign kernel's
+//! register_blob recomputes VEvents/tails under ITS OWN lexicons, exactly
+//! like today's register_bytes-from-kernel_groups semantics. To make the
+//! detached build safe against concurrent verdict/session calls, every
+//! v7-reachable RustVerdicts method is `&self`: the entry store and the v6
+//! session tables live behind RwLocks (lock order: sessions -> mem ->
+//! entries; the session-tables lock nests inside sessions/mem only).
 
+use blake2::digest::consts::U16;
+use blake2::{Blake2b, Digest};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::collections::{HashMap, HashSet};
+
+type Blake2b128 = Blake2b<U16>;
 
 const DEAD: i32 = -1;
 
@@ -907,6 +925,236 @@ fn wrap_groups(py: Python<'_>, raw: WalkGroupsRaw) -> WalkGroups {
         .collect()
 }
 
+// ------------------------------------------------- v7 encode + blob format
+//
+// Blob v1 (LE): [u8 ver=1][u32 W][u32 n_groups], per group [u32 n_events]
+// {[u64 x W cands][u32 lex_len][lexeme]} [u32 rem_len][rem][u32 n_ids]
+// [i32-le x n ids] — exactly WalkGroupsRaw, order-preserving (group order is
+// part of the order-exact parity contract). Unknown version = hard error.
+// The per-event u32 length in WalkGroupsRaw equals the lexeme byte length,
+// so it is not stored: decode reconstructs it as lexeme.len().
+
+const BLOB_V1: u8 = 1;
+const TAG_ACCEPT: u8 = 0;
+const TAG_REJECT: u8 = 1;
+const TAG_BITSET: u8 = 2;
+
+fn blob_encode(w: usize, groups: &WalkGroupsRaw) -> Vec<u8> {
+    let mut b: Vec<u8> = Vec::with_capacity(64 + groups.len() * (32 + 16 * w));
+    b.push(BLOB_V1);
+    b.extend_from_slice(&(w as u32).to_le_bytes());
+    b.extend_from_slice(&(groups.len() as u32).to_le_bytes());
+    for (evs, segs, rem, ids) in groups {
+        b.extend_from_slice(&(evs.len() as u32).to_le_bytes());
+        for (i, (cands, _len)) in evs.iter().enumerate() {
+            for word in cands.iter().take(w) {
+                b.extend_from_slice(&word.to_le_bytes());
+            }
+            let lx = &segs[i];
+            b.extend_from_slice(&(lx.len() as u32).to_le_bytes());
+            b.extend_from_slice(lx);
+        }
+        b.extend_from_slice(&(rem.len() as u32).to_le_bytes());
+        b.extend_from_slice(rem);
+        b.extend_from_slice(&(ids.len() as u32).to_le_bytes());
+        for t in ids {
+            b.extend_from_slice(&(*t as i32).to_le_bytes());
+        }
+    }
+    b
+}
+
+struct BlobReader<'a> {
+    b: &'a [u8],
+    off: usize,
+}
+
+impl<'a> BlobReader<'a> {
+    fn take(&mut self, n: usize) -> PyResult<&'a [u8]> {
+        if self.off + n > self.b.len() {
+            return Err(pyo3::exceptions::PyValueError::new_err("truncated v7 blob"));
+        }
+        let s = &self.b[self.off..self.off + n];
+        self.off += n;
+        Ok(s)
+    }
+
+    fn u32(&mut self) -> PyResult<u32> {
+        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
+}
+
+fn blob_decode(blob: &[u8], expect_w: usize) -> PyResult<WalkGroupsRaw> {
+    if blob.first() != Some(&BLOB_V1) {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "unknown v7 blob version: {:?}", blob.first()
+        )));
+    }
+    let mut r = BlobReader { b: blob, off: 1 };
+    let w = r.u32()? as usize;
+    if w != expect_w {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "v7 blob width {w} != kernel width {expect_w}"
+        )));
+    }
+    let n_groups = r.u32()? as usize;
+    let mut groups: WalkGroupsRaw = Vec::with_capacity(n_groups);
+    for _ in 0..n_groups {
+        let n_events = r.u32()? as usize;
+        let mut evs: Vec<(Vec<u64>, u32)> = Vec::with_capacity(n_events);
+        let mut segs: Vec<Vec<u8>> = Vec::with_capacity(n_events);
+        for _ in 0..n_events {
+            let mut cands: Vec<u64> = Vec::with_capacity(w);
+            for _ in 0..w {
+                cands.push(u64::from_le_bytes(r.take(8)?.try_into().unwrap()));
+            }
+            let lx_len = r.u32()? as usize;
+            let lx = r.take(lx_len)?.to_vec();
+            evs.push((cands, lx_len as u32));
+            segs.push(lx);
+        }
+        let rem_len = r.u32()? as usize;
+        let rem = r.take(rem_len)?.to_vec();
+        let n_ids = r.u32()? as usize;
+        let mut ids: Vec<u32> = Vec::with_capacity(n_ids);
+        for _ in 0..n_ids {
+            ids.push(i32::from_le_bytes(r.take(4)?.try_into().unwrap()) as u32);
+        }
+        groups.push((evs, segs, rem, ids));
+    }
+    if r.off != blob.len() {
+        return Err(pyo3::exceptions::PyValueError::new_err("v7 blob trailing bytes"));
+    }
+    Ok(groups)
+}
+
+/// ci ids from ONE i32-le buffer (the walk/register wire format).
+fn ids_from_le(ci: &[u8]) -> PyResult<Vec<i32>> {
+    if ci.len() % 4 != 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "ci byte buffer length must be a multiple of 4 (i32-le ids)",
+        ));
+    }
+    Ok(ci.chunks_exact(4)
+        .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect())
+}
+
+/// grid/mask/cache.py adaptive_encode, transcribed byte-for-byte: payload
+/// sizes compared as signed (4n, ACCEPT) / (4(V-n), REJECT) / (ceil(V/8),
+/// BITSET) tuples with the tag as the tie-break (ACCEPT < REJECT < BITSET);
+/// n counts DUPLICATES; ACCEPT ids ascending as u32-le preserving duplicates
+/// (np.sort semantics); REJECT the ascending complement; BITSET bit t ->
+/// byte t>>3, bit t&7, ceil(V/8) zero-padded bytes. Ids must lie in
+/// [0, vocab) — the walk guarantees it; out-of-range is a hard error (the
+/// Python reference would raise from numpy fancy indexing on the REJECT and
+/// BITSET paths).
+fn adaptive_encode_ids(ids: &[i32], vocab: u64) -> PyResult<(u8, Vec<u8>)> {
+    let v = vocab as i64;
+    for t in ids {
+        if (*t as i64) < 0 || (*t as i64) >= v {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "ci id {t} outside vocab {vocab}"
+            )));
+        }
+    }
+    let n = ids.len() as i64;
+    let size_accept = 4 * n;
+    let size_reject = 4 * (v - n);
+    let size_bitset = (v + 7) / 8;
+    let mut tag = TAG_ACCEPT;
+    let mut best = size_accept;
+    if size_reject < best {
+        best = size_reject;
+        tag = TAG_REJECT;
+    }
+    if size_bitset < best {
+        tag = TAG_BITSET;
+    }
+    let payload: Vec<u8> = match tag {
+        TAG_ACCEPT => {
+            let mut sorted: Vec<i32> = ids.to_vec();
+            if sorted.windows(2).any(|p| p[0] > p[1]) {
+                sorted.sort_unstable(); // defensive: kernel ci arrives sorted
+            }
+            let mut p = Vec::with_capacity(sorted.len() * 4);
+            for t in &sorted {
+                p.extend_from_slice(&(*t as u32).to_le_bytes());
+            }
+            p
+        }
+        TAG_REJECT => {
+            let mut keep = vec![false; v as usize];
+            for t in ids {
+                keep[*t as usize] = true;
+            }
+            let mut p = Vec::with_capacity(((v - n).max(0) as usize) * 4);
+            for (t, k) in keep.iter().enumerate() {
+                if !k {
+                    p.extend_from_slice(&(t as u32).to_le_bytes());
+                }
+            }
+            p
+        }
+        _ => {
+            let mut bits = vec![0u8; size_bitset as usize];
+            for t in ids {
+                bits[(*t as usize) >> 3] |= 1 << (*t & 7);
+            }
+            bits
+        }
+    };
+    Ok((tag, payload))
+}
+
+/// entry_id = BLAKE2b(digest_size=16)(key_repr || [tag] || payload) — the
+/// hashlib.blake2b construction (digest_length in the parameter block).
+fn entry_id_128(key_repr: &[u8], tag: u8, payload: &[u8]) -> [u8; 16] {
+    let mut h = Blake2b128::new();
+    h.update(key_repr);
+    h.update([tag]);
+    h.update(payload);
+    h.finalize().into()
+}
+
+fn hex32(id: &[u8; 16]) -> String {
+    let mut s = String::with_capacity(32);
+    for b in id {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+/// ci ids -> packed u32 bit words (the fill_bits prefix); sized to the
+/// highest id, exactly like register_impl always did.
+fn ci_bits_of(ids: &[i32]) -> Vec<u32> {
+    let words = ids.iter().map(|t| (*t as usize >> 5) + 1).max().unwrap_or(0);
+    let mut bits = vec![0u32; words];
+    for t in ids {
+        bits[*t as usize >> 5] |= 1 << (t & 31);
+    }
+    bits
+}
+
+/// Module-level test surface: (tag, payload) for ci ids (ONE i32-le buffer)
+/// at vocab_size — cross-implementation vectors against the Python
+/// adaptive_encode (tests/mask/test_v7_encode.py).
+#[pyfunction]
+fn encode_mask(py: Python<'_>, ci: &Bound<'_, PyBytes>, vocab_size: u64) -> PyResult<(u8, Py<PyBytes>)> {
+    let ids = ids_from_le(ci.as_bytes())?;
+    let (tag, payload) = adaptive_encode_ids(&ids, vocab_size)?;
+    Ok((tag, PyBytes::new(py, &payload).unbind()))
+}
+
+/// Module-level test surface: (entry_id hex, tag) for (key_repr, ci, vocab)
+/// — exactly the register_blob hash, for cross-impl blake2b vectors.
+#[pyfunction]
+fn entry_id_hex(key_repr: &Bound<'_, PyBytes>, ci: &Bound<'_, PyBytes>, vocab_size: u64) -> PyResult<(String, u8)> {
+    let ids = ids_from_le(ci.as_bytes())?;
+    let (tag, payload) = adaptive_encode_ids(&ids, vocab_size)?;
+    Ok((hex32(&entry_id_128(key_repr.as_bytes(), tag, &payload)), tag))
+}
+
 fn parse_lexicon(
     lexicon: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<(Option<HashMap<u32, HashSet<Vec<u8>>>>, Option<HashMap<u32, HashSet<Vec<u8>>>>)> {
@@ -1081,6 +1329,40 @@ impl RustWalker {
             go(w, py, remainder, &a_mask)
         }))
     }
+
+    /// Kernel v7 walk: -> (ci as ONE i32-le PyBytes, blob v1 PyBytes). Same
+    /// walk_auto as walk() (rayon-capable, GIL released), but the group
+    /// output serializes to the opaque blob INSIDE the detach — no Python
+    /// tuple/bytes-per-group materialization. The blob feeds
+    /// RustVerdicts::register_blob (registration and cross-producer import).
+    #[pyo3(signature = (remainder, a_mask))]
+    fn walk_payload(
+        &self,
+        py: Python<'_>,
+        remainder: Vec<u8>,
+        a_mask: Vec<u64>,
+    ) -> PyResult<(Py<PyBytes>, Py<PyBytes>)> {
+        Ok(walker_dispatch!(self, w, {
+            fn go<const W: usize>(
+                w: &RustWalkerImpl<W>,
+                py: Python<'_>,
+                remainder: Vec<u8>,
+                a_mask: &[u64],
+            ) -> (Py<PyBytes>, Py<PyBytes>) {
+                let mask = m_from_words::<W>(a_mask);
+                let (ci_bytes, blob) = py.detach(move || {
+                    let (ci, raw) = w.walk_auto(&remainder, &mask);
+                    let mut ci_bytes: Vec<u8> = Vec::with_capacity(ci.len() * 4);
+                    for t in &ci {
+                        ci_bytes.extend_from_slice(&(*t as i32).to_le_bytes());
+                    }
+                    (ci_bytes, blob_encode(W, &raw))
+                });
+                (PyBytes::new(py, &ci_bytes).unbind(), PyBytes::new(py, &blob).unbind())
+            }
+            go(w, py, remainder, &a_mask)
+        }))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1218,6 +1500,41 @@ impl<const W: usize> Default for Memos<W> {
     }
 }
 
+/// The registered-entry store (kernel v7: behind an RwLock so registration —
+/// including register_blob's detached build — is `&self` and never conflicts
+/// with concurrent verdict/session borrows). `by_id` deduplicates
+/// register_blob under pool races (registration is content-addressed by
+/// entry id; register/register_bytes have no id and keep the Python-side
+/// single-flight, as today).
+#[derive(Default)]
+struct EntryStore<const W: usize> {
+    entries: Vec<Vec<VGroup<W>>>,
+    entry_ci: Vec<Vec<u8>>, // handle -> ci token ids as i32-le (hit_pass prefix)
+    entry_ci_bits: Vec<Vec<u32>>, // handle -> ci ids packed as bit words (fill_bits prefix)
+    by_id: HashMap<[u8; 16], u32>, // entry_id -> handle (register_blob dedup)
+}
+
+/// v6 session tables (uploaded via set_dfa_accept / set_token_bytes — `&self`
+/// with interior mutability since v7: an upload racing a detached
+/// register_blob must not need a mutable pyclass borrow).
+struct SessTabs<const W: usize> {
+    dfa_accept: Vec<i32>,           // per DFA state: winning terminal or -1
+    dfa_accepts_all: Vec<[u64; W]>, // per DFA state: full candidate set
+    tok_blob: Vec<u8>,              // adapter token_bytes, concatenated
+    tok_off: Vec<i32>,              // len = n_tokens + 1 (blob offsets)
+}
+
+impl<const W: usize> Default for SessTabs<W> {
+    fn default() -> Self {
+        SessTabs {
+            dfa_accept: Vec::new(),
+            dfa_accepts_all: Vec::new(),
+            tok_blob: Vec::new(),
+            tok_off: Vec::new(),
+        }
+    }
+}
+
 struct RustVerdictsImpl<const W: usize> {
     action_kind: Vec<u8>,
     action_arg: Vec<u32>,
@@ -1233,16 +1550,15 @@ struct RustVerdictsImpl<const W: usize> {
     dfa_start: i32,
     lex_allowed: Option<HashMap<u32, HashSet<Vec<u8>>>>,
     lex_prefixes: Option<HashMap<u32, HashSet<Vec<u8>>>>,
-    entries: Vec<Vec<VGroup<W>>>,
-    entry_ci: Vec<Vec<u8>>, // handle -> ci token ids as i32-le (hit_pass prefix)
-    entry_ci_bits: Vec<Vec<u32>>, // handle -> ci ids packed as bit words (fill_bits prefix)
+    // LOCK ORDER (deadlock discipline): sessions -> mem -> store, with
+    // store.write() taken with NOTHING else held (registration paths) and
+    // store.read guards never held across a call that re-acquires store.
+    // tabs is ordering-independent: its writers (set_token_bytes /
+    // set_dfa_accept) hold no other lock, so no cycle can involve it.
+    store: RwLock<EntryStore<W>>,
     mem: Mutex<Memos<W>>, // interior mutability: verdict methods take &self
-    // v6 session tables (uploaded once via set_dfa_accept / set_token_bytes)
-    dfa_accept: Vec<i32>,             // per DFA state: winning terminal or -1
-    dfa_accepts_all: Vec<[u64; W]>,   // per DFA state: full candidate set
-    tok_blob: Vec<u8>,                // adapter token_bytes, concatenated
-    tok_off: Vec<i32>,                // len = n_tokens + 1 (blob offsets)
-    sessions: Mutex<SessTable>,       // lock order: sessions THEN mem, never reversed
+    tabs: RwLock<SessTabs<W>>,
+    sessions: Mutex<SessTable>, // lock order: sessions THEN mem, never reversed
 }
 
 impl<const W: usize> RustVerdictsImpl<W> {
@@ -1458,7 +1774,7 @@ impl<const W: usize> RustVerdictsImpl<W> {
     }
 
     fn register(
-        &mut self,
+        &self,
         groups: Vec<(Vec<(Vec<u64>, u32)>, Vec<Vec<u8>>, Vec<u8>, Vec<u32>)>,
         ci_ids: Vec<i32>,
     ) -> PyResult<usize> {
@@ -1466,20 +1782,15 @@ impl<const W: usize> RustVerdictsImpl<W> {
         self.register_impl(groups, bytes)
     }
 
-    /// Shared registration body; `ci_bytes` is the ci ids as i32-le (stored
-    /// verbatim as the hit_pass prefix, bit-packed for fill_bits). The bytes
-    /// form exists so Python can hand over a 10k+-id buffer as one memcpy
-    /// instead of per-int extraction (20-100 ms per giant entry).
-    fn register_impl(
-        &mut self,
+    /// The registration body's group half: raw walk groups -> VGroups with
+    /// THIS kernel's lexeme_ok/prefix_ok filtering (VEvents and tails are
+    /// recomputed from (cands, lexeme, remainder) — the cross-producer import
+    /// contract: a shared entry adopted by schema B gets B's lexicon
+    /// semantics, exactly like register_bytes-from-kernel_groups always did).
+    fn build_vgroups(
+        &self,
         groups: Vec<(Vec<(Vec<u64>, u32)>, Vec<Vec<u8>>, Vec<u8>, Vec<u32>)>,
-        ci_bytes: Vec<u8>,
-    ) -> PyResult<usize> {
-        if ci_bytes.len() % 4 != 0 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "ci byte buffer length must be a multiple of 4 (i32-le ids)",
-            ));
-        }
+    ) -> PyResult<Vec<VGroup<W>>> {
         let mut vgroups = Vec::with_capacity(groups.len());
         for (events, segments, remainder, token_ids) in groups {
             if events.len() != segments.len() {
@@ -1525,18 +1836,64 @@ impl<const W: usize> RustVerdictsImpl<W> {
                 token_ids.iter().flat_map(|t| (*t as i32).to_le_bytes()).collect();
             vgroups.push(VGroup { events: evs, tail, token_bytes });
         }
-        self.entries.push(vgroups);
-        let ids = ci_bytes
-            .chunks_exact(4)
-            .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]));
-        let words = ids.clone().map(|t| (t as usize >> 5) + 1).max().unwrap_or(0);
-        let mut ci_bits = vec![0u32; words];
-        for t in ids {
-            ci_bits[t as usize >> 5] |= 1 << (t & 31);
+        Ok(vgroups)
+    }
+
+    /// Shared registration body; `ci_bytes` is the ci ids as i32-le (stored
+    /// verbatim as the hit_pass prefix, bit-packed for fill_bits). The bytes
+    /// form exists so Python can hand over a 10k+-id buffer as one memcpy
+    /// instead of per-int extraction (20-100 ms per giant entry).
+    fn register_impl(
+        &self,
+        groups: Vec<(Vec<(Vec<u64>, u32)>, Vec<Vec<u8>>, Vec<u8>, Vec<u32>)>,
+        ci_bytes: Vec<u8>,
+    ) -> PyResult<usize> {
+        let ids = ids_from_le(&ci_bytes)?;
+        let vgroups = self.build_vgroups(groups)?;
+        let ci_bits = ci_bits_of(&ids);
+        let st = &mut *self.store.write().unwrap();
+        st.entries.push(vgroups);
+        st.entry_ci_bits.push(ci_bits);
+        st.entry_ci.push(ci_bytes);
+        Ok(st.entries.len() - 1)
+    }
+
+    /// Kernel v7 registration: parse the blob, build the VGroups (this
+    /// kernel's lexicons), pack ci bits, adaptive-encode the payload and hash
+    /// the entry id — ALL inside py.detach — then register under store.write
+    /// with by_id dedup (idempotent under pool races; the walk-twice race
+    /// yields one handle). Returns (handle, entry_id hex, tag, n_groups).
+    fn register_blob(
+        &self,
+        py: Python<'_>,
+        blob: Vec<u8>,
+        ci_bytes: Vec<u8>,
+        key_repr: Vec<u8>,
+        vocab: u64,
+    ) -> PyResult<(u64, String, u8, u32)> {
+        type Built<const W: usize> = (Vec<VGroup<W>>, Vec<u32>, Vec<u8>, [u8; 16], u8, u32);
+        let (vgroups, ci_bits, ci_bytes, id16, tag, n_groups) =
+            py.detach(move || -> PyResult<Built<W>> {
+                let raw = blob_decode(&blob, W)?;
+                let n_groups = raw.len() as u32;
+                let vgroups = self.build_vgroups(raw)?;
+                let ids = ids_from_le(&ci_bytes)?;
+                let ci_bits = ci_bits_of(&ids);
+                let (tag, payload) = adaptive_encode_ids(&ids, vocab)?;
+                let id16 = entry_id_128(&key_repr, tag, &payload);
+                Ok((vgroups, ci_bits, ci_bytes, id16, tag, n_groups))
+            })?;
+        let hex = hex32(&id16);
+        let st = &mut *self.store.write().unwrap();
+        if let Some(&h) = st.by_id.get(&id16) {
+            return Ok((h as u64, hex, tag, n_groups));
         }
-        self.entry_ci_bits.push(ci_bits);
-        self.entry_ci.push(ci_bytes);
-        Ok(self.entries.len() - 1)
+        st.entries.push(vgroups);
+        st.entry_ci_bits.push(ci_bits);
+        st.entry_ci.push(ci_bytes);
+        let h = (st.entries.len() - 1) as u32;
+        st.by_id.insert(id16, h);
+        Ok((h as u64, hex, tag, n_groups))
     }
 
     /// The per-step CD verdict batch at an interned node; passing groups'
@@ -1558,7 +1915,10 @@ impl<const W: usize> RustVerdictsImpl<W> {
     }
 
     fn cd_groups_compute(&self, mem: &mut Memos<W>, handle: usize, kidx: u32, out: &mut Vec<u8>) {
-        for g in &self.entries[handle] {
+        // lock order: mem (held by caller) -> store.read; store.write is
+        // never taken with mem held, so this cannot deadlock
+        let st = self.store.read().unwrap();
+        for g in &st.entries[handle] {
             let mut cur = kidx;
             let mut ok = true;
             for e in &g.events {
@@ -1597,7 +1957,7 @@ impl<const W: usize> RustVerdictsImpl<W> {
     }
 
     fn check_handle(&self, handle: usize) -> PyResult<()> {
-        if handle >= self.entries.len() {
+        if handle >= self.store.read().unwrap().entries.len() {
             return Err(pyo3::exceptions::PyValueError::new_err("unknown entry handle"));
         }
         Ok(())
@@ -1632,9 +1992,15 @@ impl<const W: usize> RustVerdictsImpl<W> {
         self.check_handle(handle)?;
         let mem = &mut *self.mem.lock().unwrap();
         self.check_kidx(mem, kidx)?;
-        let ci = &self.entry_ci[handle];
-        let mut out: Vec<u8> = Vec::with_capacity(ci.len() + 64);
-        out.extend_from_slice(ci);
+        let mut out: Vec<u8> = {
+            // store guard dropped before cd_groups_pass re-reads it (an
+            // RwLock read is not reentrancy-safe against a queued writer)
+            let st = self.store.read().unwrap();
+            let ci = &st.entry_ci[handle];
+            let mut out = Vec::with_capacity(ci.len() + 64);
+            out.extend_from_slice(ci);
+            out
+        };
         self.cd_groups_pass(mem, handle, kidx, &mut out);
         if eos_id >= 0 {
             out.extend_from_slice(&(eos_id as i32).to_le_bytes());
@@ -1654,10 +2020,13 @@ impl<const W: usize> RustVerdictsImpl<W> {
         eos_id: i64,
         n_words: usize,
     ) -> Vec<u32> {
-        let ci = &self.entry_ci_bits[handle];
         let mut row = vec![0u32; n_words];
-        let n = ci.len().min(n_words);
-        row[..n].copy_from_slice(&ci[..n]);
+        {
+            let st = self.store.read().unwrap();
+            let ci = &st.entry_ci_bits[handle];
+            let n = ci.len().min(n_words);
+            row[..n].copy_from_slice(&ci[..n]);
+        }
         let mut cd: Vec<u8> = Vec::new();
         self.cd_groups_pass(mem, handle, kidx, &mut cd);
         for ch in cd.chunks_exact(4) {
@@ -1750,19 +2119,19 @@ impl<const W: usize> RustVerdictsImpl<W> {
     /// E6 token table slice; out-of-range / vocab-hole ids map to empty
     /// (pinned improvement over the Python KeyError; empty always REJECTS).
     #[inline]
-    fn token_of(&self, t: i64) -> &[u8] {
-        if t < 0 || (t as usize) + 1 >= self.tok_off.len() {
+    fn token_of<'a>(&self, tabs: &'a SessTabs<W>, t: i64) -> &'a [u8] {
+        if t < 0 || (t as usize) + 1 >= tabs.tok_off.len() {
             return &[];
         }
-        let a = self.tok_off[t as usize] as usize;
-        let b = self.tok_off[t as usize + 1] as usize;
-        &self.tok_blob[a..b]
+        let a = tabs.tok_off[t as usize] as usize;
+        let b = tabs.tok_off[t as usize + 1] as usize;
+        &tabs.tok_blob[a..b]
     }
 
     /// lexer/run.py::scan — maximal-munch with forced emission over ONE buffer.
     /// Returns (events as (start, end, accepting state), remainder start), or
     /// None for ScanReject. Invariant: events partition buf[..rem_start].
-    fn lex_scan(&self, buf: &[u8]) -> Option<(Vec<(usize, usize, i32)>, usize)> {
+    fn lex_scan(&self, tabs: &SessTabs<W>, buf: &[u8]) -> Option<(Vec<(usize, usize, i32)>, usize)> {
         let mut events: Vec<(usize, usize, i32)> = Vec::new();
         let mut i = 0usize;
         loop {
@@ -1778,7 +2147,7 @@ impl<const W: usize> RustVerdictsImpl<W> {
                 }
                 st = nx;
                 j += 1;
-                if self.dfa_accept[st as usize] != -1 {
+                if tabs.dfa_accept[st as usize] != -1 {
                     last = Some((j, st));
                 }
             }
@@ -1800,7 +2169,7 @@ impl<const W: usize> RustVerdictsImpl<W> {
     /// lexer/run.py::finalize — end-of-input greedy re-segmentation of the
     /// remainder. None if ANY position lacks an accepting prefix (incl. a
     /// trailing partial); empty remainder yields Some(vec![]).
-    fn lex_finalize(&self, rem: &[u8]) -> Option<Vec<(usize, usize, i32)>> {
+    fn lex_finalize(&self, tabs: &SessTabs<W>, rem: &[u8]) -> Option<Vec<(usize, usize, i32)>> {
         let mut out: Vec<(usize, usize, i32)> = Vec::new();
         let mut i = 0usize;
         while i < rem.len() {
@@ -1813,7 +2182,7 @@ impl<const W: usize> RustVerdictsImpl<W> {
                     break;
                 }
                 j += 1;
-                if self.dfa_accept[st as usize] != -1 {
+                if tabs.dfa_accept[st as usize] != -1 {
                     last = Some((j, st));
                 }
             }
@@ -1870,14 +2239,14 @@ impl<const W: usize> RustVerdictsImpl<W> {
 
     /// guide.py::_eos_ok — finalize the remainder (winning segmentation),
     /// virtually shift the picks, then eos_ok at the finalized node.
-    fn finalize_eos_ok(&self, mem: &mut Memos<W>, kidx: u32, rem: &[u8]) -> bool {
-        let events = match self.lex_finalize(rem) {
+    fn finalize_eos_ok(&self, mem: &mut Memos<W>, tabs: &SessTabs<W>, kidx: u32, rem: &[u8]) -> bool {
+        let events = match self.lex_finalize(tabs, rem) {
             None => return false,
             Some(evs) => evs,
         };
         let mut cur = kidx;
         for (s0, e0, acc) in events {
-            let cands = self.dfa_accepts_all[acc as usize];
+            let cands = tabs.dfa_accepts_all[acc as usize];
             let allowed = self.allowed_at(mem, cur);
             match self.pick_viable_sess(&cands, &rem[s0..e0], &allowed) {
                 None => return false,
@@ -1898,12 +2267,12 @@ impl<const W: usize> RustVerdictsImpl<W> {
     /// guide.py::_derive_status for eos_consumed=False, memoized on
     /// (kidx, remainder) — grammar-pure, so epoch rollover never invalidates
     /// it; reset_interning drops it with the arena (it lives in Memos).
-    fn derive_status(&self, mem: &mut Memos<W>, kidx: u32, rem: &[u8]) -> u8 {
+    fn derive_status(&self, mem: &mut Memos<W>, tabs: &SessTabs<W>, kidx: u32, rem: &[u8]) -> u8 {
         let key = (kidx, rem.to_vec());
         if let Some(&s) = mem.stat.get(&key) {
             return s;
         }
-        let s = if !self.finalize_eos_ok(mem, kidx, rem) {
+        let s = if !self.finalize_eos_ok(mem, tabs, kidx, rem) {
             ST_ACTIVE
         } else if rem.is_empty() && !m_any(&self.allowed_at(mem, kidx)) {
             ST_GRAMMAR_END
@@ -1934,7 +2303,7 @@ impl<const W: usize> RustVerdictsImpl<W> {
     /// COMPLETE semantics (red-team §0): non-eos REJECTED, eos consumed and
     /// stays COMPLETE. Eos legality: status in {ACCEPTING, GRAMMAR_END,
     /// COMPLETE}; the eos check precedes the token-bytes lookup.
-    fn step_core(&self, mem: &mut Memos<W>, core: &mut SessCore, token: i64) -> bool {
+    fn step_core(&self, mem: &mut Memos<W>, tabs: &SessTabs<W>, core: &mut SessCore, token: i64) -> bool {
         if core.status == ST_COMPLETE {
             return token == core.eos_id as i64; // repeat-eos consumed, state kept
         }
@@ -1945,14 +2314,14 @@ impl<const W: usize> RustVerdictsImpl<W> {
             }
             return false;
         }
-        let data = self.token_of(token);
+        let data = self.token_of(tabs, token);
         if data.is_empty() {
             return false; // specials / vocab holes / out-of-range
         }
         let mut buf = Vec::with_capacity(core.remainder.len() + data.len());
         buf.extend_from_slice(&core.remainder);
         buf.extend_from_slice(data);
-        let (events, rem_start) = match self.lex_scan(&buf) {
+        let (events, rem_start) = match self.lex_scan(tabs, &buf) {
             None => return false,
             Some(x) => x,
         };
@@ -1962,7 +2331,7 @@ impl<const W: usize> RustVerdictsImpl<W> {
         let mut cut = 0usize;
         let mut tail: Vec<u32> = Vec::new();
         for (s0, e0, acc) in events {
-            let cands = self.dfa_accepts_all[acc as usize];
+            let cands = tabs.dfa_accepts_all[acc as usize];
             let allowed = self.allowed_at(mem, kidx);
             let pick = match self.pick_viable_sess(&cands, &buf[s0..e0], &allowed) {
                 None => return false,
@@ -1988,7 +2357,7 @@ impl<const W: usize> RustVerdictsImpl<W> {
         if !rem_new.is_empty() && !self.tail_ok(mem, kidx, rem_new) {
             return false;
         }
-        let status = self.derive_status(mem, kidx, rem_new);
+        let status = self.derive_status(mem, tabs, kidx, rem_new);
         // commit (candidate fully viable)
         let keep = core.chain.len() - cut;
         core.chain.truncate(keep);
@@ -2011,17 +2380,6 @@ enum VerdictsAny {
 macro_rules! verdicts_dispatch {
     ($self:expr, $v:ident, $body:expr) => {
         match &$self.inner {
-            VerdictsAny::W1($v) => $body,
-            VerdictsAny::W2($v) => $body,
-            VerdictsAny::W4($v) => $body,
-            VerdictsAny::W8($v) => $body,
-        }
-    };
-}
-
-macro_rules! verdicts_dispatch_mut {
-    ($self:expr, $v:ident, $body:expr) => {
-        match &mut $self.inner {
             VerdictsAny::W1($v) => $body,
             VerdictsAny::W2($v) => $body,
             VerdictsAny::W4($v) => $body,
@@ -2067,14 +2425,9 @@ fn build_verdicts<const W: usize>(
         dfa_start,
         lex_allowed: lex.0,
         lex_prefixes: lex.1,
-        entries: Vec::new(),
-        entry_ci: Vec::new(),
-        entry_ci_bits: Vec::new(),
+        store: RwLock::new(EntryStore::default()),
         mem: Mutex::new(Memos::default()),
-        dfa_accept: Vec::new(),
-        dfa_accepts_all: Vec::new(),
-        tok_blob: Vec::new(),
-        tok_off: Vec::new(),
+        tabs: RwLock::new(SessTabs::default()),
         sessions: Mutex::new(SessTable::default()),
     }
 }
@@ -2144,25 +2497,48 @@ impl RustVerdicts {
     }
 
     /// Register one cache entry's CD groups + its ci token ids (the hit_pass
-    /// prefix); event masks are u64 word lists.
+    /// prefix); event masks are u64 word lists. `&self` since kernel v7
+    /// (entry store behind RwLock) — no mutable pyclass borrow anywhere.
     fn register(
-        &mut self,
+        &self,
         groups: Vec<(Vec<(Vec<u64>, u32)>, Vec<Vec<u8>>, Vec<u8>, Vec<u32>)>,
         ci_ids: Vec<i32>,
     ) -> PyResult<usize> {
-        verdicts_dispatch_mut!(self, v, v.register(groups, ci_ids))
+        verdicts_dispatch!(self, v, v.register(groups, ci_ids))
     }
 
     /// register() with the ci ids as ONE i32-le byte buffer — the hot
     /// registration path (a literal-interior giant's 10k+ ids cross the FFI
     /// as a memcpy instead of per-int extraction).
     fn register_bytes(
-        &mut self,
+        &self,
         groups: Vec<(Vec<(Vec<u64>, u32)>, Vec<Vec<u8>>, Vec<u8>, Vec<u32>)>,
         ci: &Bound<'_, PyBytes>,
     ) -> PyResult<usize> {
         let bytes = ci.as_bytes().to_vec();
-        verdicts_dispatch_mut!(self, v, v.register_impl(groups, bytes))
+        verdicts_dispatch!(self, v, v.register_impl(groups, bytes))
+    }
+
+    /// Kernel v7: one GIL-released call = blob parse + VGroup build (THIS
+    /// kernel's lexicons) + ci bit-pack + adaptive encode + BLAKE2b-128
+    /// entry id + registration (by_id-deduplicated). `key_repr` is
+    /// repr(key).encode() computed Python-side (µs) — the id is byte-
+    /// identical to grid/mask/cache.py make_entry for the same key/ci.
+    /// Doubles as the cross-producer import: a foreign producer registers a
+    /// shared entry from its (blob, ci_bytes) with no Python payload path.
+    /// Returns (handle, entry_id hex, tag, n_groups).
+    fn register_blob(
+        &self,
+        py: Python<'_>,
+        blob: &Bound<'_, PyBytes>,
+        ci: &Bound<'_, PyBytes>,
+        key_repr: &Bound<'_, PyBytes>,
+        vocab_size: u64,
+    ) -> PyResult<(u64, String, u8, u32)> {
+        let blob_v = blob.as_bytes().to_vec();
+        let ci_v = ci.as_bytes().to_vec();
+        let key_v = key_repr.as_bytes().to_vec();
+        verdicts_dispatch!(self, v, v.register_blob(py, blob_v, ci_v, key_v, vocab_size))
     }
 
     // ------------------------------------------------- interned addressing (v4)
@@ -2309,7 +2685,7 @@ impl RustVerdicts {
     /// Upload the E6-normative token_bytes table once: one blob + i32-le
     /// offsets (len n_tokens + 1). Ids outside the table map to empty bytes,
     /// which always REJECT.
-    fn set_token_bytes(&mut self, blob: &Bound<'_, PyBytes>, offsets: &Bound<'_, PyBytes>) -> PyResult<()> {
+    fn set_token_bytes(&self, blob: &Bound<'_, PyBytes>, offsets: &Bound<'_, PyBytes>) -> PyResult<()> {
         let blob_v = blob.as_bytes().to_vec();
         let ob = offsets.as_bytes();
         if ob.len() % 4 != 0 || ob.len() < 4 {
@@ -2329,29 +2705,31 @@ impl RustVerdicts {
                 "offsets must be monotone from 0 to len(blob)",
             ));
         }
-        verdicts_dispatch_mut!(self, v, {
-            v.tok_blob = blob_v;
-            v.tok_off = off;
+        verdicts_dispatch!(self, v, {
+            let tabs = &mut *v.tabs.write().unwrap();
+            tabs.tok_blob = blob_v;
+            tabs.tok_off = off;
             Ok(())
         })
     }
 
     /// Upload the scanner accept tables once: per-state winning terminal
     /// (i32-le, -1 none) + per-state full candidate sets (u64 word lists).
-    fn set_dfa_accept(&mut self, accept: &Bound<'_, PyBytes>, accepts_all: Vec<Vec<u64>>) -> PyResult<()> {
+    fn set_dfa_accept(&self, accept: &Bound<'_, PyBytes>, accepts_all: Vec<Vec<u64>>) -> PyResult<()> {
         let ab = accept.as_bytes();
         let mut acc = Vec::with_capacity(ab.len() / 4);
         for c in ab.chunks_exact(4) {
             acc.push(i32::from_le_bytes(c.try_into().unwrap()));
         }
-        verdicts_dispatch_mut!(self, v, {
+        verdicts_dispatch!(self, v, {
             if acc.len() != v.live.len() || accepts_all.len() != v.live.len() {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "accept table length must match the DFA state count",
                 ));
             }
-            v.dfa_accept = acc;
-            v.dfa_accepts_all = accepts_all.iter().map(|w| m_from_words(w)).collect();
+            let tabs = &mut *v.tabs.write().unwrap();
+            tabs.dfa_accept = acc;
+            tabs.dfa_accepts_all = accepts_all.iter().map(|w| m_from_words(w)).collect();
             Ok(())
         })
     }
@@ -2363,7 +2741,8 @@ impl RustVerdicts {
             return Err(pyo3::exceptions::PyValueError::new_err("empty stack"));
         }
         verdicts_dispatch!(self, v, {
-            if v.tok_off.is_empty() || v.dfa_accept.is_empty() {
+            let tabs = &*v.tabs.read().unwrap();
+            if tabs.tok_off.is_empty() || tabs.dfa_accept.is_empty() {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "session tables not set (set_token_bytes / set_dfa_accept first)",
                 ));
@@ -2371,7 +2750,7 @@ impl RustVerdicts {
             let tbl = &mut *v.sessions.lock().unwrap();
             let mem = &mut *v.mem.lock().unwrap();
             let kidx = v.intern_chain(mem, &chain);
-            let status = v.derive_status(mem, kidx, b"");
+            let status = v.derive_status(mem, tabs, kidx, b"");
             let sid = tbl.next;
             tbl.next += 1;
             tbl.map.insert(sid, Session {
@@ -2404,6 +2783,7 @@ impl RustVerdicts {
                 .get_mut(&sid)
                 .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("unknown session"))?;
             let mem = &mut *v.mem.lock().unwrap();
+            let tabs = &*v.tabs.read().unwrap();
             let kidx0 = v.sess_kidx(mem, s);
             let mut core = SessCore {
                 chain: s.chain.clone(),
@@ -2412,7 +2792,7 @@ impl RustVerdicts {
                 status: s.status,
                 eos_id: s.eos_id,
             };
-            if !v.step_core(mem, &mut core, token) {
+            if !v.step_core(mem, tabs, &mut core, token) {
                 c.rejects += 1;
                 return Ok(0);
             }
@@ -2462,6 +2842,7 @@ impl RustVerdicts {
                 .get_mut(&sid)
                 .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("unknown session"))?;
             let mem = &mut *v.mem.lock().unwrap();
+            let tabs = &*v.tabs.read().unwrap();
             let kidx0 = v.sess_kidx(mem, s);
             let mut core = SessCore {
                 chain: s.chain.clone(),
@@ -2472,7 +2853,7 @@ impl RustVerdicts {
             };
             let mut n = 0usize;
             for t in tokens {
-                if !v.step_core(mem, &mut core, t) {
+                if !v.step_core(mem, tabs, &mut core, t) {
                     break;
                 }
                 n += 1;
@@ -2640,6 +3021,8 @@ impl RustVerdicts {
 fn grid_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RustWalker>()?;
     m.add_class::<RustVerdicts>()?;
-    m.add("__kernel_version__", 6)?;
+    m.add_function(wrap_pyfunction!(encode_mask, m)?)?;
+    m.add_function(wrap_pyfunction!(entry_id_hex, m)?)?;
+    m.add("__kernel_version__", 7)?;
     Ok(())
 }

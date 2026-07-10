@@ -63,9 +63,17 @@ def _drive(guide, tok, text: bytes):
 
 
 def _count_walks(monkeypatch):
+    # counts BOTH cold-build entrypoints: the classic walk() and the kernel-v7
+    # _v7_build (walk_payload + register_blob) — under GRID_V7=1 the miss path
+    # never calls walk(), so counting only it would blind every "must not
+    # re-walk"/"must walk" assertion below (no assertion is weakened: one
+    # cold build is one count on either path)
     calls = []
     orig = P.walk
     monkeypatch.setattr(P, "walk", lambda *a, **k: calls.append(1) or orig(*a, **k))
+    orig_v7 = P.MaskProducer._v7_build
+    monkeypatch.setattr(P.MaskProducer, "_v7_build",
+                        lambda self, *a, **k: calls.append(1) or orig_v7(self, *a, **k))
     return calls
 
 

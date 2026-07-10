@@ -14,6 +14,7 @@ second dict keyed by a suffix of the same tuple.
 from __future__ import annotations
 
 import hashlib
+import struct
 from dataclasses import dataclass
 
 import numpy as np
@@ -143,6 +144,115 @@ def make_entry(key: tuple, ci, cd: tuple[CDEntry, ...], vocab_size: int,
     cd_groups = tuple(CDGroup(reps[k], tuple(v)) for k, v in groups.items())
     return MaskCacheEntry(entry_id=h.hexdigest(), key=key, ci_tokens=ci, cd_entries=cd,
                           cd_groups=cd_groups, origin=origin)
+
+
+def _decode_blob_v1(blob: bytes) -> list:
+    """Kernel v7 blob v1 -> the raw walk groups [(evs, segs, rem, ids)]
+    (grid_core blob_encode's exact inverse; see lib.rs for the layout).
+    Order-preserving — group order is part of the order-exact parity
+    contract. Unknown version / trailing bytes are hard errors."""
+    if not blob or blob[0] != 1:
+        raise ValueError(f"unknown v7 blob version: {blob[:1]!r}")
+    w, n_groups = struct.unpack_from("<II", blob, 1)
+    off = 9
+    out = []
+    for _ in range(n_groups):
+        (n_events,) = struct.unpack_from("<I", blob, off)
+        off += 4
+        evs, segs = [], []
+        for _ in range(n_events):
+            words = list(struct.unpack_from(f"<{w}Q", blob, off))
+            off += 8 * w
+            (ln,) = struct.unpack_from("<I", blob, off)
+            off += 4
+            segs.append(blob[off:off + ln])
+            off += ln
+            evs.append((words, ln))
+        (rl,) = struct.unpack_from("<I", blob, off)
+        off += 4
+        rem = blob[off:off + rl]
+        off += rl
+        (ni,) = struct.unpack_from("<I", blob, off)
+        off += 4
+        ids = list(struct.unpack_from(f"<{ni}i", blob, off))
+        off += 4 * ni
+        out.append((evs, segs, rem, ids))
+    if off != len(blob):
+        raise ValueError("v7 blob trailing bytes")
+    return out
+
+
+class MaskEntryV7:
+    """Kernel-v7 thin cache entry (duck-typed to MaskCacheEntry): the walk,
+    group build, ci packing, adaptive encoding, entry-id hash and kernel
+    registration all happened inside ONE GIL-released register_blob call —
+    Python holds only (entry_id, key, tag, ci bytes, blob). ``blob`` is the
+    kernel's own export payload: a foreign producer registers this entry
+    Rust-to-Rust via register_blob (producer._ensure_handle), replacing the
+    kernel_groups tuple path (``kernel_groups`` reads None by design).
+
+    ``ci_tokens`` / ``cd_groups`` / ``cd_entries`` are lazy views for the
+    parity/audit/test consumers (byte-identical to the WalkResult glue the
+    eager path built); the serving path never decodes the blob. Lazy decode
+    is race-benign: concurrent first touches compute identical values and
+    the assignment is idempotent."""
+
+    __slots__ = ("entry_id", "key", "origin", "tag", "ci_bytes", "blob",
+                 "_ci", "_groups", "_reps")
+
+    kernel_groups = None  # class attr: v7 entries have no verbatim payload
+
+    def __init__(self, entry_id: str, key: tuple, tag: int, ci_bytes: bytes,
+                 blob: bytes, origin: str = "COMPUTED") -> None:
+        self.entry_id = entry_id
+        self.key = key
+        self.tag = tag
+        self.ci_bytes = ci_bytes
+        self.blob = blob
+        self.origin = origin
+        self._ci = None
+        self._groups = None
+        self._reps = None
+
+    @property
+    def ci_tokens(self):
+        ci = self._ci
+        if ci is None:
+            # read-only view (frombuffer over bytes), like the kernel-walk path
+            ci = np.frombuffer(self.ci_bytes, dtype=np.int32)
+            self._ci = ci
+        return ci
+
+    def _decode(self):
+        """Blob -> (CDGroup tuple, representative CDEntry tuple), exactly the
+        WalkResult glue in grid/trie/walk.py (byte-identical reps)."""
+        from grid.lexer.run import EmissionEvent
+        from grid.trie.walk import _unmask, _words_int
+
+        reps, groups = [], []
+        for evs, segs, rem, ids in _decode_blob_v1(self.blob):
+            rep = CDEntry(
+                ids[0],
+                tuple(EmissionEvent(_unmask(_words_int(c)), int(ln)) for c, ln in evs),
+                tuple(segs),
+                rem,
+            )
+            reps.append(rep)
+            groups.append(CDGroup(rep, tuple(ids)))
+        self._reps = tuple(reps)
+        self._groups = tuple(groups)
+
+    @property
+    def cd_groups(self) -> tuple[CDGroup, ...]:
+        if self._groups is None:
+            self._decode()
+        return self._groups
+
+    @property
+    def cd_entries(self) -> tuple[CDEntry, ...]:
+        if self._reps is None:
+            self._decode()
+        return self._reps
 
 
 class MaskCacheT2:

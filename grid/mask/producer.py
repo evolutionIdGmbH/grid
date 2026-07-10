@@ -26,11 +26,12 @@ from grid.errors import IdentifierMaskBypassError
 from grid.lalr.compile import LALRTables
 from grid.lalr.stack import StackNode, allowed_terminals, shift_terminal
 from grid.lexer.dfa import DEAD, ScannerDFA
-from grid.mask.cache import MaskCache, MaskCacheT2, make_entry
+from grid.mask.cache import MaskCache, MaskCacheT2, MaskEntryV7, make_entry
 from grid.trie.build import TokenTrie
 from grid.trie.walk import (
     CDEntry,
     Lexicons,
+    _rust_walker,
     _term_words,
     _unmask,
     _words_int,
@@ -150,6 +151,12 @@ class MaskProducer:
         self._handle_lock = threading.Lock()
         self._v6_tables = False
         self._folded_fill_hits = 0
+        # kernel v7: cold-miss materialization fully in-kernel (walk_payload +
+        # register_blob, one GIL-released call each; Python keeps only a thin
+        # MaskEntryV7). Read once; effective only with the kernel present.
+        # Kill switch GRID_V7=0 (the default until the perf gates are green)
+        # is byte-for-byte today's walk()/make_entry/register_bytes path.
+        self._v7 = os.environ.get("GRID_V7", "0") != "0"
 
     _MEMO_CAP = 200_000
     _INTERN_CAP = 2_000_000  # kernel arena reset threshold (kidx regeneration)
@@ -435,33 +442,55 @@ class MaskProducer:
             if got2 is not None:
                 entry = self.cache.publish(got2)
         if entry is None:
-            result = walk(
-                self.trie, self.dfa, remainder, A,
-                self.tables.ignored_terminal_ids, self._priority, self.lexicons,
-            )
-            if result.groups is not None:  # rust kernel: alias-expanded + sorted in-kernel
-                ci = result.ci_tokens
-                expand = None
+            if self._v7 and self._kernel is not None:
+                entry = self.cache.publish(self._v7_build(key, remainder, A))
             else:
-                ci = tuple(sorted(t for tid in result.ci_tokens for t in self.trie.expand(tid)))
-                expand = self.trie.expand
-            memo = _StepMemo()
-            entry = self.cache.publish(make_entry(
-                key, ci, result.cd_entries, self.vocab_size,
-                live_of=lambda rem: memo.live_of(self.dfa, rem),
-                lexicon_sensitive=self.lexicons is not None,
-                expand=expand,
-                precomputed_groups=result.groups,
-                # verdict-equivalence grouping context (mirrors the kernel key)
-                lexicons=self.lexicons,
-                ignored=self.tables.ignored_terminal_ids,
-                priority=self._priority,
-            ))
+                result = walk(
+                    self.trie, self.dfa, remainder, A,
+                    self.tables.ignored_terminal_ids, self._priority, self.lexicons,
+                )
+                if result.groups is not None:  # rust kernel: alias-expanded + sorted in-kernel
+                    ci = result.ci_tokens
+                    expand = None
+                else:
+                    ci = tuple(sorted(t for tid in result.ci_tokens for t in self.trie.expand(tid)))
+                    expand = self.trie.expand
+                memo = _StepMemo()
+                entry = self.cache.publish(make_entry(
+                    key, ci, result.cd_entries, self.vocab_size,
+                    live_of=lambda rem: memo.live_of(self.dfa, rem),
+                    lexicon_sensitive=self.lexicons is not None,
+                    expand=expand,
+                    precomputed_groups=result.groups,
+                    # verdict-equivalence grouping context (mirrors the kernel key)
+                    lexicons=self.lexicons,
+                    ignored=self.tables.ignored_terminal_ids,
+                    priority=self._priority,
+                ))
             if self.t2 is not None:
                 self.t2.publish(entry)
             if self.journal is not None:
                 self._journal_miss(key, remainder, A)
         return entry
+
+    def _v7_build(self, key: tuple, remainder: bytes, A: frozenset[int]) -> MaskEntryV7:
+        """Kernel v7 cold build: walk_payload (rayon-capable walk + blob/ci
+        serialization, GIL released) then register_blob (group build + ci
+        pack + adaptive encode + BLAKE2b entry id + registration, GIL
+        released, by_id-deduplicated in-kernel — the walk-twice race yields
+        one handle). Python does dict inserts only. The entry_id is
+        byte-identical to make_entry's for the same (key, ci, vocab)
+        (tests/mask/test_v7_encode.py cross-impl vectors; the g10 dual-key
+        replay is a free Python-vs-Rust differential)."""
+        walker = _rust_walker(self.trie, self.dfa, self.tables.ignored_terminal_ids,
+                              self._priority, self.lexicons)
+        ci_bytes, blob = walker.walk_payload(bytes(remainder), _term_words(A, walker.width))
+        handle, entry_id, tag, _n_groups = self._kernel.register_blob(
+            blob, ci_bytes, repr(key).encode(), self.vocab_size)
+        with self._handle_lock:
+            self._kernel_handles.setdefault(entry_id, handle)
+            self._entry_ids[handle] = entry_id
+        return MaskEntryV7(entry_id, key, tag, ci_bytes, blob)
 
     def _journal_miss(self, key: tuple, remainder: bytes, A: frozenset[int]) -> None:
         """W4 hook (true walk-miss path only — T2 handovers were journaled at
@@ -530,6 +559,19 @@ class MaskProducer:
         with self._handle_lock:
             handle = self._kernel_handles.get(entry.entry_id)
             if handle is not None:
+                return handle
+            blob = getattr(entry, "blob", None)
+            if blob is not None:
+                # v7 entry (this producer post-rollover, or a foreign
+                # producer's T2 handover): Rust-to-Rust import — THIS kernel
+                # recomputes VEvents/tails under ITS lexicons, exactly like
+                # the register_bytes-from-kernel_groups semantics below.
+                handle, eid, _tag, _n = self._kernel.register_blob(
+                    blob, entry.ci_bytes, repr(entry.key).encode(), self.vocab_size)
+                assert eid == entry.entry_id, \
+                    "v7 entry_id mismatch across implementations (bug by vectors)"
+                self._kernel_handles[entry.entry_id] = handle
+                self._entry_ids[handle] = entry.entry_id
                 return handle
             if entry.kernel_groups is not None:
                 payload = list(entry.kernel_groups)
