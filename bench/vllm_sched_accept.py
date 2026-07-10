@@ -1,4 +1,4 @@
-"""M6 scheduler-side acceptance: GRID as a vLLM structured-output backend.
+"""Scheduler-side acceptance: GRID as a vLLM structured-output backend.
 
 Applies bench/vllm_grid_patch.py (idempotent), then runs a constrained batch
 with the DEFAULT scheduler — async scheduling allowed, the restriction that

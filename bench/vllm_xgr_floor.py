@@ -1,9 +1,9 @@
-"""Integration-floor calibration for the G8 TPOT criterion.
+"""Integration-floor calibration for batched-serving TPOT overhead.
 
-Runs vLLM's NATIVE xgrammar backend through the exact G8 two-point TPOT
+Runs vLLM's NATIVE xgrammar backend through the exact two-point TPOT
 method (bench/vllm_serving_bench.py) on grammars xgrammar consumes natively
-(per-request JSON schemas, heterogeneous like the G8 SQL arm), against the
-same unconstrained baseline.
+(per-request JSON schemas, heterogeneous like the serving-under-batch-load SQL
+arm), against the same unconstrained baseline.
 
 Purpose: attribute GRID's measured overhead-vs-unconstrained at batch 32.
 vLLM 0.24 fills structured-output bitmasks per request per step through
@@ -28,8 +28,8 @@ import time
 # object-shaped schema closes and forces EOS early, and the two-point method
 # then divides a short run by the full T — xgrammar read *negative* overhead
 # on the first calibration attempt. A 500-item array cannot complete within
-# 96 tokens, pinning both arms to identical step counts. (The G8 SQL arm does
-# not need this: whitespace keeps SQL statements paddable to max_tokens, and
+# 96 tokens, pinning both arms to identical step counts. (The serving-under-batch-load
+# SQL arm does not need this: whitespace keeps SQL statements paddable to max_tokens, and
 # the recorded tok/s confirms full-length decodes for grid and unconstrained.)
 SCHEMAS = {
     "ints": {"type": "array", "items": {"type": "integer"}, "minItems": 500},

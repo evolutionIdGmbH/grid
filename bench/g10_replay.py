@@ -1,6 +1,6 @@
-"""G10 audit-replay gate (DESIGN.md E14/G10) — the full-scale run.
+"""Audit-trail replay and tamper detection (DESIGN.md E14) — the full-scale run.
 
-Criteria (binding):
+Properties verified:
 - replay EVERY step of >= 1,000 generations spanning >= 1 namespace rollover:
   bit-identical record chains (masks compare via content-addressed
   mask_entry_id + blocked_count inside the hash-chained records; EOS and Write
@@ -183,7 +183,7 @@ def _replay_chain(template, records) -> list[str]:
     """Re-drive a guide copy along the recorded chosen tokens, mirroring the
     generation loop's instruction cadence; returns the rebuilt record-hash
     chain. Any structural divergence (span shape, unexpected termination)
-    raises — G10 wants bit-identical, not almost."""
+    raises — audit replay wants bit-identical, not almost."""
     guide = template.copy()
     guide.max_new_tokens = MAX_TOKENS
     state = guide.initial_state
@@ -306,7 +306,7 @@ def main() -> int:
     ok_roll = rollovers >= 1
     ok_v1 = v1_identical == v1_gens
     lines = [
-        "# G10 audit replay — full-scale run (E14)",
+        "# Audit-trail replay and tamper detection — full-scale run (E14)",
         "",
         f"Host: {host} | grammar: `grammars/sql_subset.grid` | MockTokenizer "
         f"({len(SQL_TOKENS)} tokens) | mode-1 GRID-owned loop, max_tokens {MAX_TOKENS} "
@@ -326,12 +326,17 @@ def main() -> int:
         "(random record x random field per trial)",
         f"- generation wall: {gen_s:.1f}s",
         "",
-        f"Gate G10: {'**PASS**' if (ok_replay and ok_tamper and ok_roll and ok_v1) else '**FAIL**'} "
-        "(criteria: every step of >=1,000 generations replayed bit-identical across "
-        ">=1 namespace rollover; tamper detection 100% over >=10^3 trials; v1-format "
-        "logs replay bit-identical via the dual-key path).",
+        f"Summary: every step of {args.gens:,} generations replays bit-identical across "
+        f"{'a' if rollovers == 1 else rollovers} namespace rollover{'' if rollovers == 1 else 's'}, "
+        f"tamper detection is 100% over {args.tamper_trials:,} trials"
+        + (", and v1-format logs replay bit-identical via the dual-key path"
+           if v1_gens else "")
+        + "."
+        if (ok_replay and ok_tamper and ok_roll and ok_v1)
+        else "Summary: one or more replay/tamper properties did not hold — see the "
+        "per-line counts above.",
         "",
-        "Harness: `bench/g10_replay.py` (G10a smoke-scale versions of these "
+        "Harness: `bench/g10_replay.py` (smoke-scale versions of these "
         "properties run in CI: tests/audit/test_audit.py).",
         "",
     ]

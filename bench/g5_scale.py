@@ -1,4 +1,4 @@
-"""G5 end-to-end S/C/T gate at specification scale (DESIGN.md §10, gate G5).
+"""End-to-end soundness/completeness/termination at specification scale (DESIGN.md §10).
 
 Two arms, same checks:
 - ``--arm walk`` (model-free, runs anywhere): the FORCED-RANDOM-WALK arm —
@@ -7,14 +7,14 @@ Two arms, same checks:
 - ``--arm model`` (GPU box): pinned Qwen2.5-0.5B-Instruct (byte-fallback BPE,
   >=100k vocab) with a seeded multinomial sampler through the same loop.
 
-Binding checks per generation (gate text):
+Binding checks per generation:
 - output parses under its OWN CompiledGrammar (ReferenceGuide.eos_legal);
 - EOS only at ACCEPT (asserted at every EOS application);
 - DeadEndError == 0;
 - every jump-complete stop parses and ends at ACCEPT;
 - no reserve-stopped generation exceeds max_tokens.
 
-Coverage counters (gate): max paren nesting >= D, >= k reserve stops,
+Coverage counters: max paren nesting >= D, >= k reserve stops,
 >= k multi-byte-identifier events (schema identifiers spelled by >=2 model
 tokens). Reserve tightness at scale: at every reserve stop the emitted tail
 equals the ReserveTable completion recomputed at the trigger state; the
@@ -103,7 +103,7 @@ def walk_one(template, seed: int, rng: np.random.Generator, seek_nesting: bool):
                 reserve_consistent = again == span
             for t in span:
                 assert not (t == eos and not guide.can_terminate_state(state)), \
-                    "EOS applied outside ACCEPT (gate violation)"
+                    "EOS applied outside ACCEPT (soundness violation)"
                 state = guide.get_next_state(state, t)
                 out.append(t)
                 if state.status == COMPLETE:
@@ -131,7 +131,7 @@ def walk_one(template, seed: int, rng: np.random.Generator, seek_nesting: bool):
 
 
 def run_model_arm(args, adapter, multi_tok_idents) -> int:
-    """G5 model-in-the-loop: the mode-1 GRID-owned decode loop with a real model
+    """Model-in-the-loop arm: the mode-1 GRID-owned decode loop with a real model
     (Qwen2.5-0.5B-Instruct) providing logits. Same binding checks as the walk
     arm, plus the audit chain verifies every generation. Slower than the walk
     arm (a forward pass per token), so it runs at a representative scale
@@ -208,7 +208,7 @@ def run_model_arm(args, adapter, multi_tok_idents) -> int:
     host = os.environ.get("GRID_HOST_LABEL", "local dev (unpinned)")
     out_path = pathlib.Path(args.out or (BENCH_DIR / "RESULTS-g5-model.md"))
     lines = [
-        "# G5 end-to-end S/C/T at scale — model arm",
+        "# End-to-end soundness/completeness/termination at scale — model arm",
         "",
         f"Host: {host} | grammar: `grammars/sql_subset.grid` + L3 schema lexicons | "
         f"model: `{args.model}` | mode-1 GRID-owned loop, multinomial sampler | "
@@ -219,12 +219,16 @@ def run_model_arm(args, adapter, multi_tok_idents) -> int:
         "asserted inside the loop (`grid/generate/api.py`). This is the model-in-loop "
         "complement to the 10k model-free forced-random-walk arm (`RESULTS-g5-walk.md`).",
         "",
-        "| check | pass | value |",
-        "|---|---|---|",
-        *[f"| {name} | {'PASS' if ok else 'FAIL'} | {val} |" for name, (ok, val) in checks.items()],
+        "| check | measured |",
+        "|---|---|",
+        *[f"| {name} | {val} |" for name, (_ok, val) in checks.items()],
         "",
-        f"Gate G5 (model arm): {'**PASS**' if all_ok else '**FAIL**'}. Reserve stops "
-        f"observed: {reserve_stops}; max paren nesting: {max_nesting}.",
+        (f"Summary (model arm): all {args.gens:,} model-in-loop generations parse under "
+         "their own grammar, every audit chain verifies, and there are zero dead-ends."
+         if all_ok else
+         "Summary (model arm): one or more checks did not hold — see the measured "
+         "column above.")
+        + f" Reserve stops observed: {reserve_stops}; max paren nesting: {max_nesting}.",
         "",
         "Harness: `bench/g5_scale.py --arm model`.",
         "",
@@ -330,7 +334,7 @@ def main() -> int:
     host = os.environ.get("GRID_HOST_LABEL", "local dev (unpinned)")
     out_path = pathlib.Path(args.out or (BENCH_DIR / f"RESULTS-g5-{args.arm}.md"))
     lines = [
-        f"# G5 end-to-end S/C/T at scale — {args.arm} arm",
+        f"# End-to-end soundness/completeness/termination at scale — {args.arm} arm",
         "",
         f"Host: {host} | grammar: `grammars/sql_subset.grid` + L3 schema lexicons | "
         f"tokenizer: `{args.tokenizer}` ({template.vocab_size:,} tokens, byte-fallback BPE) | "
@@ -342,13 +346,16 @@ def main() -> int:
         "the nesting quota; all binding checks apply to every generation. "
         "EOS-only-at-ACCEPT is asserted at every EOS application in the loop.",
         "",
-        "| check | pass | value |",
-        "|---|---|---|",
-        *[f"| {name} | {'PASS' if ok else 'FAIL'} | {val} |"
-          for name, (ok, val) in checks.items()],
+        "| check | measured |",
+        "|---|---|",
+        *[f"| {name} | {val} |" for name, (_ok, val) in checks.items()],
         "",
-        f"Gate G5 ({args.arm} arm): {'**PASS**' if all_ok else '**FAIL**'}. "
-        "Reserve tightness vs the BFS shortest-completion oracle is pinned at unit "
+        (f"Summary ({args.arm} arm): all {args.gens:,} generations parse under their "
+         "own grammar with zero dead-ends and no over-budget reserve stops."
+         if all_ok else
+         f"Summary ({args.arm} arm): one or more checks did not hold — see the measured "
+         "column above.")
+        + " Reserve tightness vs the BFS shortest-completion oracle is pinned at unit "
         "level (tests/lalr/test_reserve.py); at scale every reserve stop's emitted "
         "completion must reproduce deterministically at the trigger state (checked "
         "above). The model-in-loop arm (same checks, Qwen2.5-0.5B-Instruct sampling) "

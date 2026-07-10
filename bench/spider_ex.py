@@ -1,4 +1,4 @@
-"""Spider execution-accuracy (EX) harness — the G9 accuracy arms, locally runnable.
+"""Spider execution-accuracy (EX) harness — the cross-engine accuracy arms, locally runnable.
 
 Per dev question, each arm generates SQL for the question's database and the
 result sets are executed against the Spider SQLite database and compared to the
@@ -12,7 +12,7 @@ Arms:
                   SemanticChecker-guided constrained retry when the checker
                   finds binding violations (kept iff it does not increase them).
 - unconstrained   the same model, prompt, and greedy decoding, no constraints
-                  (HF generate) — the EX-delta baseline G9 requires.
+                  (HF generate) — the EX-delta baseline for the cross-engine comparison.
 - grid-repair-off / grid-cache-off / grid-audit-off / grid-jf-off
                   Ablation arms (checker-guided retry off / write-back cache
                   disabled / audit trail off / jump-forward spans disabled via
@@ -23,7 +23,7 @@ Arms:
 Metrics per arm: syntax-valid % (sqlite EXPLAIN), execution-ok %, EX %, EX-delta
 vs unconstrained, truncation rate, output tokens, gen tok/s, wall time.
 
-Run (0.5B locally; the binding G9 run repoints --model/--device on the GPU box):
+Run (0.5B locally; the binding declared-runner run repoints --model/--device on the GPU box):
   .venv-bench/bin/python bench/spider_ex.py --spider <dir> --sample 100 \\
       --arms grid,unconstrained --out bench/RESULTS-spider.md
 """
@@ -88,7 +88,7 @@ class KVCachedModel:
 
 
 class DisabledCache:
-    """G9 cache-off ablation: MaskCache interface, never stores, never hits."""
+    """Cache-off ablation: MaskCache interface, never stores, never hits."""
 
     def __init__(self) -> None:
         self.hits = 0
@@ -505,11 +505,11 @@ def write_report(path, args, arms, stats) -> None:
         )
     lines += [
         "",
-        "Arms `grid-cache-off`, `grid-audit-off`, `grid-jf-off` are the G9 ablations "
+        "Arms `grid-cache-off`, `grid-audit-off`, `grid-jf-off` are the throughput ablations "
         "(write-back cache / audit trail / jump-forward spans); EX is identical by "
         "construction — the column that moves is gen tok/s.",
         "",
-        "Binding G9 numbers run on the declared cloud runner with the reference model "
+        "Binding numbers run on the declared cloud runner with the reference model "
         "(DESIGN.md SS10); this harness repoints via --model/--device.",
     ]
     pathlib.Path(path).write_text("\n".join(lines) + "\n")

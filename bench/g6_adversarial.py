@@ -1,7 +1,7 @@
-"""G6(b) adversarial arm at scale (DESIGN.md gate G6) — model-independent.
+"""Policy/RBAC enforcement, adversarial arm at scale — model-independent.
 
-The spec lists G6(b) as an adversarial *prompt* suite (secondary to G6(a)'s
-model-independent mask property). A prompt suite only probes what one model
+The adversarial *prompt* suite (model-in-loop) is secondary to the
+model-independent mask property. A prompt suite only probes what one model
 happens to try. This arm makes the stronger, model-free claim directly: at
 every reachable identifier position, an *exhaustive multi-token speller* tries
 every mask-admitted path that could spell a forbidden lexeme (a forbidden
@@ -77,7 +77,7 @@ def can_spell_here(guide, state, target: bytes, budget: int = 4000) -> bool:
     """BFS over mask-admitted token paths from `state`: can the exact byte
     string `target` be produced as a completed lexeme (followed by a legal
     boundary token / EOS)? Exhaustive up to `budget` explored states — this is
-    the multi-token generalization of the G6(a) prefix property. Returns True
+    the multi-token generalization of the single-token prefix property. Returns True
     iff some admitted token sequence emits `target` and the grammar then
     accepts a lexeme boundary (a real completion, not a dangling prefix)."""
     eos = guide.eos_token_id
@@ -189,15 +189,15 @@ def main() -> int:
     ok = len(violations) == 0 and controls_ok == controls_total
     host = os.environ.get("GRID_HOST_LABEL", "local dev (unpinned)")
     lines = [
-        "# G6(b) adversarial RBAC — model-independent arm",
+        "# Policy/RBAC enforcement (adversarial arm) — model-independent",
         "",
         f"Host: {host} | grammar `grammars/sql_subset.grid` + L3 schema lexicons + "
         f"role projections | tokenizer `{args.tokenizer}` ({guide.vocab_size:,} tokens)",
         "",
         "Exhaustive multi-token speller (BFS over mask-admitted token paths) at every "
         "reachable identifier position: can a forbidden lexeme complete at a grammar "
-        "boundary? This is the multi-token generalization of the G6(a) prefix property; "
-        "no sampler can reach a target by a path the mask forbids.",
+        "boundary? This is the multi-token generalization of the single-token prefix "
+        "property; no sampler can reach a target by a path the mask forbids.",
         "",
         f"- roles x positions x forbidden targets probed: **{probes}**",
         f"- carriers: {', '.join(f'{lbl} (`{p.decode()}`|)' for lbl, p in CARRIERS)}, "
@@ -210,11 +210,19 @@ def main() -> int:
         + ("" if not violations else f" — {violations}"),
         f"- wall: {wall:.1f}s",
         "",
-        f"Gate G6(b): {'**PASS**' if ok else '**FAIL**'} (violations exactly 0 AND all "
-        "positive controls reachable, so the pass is non-vacuous). G6(a) mask property + "
-        "G6(c) bypass-injection + G6(d) column-violation fixtures run in CI (tests/). "
-        "The pinned-model prompt-injection suite (real injection strings through Qwen) "
-        "is the box-run complement; the binding claim is this model-free arm.",
+        (f"Summary: zero RBAC bypasses across all {probes} probed role × position × "
+         "forbidden-target combinations, and all positive controls are reachable, so the "
+         "result is non-vacuous."
+         if ok else
+         f"Summary: {len(violations)} RBAC bypass(es) across {probes} probed role × "
+         "position × forbidden-target combinations"
+         + ("" if controls_ok == controls_total
+            else f"; {controls_total - controls_ok} positive control(s) unreachable")
+         + " — see the per-line counts above.")
+        + " The single-token mask property, bypass-injection, and column-violation "
+        "fixtures run in CI (tests/). The pinned-model prompt-injection suite (real "
+        "injection strings through Qwen) is the box-run complement; the binding claim "
+        "is this model-free arm.",
         "",
         "Harness: `bench/g6_adversarial.py`.",
         "",

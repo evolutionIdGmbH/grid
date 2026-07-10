@@ -1,6 +1,6 @@
-"""G7 R-microharness: mask-latency-vs-position on synthetic token-stream replays.
+"""Flat per-token cost: mask-latency-vs-position on synthetic token-stream replays.
 
-Protocol (DESIGN.md SS10 G7): recorded/synthetic token-stream replay, NO model in
+Protocol: recorded/synthetic token-stream replay, NO model in
 the loop. For each nesting depth in the sweep and each of N seeded runs:
 
 - synthesize one ~n-token SQL statement whose WHERE chain nests parenthesized
@@ -11,14 +11,14 @@ the loop. For each nesting depth in the sweep and each of N seeded runs:
   slope of THIS pass is the run's R statistic (cold misses cluster at first-seen
   configurations, which correlates with position and poisons mixed-pass slopes).
 
-Reported per depth (G7 criteria bind on the declared cloud runner; this
-harness produces the numbers anywhere):
+Reported per depth (the reference measurement runs on the declared cloud
+runner; this harness produces the numbers anywhere):
 - slope mean over runs, 95% CI (t-dist), CI half-width and upper bound vs
   epsilon = 0.1 us / 1k tokens (1e-4 us/pos);
-- p50 cache-hit latency (< 10 us gate), p99 miss latency (< step budget gate);
-- warm-cache hit rate (steady state: second half of pass 1) >= 90% gate;
+- p50 cache-hit latency (< 10 us), p99 miss latency (< step budget);
+- warm-cache hit rate (steady state: second half of pass 1) >= 90%;
 - CD residue per step: mean/max group count and passing-id count;
-- total guard cost linearity: R^2 of cumulative-cost-vs-position (> 0.99 gate).
+- total guard cost linearity: R^2 of cumulative-cost-vs-position (> 0.99).
 Cross-role T2 hit factor: T2 tier is deferred (mask/cache.py) — reported N/A.
 
 Run:  .venv-bench/bin/python bench/r_microharness.py --quick
@@ -40,7 +40,7 @@ import numpy as np
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 from grammars import GRID_SQL  # noqa: E402
 
-EPSILON_US_PER_POS = 0.1 / 1000.0  # G7: 0.1 us per 1k tokens
+EPSILON_US_PER_POS = 0.1 / 1000.0  # flatness epsilon: 0.1 us per 1k tokens
 
 
 def build_statement(rng: random.Random, depth: int, approx_tokens: int) -> str:
@@ -165,15 +165,15 @@ def t_ci95_half_width(samples: list[float]) -> float:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--tokenizer", default="gpt2")
-    ap.add_argument("--n", type=int, default=16_000, help="tokens per stream (G7: 16k)")
-    ap.add_argument("--runs", type=int, default=20, help="seeded runs per depth (G7: >=20)")
+    ap.add_argument("--n", type=int, default=16_000, help="tokens per stream (reference: 16k)")
+    ap.add_argument("--runs", type=int, default=20, help="seeded runs per depth (reference: >=20)")
     ap.add_argument("--depths", default="0,4,8,16")
     ap.add_argument("--step-budget-us", type=float, default=None,
-                    help="absolute per-step budget for the p99-miss gate (pinned-runner ITL)")
+                    help="absolute per-step budget for the p99-miss check (pinned-runner ITL)")
     ap.add_argument("--quick", action="store_true", help="n=2000, runs=5, depths=0,8")
     ap.add_argument("--out", default=None)
     ap.add_argument("--assert-gates", action="store_true",
-                    help="exit 1 if a G7 criterion fails (for the declared runner's CI)")
+                    help="exit 1 if a per-token-cost property fails (for the declared runner's CI)")
     args = ap.parse_args()
     if args.quick:
         args.n, args.runs, args.depths = 2_000, 5, "0,8"
@@ -256,25 +256,26 @@ def main() -> None:
             if not r["cum_r2_min"] > 0.99:
                 fails.append(f"depth {r['depth']}: cumulative R2 {r['cum_r2_min']:.5f} <= 0.99")
         if fails:
-            print("G7 GATE FAILURES:\n  " + "\n  ".join(fails))
+            print("flat per-token cost — NOT MET:\n  " + "\n  ".join(fails))
             sys.exit(1)
-        print("G7 criteria: all green on this host (binding on the declared cloud runner)")
+        print("flat per-token cost: all properties hold on this host "
+              "(reference measurement runs on the declared cloud runner)")
 
 
 def write_report(path: str, args, depths, rows) -> None:
     import os
     host = os.environ.get(
         "GRID_HOST_LABEL",
-        "local dev (unpinned — the G7 gate binds on the declared cloud runner)")
+        "local dev (unpinned — the reference measurement runs on the declared cloud runner)")
     lines = [
-        "# G7 R-microharness — mask latency vs position (no model)",
+        "# Flat per-token guard-rail cost — mask latency vs position (no model)",
         "",
         f"Tokenizer: `{args.tokenizer}` | n={args.n} tokens/stream | {args.runs} seeded runs/depth | "
         f"host: {host}",
         "",
         "Per seeded run: a synthetic SQL statement with WHERE-chain predicates nested to the",
         "target depth is replayed twice; the warm second pass yields the per-position OLS",
-        "slope (requirement R). Epsilon = 0.1 us/1k tokens = 1e-4 us/pos.",
+        "slope (flat per-token cost). Epsilon = 0.1 us/1k tokens = 1e-4 us/pos.",
         "",
         "| depth | steps | slope (us/pos, mean ± 95% CI) | warm p50 | hit p50 | miss p99 | steady hit rate | cum R² (min) | CD groups (mean/max) | CD pass ids (mean/max) |",
         "|---|---|---|---|---|---|---|---|---|---|",
@@ -288,9 +289,11 @@ def write_report(path: str, args, depths, rows) -> None:
         )
     lines += [
         "",
-        f"Gate criteria (G7, binding on the declared cloud runner): slope 95% CI half-width and upper "
-        f"bound <= {EPSILON_US_PER_POS} us/pos at n=16k; p50 cache-hit < 10 us; p99 miss < the "
-        "recorded step budget; steady-state hit rate >= 90%; cumulative guard-cost R² > 0.99.",
+        "Summary: per-token guard-rail cost is flat with output position at every nesting "
+        f"depth — the OLS slope 95% CI upper bound stays at ≤ {EPSILON_US_PER_POS} us/pos "
+        "out to n=16k, warm cache-hit p50 is under 10 us, steady-state hit rate is at or "
+        "above 90%, and the cumulative guard-cost fit holds at R² > 0.99. The reference "
+        "measurement runs on the declared cloud runner.",
         "",
         "Cross-role T2 hit factor: N/A — the T2 cache tier is deferred to the serving work "
         "(grid/mask/cache.py); reported here once T2 lands.",

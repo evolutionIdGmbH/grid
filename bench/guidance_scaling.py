@@ -1,5 +1,6 @@
 """GRID vs guidance (guidance-ai/guidance): per-token constrained-decoding overhead
-vs generated-context length — requirement R (near-linear TOTAL guard cost).
+vs generated-context length — flat per-token cost (near-linear TOTAL guard cost,
+latency independent of output position).
 
 The single question this harness answers: does the per-token constraint overhead
 stay flat (position-independent) as the generated context grows, for
@@ -772,7 +773,7 @@ def make_charts(datas: list[dict], out_dir: pathlib.Path, ns: list[int]) -> list
                         xytext=(0, 9) if y >= 1 else (0, -13),
                         ha="center", fontsize=8, color=color)
     ax.axhline(0.0, color="#999999", lw=1.0, ls="--", zorder=0)
-    ax.annotate("0 = flat per-token cost (requirement R)", xy=(ns[0], 0), xytext=(4, 7),
+    ax.annotate("0 = flat per-token cost", xy=(ns[0], 0), xytext=(4, 7),
                 textcoords="offset points", fontsize=8.5, color="#777777")
     ax.set_xscale("log", base=2)
     ax.set_xticks(ns, [f"{n//1024}k" if n >= 1024 else str(n) for n in ns])
@@ -803,11 +804,12 @@ def write_report(datas: list[dict], ns: list[int], seeds: int, depth: int,
                  md_path: pathlib.Path, png_names: list[str]) -> None:
     by_arm = {d["arm"]: d for d in datas}
     lines = [
-        "# GRID vs guidance — per-token overhead vs generated-context length (requirement R)",
+        "# GRID vs guidance — per-token overhead vs generated-context length (flat per-token cost)",
         "",
         "**Question.** Does per-token constrained-decoding overhead stay flat — i.e. does the",
         "TOTAL guard cost stay near-linear — as the generated context grows? This is GRID's",
-        "requirement R (DESIGN.md), benchmarked here against guidance-ai/guidance in three",
+        "flat per-token cost property (latency independent of output position), benchmarked",
+        "here against guidance-ai/guidance in three",
         "vintages: current (0.3.x, llguidance inside), Nov 2023 (0.1.x, the Earley rewrite),",
         "and July 2023 (0.0.6x, the pre-CFG handlebars-template era).",
         "",
@@ -825,7 +827,7 @@ def write_report(datas: list[dict], ns: list[int], seeds: int, depth: int,
         "the v0.0.5 design was conceived against); the tables below carry all four arms. "
         "First chart: per-token constraint overhead vs position at n=16,384 (log–log; lines "
         "are rolling medians over the per-step scatter). Second chart: OLS slope of overhead "
-        "vs position at each n (0 = flat = requirement R).",
+        "vs position at each n (0 = flat per-token cost).",
         "",
         "## Engines and measured windows",
         "",
@@ -978,7 +980,7 @@ def write_report(datas: list[dict], ns: list[int], seeds: int, depth: int,
         p50s = [r["p50_us"] for r in d["rows"] if r["n"] == nmax]
         r2 = min(r["cum_r2"] for r in d["rows"])
         lines.append(
-            f"- **GRID: requirement R holds.** Warm guard cost is flat at every n "
+            f"- **GRID: flat per-token cost holds.** Warm guard cost is flat at every n "
             f"(p50 {float(np.mean(p50s)):.1f} µs at n={nmax:,}, slope "
             f"{g:+.6f} µs/pos ≈ 0, cumulative-cost R² ≥ {r2:.5f}): total "
             "guard cost is linear in generated length. Numbers come from the kernel-active "
@@ -1045,7 +1047,7 @@ def write_report(datas: list[dict], ns: list[int], seeds: int, depth: int,
 
         lines.append(
             f"- **guidance {jd['meta'].get('guidance')} (July 2023, handlebars era): "
-            "requirement R does NOT hold — per-token overhead grows linearly with context.** "
+            "flat per-token cost does NOT hold — per-token overhead grows linearly with context.** "
             f"Measured overhead-vs-position slopes: {slope_txt} (vs ≈0 for every other arm; "
             f"cumulative cost is visibly quadratic, R² {r2min:.3f}). Fitted per-token cost at "
             f"the largest measured n ({n_big:,}): {c0/1e3:,.2f} ms + {c1:,.1f} µs/pos. The "
@@ -1067,7 +1069,8 @@ def write_report(datas: list[dict], ns: list[int], seeds: int, depth: int,
         "- `gc.collect()` runs between replays in every arm so one run's garbage cannot leak "
         "into the next run's timings; GC activity *during* a replay is deliberately kept — "
         "it is part of engine cost (the 0.1.x stalls are exactly that).",
-        "- GRID's headline is the warm second pass, per the G7 protocol: cold misses are paid "
+        "- GRID's headline is the warm second pass, per the flat-per-token-cost protocol: cold "
+        "misses are paid "
         "once per first-seen grammar configuration on pass 1 (hit rate and miss p99 recorded "
         "in the JSON; see bench/RESULTS-r.md). The guidance arms are single-pass because "
         "llguidance and the 2023 Earley engine have no cross-run mask cache to warm — their "

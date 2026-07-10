@@ -1,4 +1,4 @@
-"""M6 mode-2 acceptance smoke: vLLM V1 + GridVLLMLogitsProcessor.
+"""Mode-2 acceptance smoke: vLLM V1 + GridVLLMLogitsProcessor.
 
 Batch of prompts constrained to the SQL-subset grammar with an L3 schema; every
 constrained output must detokenize to a VIABLE PREFIX of the grammar (the mode-2

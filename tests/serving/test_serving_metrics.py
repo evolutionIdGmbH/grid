@@ -42,12 +42,12 @@ def test_cold_warm_ttft_split_recorded():
 def test_gate_evaluation_passes_on_good_inputs():
     cells, adv, sf = B.mock_cells([1, 8, 32], ["grid", "xgrammar", "unconstrained"])
     checks = B.evaluate_gates(cells, adv, sf)
-    assert checks, "no criteria evaluated"
+    assert checks, "no properties evaluated"
     failed = [(n, v) for n, ok, v in checks if not ok]
-    assert not failed, f"mock inputs should pass every gate, failed: {failed}"
-    # the specific binding criteria are present
+    assert not failed, f"mock inputs should satisfy every property, unmet: {failed}"
+    # the specific binding properties are present
     names = " ".join(n for n, _o, _v in checks)
-    assert "TPOT overhead < 2%" in names
+    assert "TPOT overhead vs unconstrained" in names
     assert "single build" in names
     assert "skip-a-round" in names
 
@@ -69,7 +69,17 @@ def test_mock_report_writes_and_passes(tmp_path):
     all_ok = B.write_report(cells, adv, sf, checks, str(out), mock=True)
     assert all_ok
     text = out.read_text()
-    assert "MOCK" in text and "Gate G8" in text
+    # gate-free framing: descriptive heading + plain measurements table, no
+    # "## Gate G8" section and no PASS/FAIL verdict line
+    assert "MOCK" in text
+    assert "Serving under batch load" in text
+    assert "## Measurements" in text
+    assert "Gate G8" not in text
+    # no verdict scorecard: no PASS/FAIL column or "Gate G8: PASS" line
+    # ("FAILED" in the single-flight line is real content, not a verdict)
+    assert "| PASS |" not in text and "| FAIL |" not in text
+    assert "Gate G8: **PASS**" not in text and "Gate G8: **FAIL**" not in text
+    assert "| pass |" not in text and "criterion" not in text
     assert "adversarial cold-miss" in text.lower()
     assert "| grid | 32 |" in text
 
@@ -237,9 +247,13 @@ def test_report_prints_both_metric_blocks(tmp_path):
     text = out.read_text()
     assert "metric v1 — legacy two-point lockstep wall" in text
     assert "metric v2 — per-request, no lockstep assumption" in text
-    assert "fresh request (reported, not gated)" in text
-    assert "gating metric: **v2**" in text
-    assert "soft bound <= 3x warm: OK" in text
+    assert "fresh request (reported on its own)" in text
+    assert "headline metric: **v2**" in text
+    assert "the fresh request itself runs at warm speed" in text
+    # gate-free: no scorecard, no threshold/verdict prose
+    assert "Gate G8" not in text
+    assert "| PASS |" not in text and "| FAIL |" not in text
+    assert "## Measurements" in text
 
 
 def test_report_legacy_adversarial_dict_still_renders(tmp_path):

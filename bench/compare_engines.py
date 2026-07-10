@@ -1,6 +1,6 @@
 """GRID vs XGrammar vs llguidance: per-token mask latency on identical replays.
 
-Protocol (DESIGN.md SS10 G9 slice + the G7 R-slope check):
+Protocol (cross-engine latency comparison + the flat-per-token-cost slope check):
 - one real tokenizer (gpt2 50k by default; --tokenizer Qwen/Qwen2.5-0.5B for 151k);
 - the same SQL-subset grammar in each engine's native format (bench/grammars.py);
 - two replay arms: (a) realistic corpus statements, (b) GRID-generated random
@@ -16,7 +16,8 @@ Honesty note: GRID's hot path runs in grid_core Rust kernels — the trie walk
 (in-kernel CD grouping + alias expansion) and the per-step CD-group verdicts +
 LALR simulate (masks stay in i32 buffers end-to-end; no per-step Python-int
 materialization). Cold misses still pay the full walk; the report separates
-hit/miss. The position SLOPE (requirement R) is the architecture-level claim.
+hit/miss. The position SLOPE (flat per-token cost: latency independent of output
+position) is the architecture-level claim.
 
 Outlines note: outlines has no independent CFG engine — outlines.types.CFG routes
 to a backend (default llguidance, CFG_DEFAULT_BACKEND). The Outlines arm here
@@ -276,7 +277,7 @@ def main() -> None:
                 if not ok:
                     rejected += 1
                     break
-        # position slope (requirement R): OLS over (position, latency)
+        # position slope (flat per-token cost): OLS over (position, latency)
         import numpy as np
 
         xs = np.array([p for p, _ in pos_lat], dtype=float)
@@ -305,8 +306,8 @@ def main() -> None:
             print(f"  cache: hit p50 {r['hit_p50_us']:.1f} us | miss p50 {r['miss_p50_us']/1e3:.1f} ms | "
                   f"hit rate {r['hit_rate']:.0%}")
 
-    # G7-style R measurement: warm-cache replay of the longest walk (GRID) —
-    # per-token cost must be independent of position n (requirement R)
+    # flat-per-token-cost measurement: warm-cache replay of the longest walk
+    # (GRID) — per-token cost must be independent of position n
     import numpy as np
 
     longest = max((seq for name, seq in replays if name.startswith("walk")), key=len, default=None)
@@ -329,7 +330,7 @@ def main() -> None:
             "steps": len(warm), "slope_us_per_pos": slope,
             "first_half_p50_us": first, "second_half_p50_us": second,
         }
-        print(f"\nGRID warm-replay R check ({len(warm)} steps): slope {slope:+.3f} us/pos | "
+        print(f"\nGRID warm-replay flat-cost check ({len(warm)} steps): slope {slope:+.3f} us/pos | "
               f"first-half p50 {first:.0f} us vs second-half p50 {second:.0f} us")
 
     if args.out:
@@ -344,7 +345,8 @@ def write_report(path: str, tokenizer: str, replays, results: dict) -> None:
         f"Tokenizer: `{tokenizer}` | replays: {len(replays)} "
         f"({sum(len(s) for _, s in replays)} steps total) | host: "
         + os.environ.get("GRID_HOST_LABEL",
-                         "local dev (unpinned — G7/G9 bind on the declared cloud runner)"),
+                         "local dev (unpinned — flat-per-token-cost and cross-engine "
+                         "comparison figures are taken on the declared cloud runner)"),
         "",
         "GRID's hot path runs in grid_core Rust kernels: the trie walk (in-kernel CD "
         "grouping + alias expansion) and the per-step CD-group verdicts + LALR simulate; "
@@ -376,11 +378,11 @@ def write_report(path: str, tokenizer: str, replays, results: dict) -> None:
     if warm:
         lines += [
             "",
-            f"GRID warm-replay R check ({warm['steps']} steps): slope "
+            f"GRID warm-replay flat-cost check ({warm['steps']} steps): slope "
             f"{warm['slope_us_per_pos']:+.3f} us/pos; first-half p50 "
             f"{warm['first_half_p50_us']:.0f} us vs second-half p50 "
             f"{warm['second_half_p50_us']:.0f} us — per-token cost tracks grammar "
-            "configuration, not absolute position (requirement R).",
+            "configuration, not absolute position (flat per-token cost).",
         ]
     lines += [
         "",

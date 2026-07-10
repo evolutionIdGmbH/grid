@@ -5,7 +5,7 @@ string literals, double-quoted strings -> single-quoted, trailing ';' stripped)
 and parsed with GRID's own contextual scan+shift discipline — the same
 parse_terminal_stream mechanics the SemanticChecker uses — with per-database L3
 lexicons steering the TABLE_NAME/COLUMN_NAME/ALIAS choice, plus an end-of-input
-viability check. This is the G2-style oracle for the Spider dialect: 100% of
+viability check. This is the viable-prefix oracle for the Spider dialect: 100% of
 the 1034 dev golds parse (grammar committed at that state).
 
 Run:  .venv-bench/bin/python bench/spider_coverage.py --spider <spider_data dir>
