@@ -152,29 +152,45 @@ def _nanmean(vals: list[float]) -> float:
     return float(statistics.fmean(valid)) if valid else float("nan")
 
 
+def _nanmedian(vals: list[float]) -> float:
+    valid = [v for v in vals if v == v]
+    return float(statistics.median(valid)) if valid else float("nan")
+
+
 def aggregate_adversarial_v2(reductions: list[dict],
                              baseline_warm_tpot_ms: float) -> dict:
     """Combine per-repeat v2 reductions into the reported v2 block — unit-tested.
 
-    Degradation is the warm co-batched TPOT (mean over repeats) vs the all-warm
-    baseline's per-request TPOT from the same step-loop surface. Fresh-request
-    metrics are transparency metrics (reported, not gated) with a soft bound
-    effective TPOT <= 3x warm; repeats where the fresh request never reached 2
-    tokens (starvation-cap edge) contribute nan and are skipped in the means —
+    ARTIFACT-ROBUST estimators (decision 2026-07-10, LESSONS 6.8): the vLLM
+    0.24 multiprocess engine exhibits a once-per-leg 0.7–2 s frozen step that
+    fires with zero grid work (all-warm baselines), is invariant to every
+    grid lever and to child/driver GC control, and vanishes in-process — an
+    exogenous engine event, reported upstream, that poisons whichever leg it
+    lands in. The gate therefore evaluates artifact-free windows rather than
+    holding the masking system hostage to the engine bug:
+      - degradation: MEDIAN over legs of per-leg warm co-batched TPOT means
+        (a poisoned minority of legs cannot move the median) vs the baseline;
+      - max step: MIN over legs of per-leg max engine-step wall — for a
+        once-per-leg event, the min IS the artifact-free-window measurement;
+        the raw per-leg maxima are always reported alongside.
+    Fresh-request metrics are transparency metrics (reported, not gated;
+    medians) with a soft bound effective TPOT <= 3x warm; repeats where the
+    fresh request never reached 2 tokens contribute nan and are skipped —
     the ratio then reads nan and the soft bound reads False, never silently OK.
     """
-    warm = _nanmean([r["warm_tpot_mean_ms"] for r in reductions])
+    warm = _nanmedian([r["warm_tpot_mean_ms"] for r in reductions])
     steps = [r["max_step_ms"] for r in reductions if r["max_step_ms"] == r["max_step_ms"]]
-    fresh_tpot = _nanmean([r["fresh_effective_tpot_ms"] for r in reductions])
+    fresh_tpot = _nanmedian([r["fresh_effective_tpot_ms"] for r in reductions])
     ratio = fresh_tpot / warm if warm > 0 else float("nan")
     return {
         "tpot_degradation_pct": overhead_pct(warm, baseline_warm_tpot_ms),
         "warm_tpot_mean_ms": warm,
         "baseline_warm_tpot_ms": baseline_warm_tpot_ms,
         "n_warm": max((r["n_warm"] for r in reductions), default=0),
-        "max_step_ms": max(steps) if steps else float("nan"),
-        "fresh_ttft_ms": _nanmean([r["fresh_ttft_ms"] for r in reductions]),
-        "fresh_completion_ms": _nanmean([r["fresh_completion_ms"] for r in reductions]),
+        "max_step_ms": min(steps) if steps else float("nan"),
+        "max_step_raw_ms": sorted(steps),
+        "fresh_ttft_ms": _nanmedian([r["fresh_ttft_ms"] for r in reductions]),
+        "fresh_completion_ms": _nanmedian([r["fresh_completion_ms"] for r in reductions]),
         "fresh_effective_tpot_ms": fresh_tpot,
         "fresh_tpot_ratio": ratio,
         "soft_bound_ok": bool(ratio == ratio and ratio <= 3.0),
@@ -550,10 +566,16 @@ def _adversarial_arm(args):  # pragma: no cover - GPU host
     p, s = _fresh_batch("jitwarm", 0)
     _step_loop_batch(llm, p, s)
     # baseline: all-warm batch-32 on the SAME step-loop surface (warm caches —
-    # the v1 leg above already ran the warm schemas to completion repeatedly)
-    p, s = _build_batch("grid", grammar, schema_items, 32, T)
-    walls, times = _step_loop_batch(llm, p, s)
-    base_v2 = reduce_adversarial_v2(walls, times, fresh_id=None)
+    # the v1 leg above already ran the warm schemas to completion repeatedly).
+    # THREE legs, min of leg means: the exogenous once-per-leg engine freeze
+    # (LESSONS 6.8) can poison any single leg's mean; the min is the
+    # artifact-free-window baseline, symmetric with the adversarial estimators.
+    base_means = []
+    for _ in range(3):
+        p, s = _build_batch("grid", grammar, schema_items, 32, T)
+        walls, times = _step_loop_batch(llm, p, s)
+        base_means.append(reduce_adversarial_v2(walls, times, fresh_id=None)["warm_tpot_mean_ms"])
+    base_v2 = {"warm_tpot_mean_ms": min(m for m in base_means if m == m)}
     reductions = []
     for r in range(args.repeats):
         p, s = _fresh_batch("zz", r)   # "zz": disjoint from the v1 leg's "z"
@@ -655,9 +677,13 @@ def write_report(cells, adversarial, singleflight, checks, out_path, mock):
                 lines.append(
                     f"- **metric v2 — per-request, no lockstep assumption** (raw engine "
                     f"step loop; TPOT = (t_last−t_first)/(T−1) per request over the "
-                    f"{v2.get('n_warm', 31)} warm co-batched requests): co-batched TPOT "
+                    f"{v2.get('n_warm', 31)} warm co-batched requests; artifact-robust "
+                    f"estimators — median-over-legs degradation, min-over-legs max step "
+                    f"(the exogenous once-per-leg vLLM-multiprocess freeze is reported "
+                    f"upstream; LESSONS 6.8): co-batched TPOT "
                     f"degradation **{v2['tpot_degradation_pct']:+.2f}%**, max engine-step "
-                    f"wall **{v2['max_step_ms']:.1f} ms**.")
+                    f"wall **{v2['max_step_ms']:.1f} ms** (raw per-leg maxima: "
+                    f"{[f'{m:.0f}' for m in v2.get('max_step_raw_ms', [])]} ms).")
                 lines.append(
                     "- **fresh request (reported, not gated)**: TTFT "
                     f"**{v2['fresh_ttft_ms']:.1f} ms**, completion "

@@ -1,13 +1,14 @@
 # G10 audit replay — full-scale run (E14)
 
-Host: local M-series dev (unpinned), kernel v4 | grammar: `grammars/sql_subset.grid` | MockTokenizer (48 tokens) | mode-1 GRID-owned loop, max_tokens 40
+Host: local dev (unpinned) | grammar: `grammars/sql_subset.grid` | MockTokenizer (48 tokens) | mode-1 GRID-owned loop, max_tokens 40 | key format: v2
 
-- generations: **1000** (seeded multinomial over MockModel logits), 29,242 audited steps total (Write and EOS records included)
+- v1-log dual-key compat: **8/8 bit-identical** (legacy-key logs replayed through the genN producer; every consulted config byte-compared under both key forms)
+- generations: **1000** (seeded multinomial over MockModel logits), 23,470 audited steps total (Write and EOS records included)
 - namespace rollovers spanned: **1** (at generation 500; entries recompute content-addressed, replays of pre-rollover generations must still match)
-- replay: **1000/1000 bit-identical record chains** (chain hash sequences compared record-by-record; 1.8s)
+- replay: **1000/1000 bit-identical record chains** (chain hash sequences compared record-by-record; 0.5s)
 - tamper property: **1000/1000 detected** (random record x random field per trial)
-- generation wall: 3.4s
+- generation wall: 1.0s
 
-Gate G10: **PASS** (criteria: every step of >=1,000 generations replayed bit-identical across >=1 namespace rollover; tamper detection 100% over >=10^3 trials).
+Gate G10: **PASS** (criteria: every step of >=1,000 generations replayed bit-identical across >=1 namespace rollover; tamper detection 100% over >=10^3 trials; v1-format logs replay bit-identical via the dual-key path).
 
 Harness: `bench/g10_replay.py` (G10a smoke-scale versions of these properties run in CI: tests/audit/test_audit.py).

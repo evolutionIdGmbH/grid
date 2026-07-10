@@ -651,6 +651,18 @@ every one of these before any debugging session:
   own, stop optimizing and start exonerating — the five-way elimination
   (grid levers, JIT, child GC, driver GC, process topology) cost one hour
   and prevented shipping "fixes" for an artifact that was never ours.
+- **Closure (2026-07-10):** the artifact is reported upstream
+  (vllm-project/vllm#48229) and the gate now uses artifact-robust
+  estimators (owner-ratified): median-over-legs degradation, min-over-legs
+  max step, raw per-leg maxima always printed. Clean-window max step reads
+  36–38 ms (vs 30 budget) and is defer-cap-INVARIANT (100/250/400 ms
+  identical) — the residual is OUR GIL-bound entry materialization
+  (make_entry/publish/register in Python) during the fresh request's ~0.9 s
+  window, the same mechanism class that killed admission warmup: defer-off
+  spreads it (+64% degradation, 65 ms max), defer-on concentrates it
+  (+115–125%, 36 ms max). The real fix is kernel-v7 territory (entry
+  materialization in Rust); until then the cost is bounded, transient
+  (once per never-seen schema), and documented rather than hidden.
 
 ## Meta-lessons
 

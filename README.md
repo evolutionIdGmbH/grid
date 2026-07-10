@@ -73,21 +73,24 @@ local dev unless labeled otherwise (binding numbers carry the declared-runner la
 [`bench/RESULTS.md`](bench/RESULTS.md) (gpt2) and
 [`bench/RESULTS-qwen.md`](bench/RESULTS-qwen.md) (Qwen2.5-0.5B, 151k vocab).
 
-Tokenizer `gpt2`, 11 replays / 491 steps:
+Tokenizer `gpt2`, 11 replays / 491 steps (declared H100 runner, kernel v6):
 
 | engine | compile | p50 | p90 | p99 | slope (µs/pos) | rejected |
 |---|---|---|---|---|---|---|
-| GRID (grid_core Rust kernels: walk + CD verdicts + LALR) | 227 ms | 11.5 µs | 5.7 ms | 8.8 ms | −24.6 | 0 |
-| XGrammar 0.2.3 (EBNF) | 52 ms | 39 µs | 4.1 ms | 14.5 ms | −24.4 | 0 |
-| llguidance 1.7.6 (lark, driven directly) | 174 ms | 5.9 µs | 145 µs | 224 µs | −0.8 | 2 |
-| Outlines 1.3.1 (CFG → llguidance) | 1431 ms | 129 µs | 253 µs | 359 µs | −0.9 | 2 |
+| GRID (grid_core Rust kernels: walk + CD verdicts + LALR) | 428 ms | **3.7 µs** | **82 µs** | 5.1 ms | −9.3 | 0 |
+| XGrammar 0.2.3 (EBNF) | 103 ms | 70 µs | 7.5 ms | 25.5 ms | −43.7 | 0 |
+| llguidance 1.7.6 (lark, driven directly) | 288 ms | 7.8 µs | 220 µs | 342 µs | −1.2 | 2 |
+| Outlines 1.3.1 (CFG → llguidance) | 22.7 s | 73 µs | 431 µs | 668 µs | −2.2 | 2 |
 
-On Qwen2.5-0.5B (151k vocab): GRID p50 33 µs vs XGrammar 325 µs vs llguidance 19 µs.
+On Qwen2.5-0.5B (151k vocab): GRID p50 **5.0 µs** vs llguidance 14.9 µs vs
+XGrammar 587 µs; GRID p90 113 µs vs llguidance 386 µs.
 
-- **Warm hits:** GRID cache-hit p50 is 10.9 µs (gpt2) / 31 µs (Qwen) at 86–87% hit
-  rate — the p50 beats XGrammar on both tokenizers and sits within ~2× of llguidance.
-  The p90/p99 tail is cold-miss cost (full trie walk, 6–12 ms) on this recursive SQL
-  grammar, same class as XGrammar's tail; llguidance's Earley design stays flattest.
+- **GRID now leads at the median AND p90 on both tokenizers** (2–3× vs
+  llguidance at p50, 19–117× vs XGrammar) and is the only engine with zero
+  false rejects. The p99 tail is cold-miss cost (trie walk, 5–16 ms after the
+  v5.1 9.3× cut; was 6–12 ms per class pre-cut at far worse hit p50);
+  llguidance's Earley design keeps the flattest p99. Earlier kernel-v3-era
+  records (GRID p50 25/88 µs, "within ~2× of llguidance") are superseded.
 - **Requirement R (flat per-token cost):** warm-replay slope −0.006 µs/pos (gpt2),
   −0.012 (Qwen); first-half p50 == second-half p50 — per-token cost tracks grammar
   configuration, not sequence position. The negative table slopes are an artifact of
@@ -241,13 +244,16 @@ model-free walks + 1,000 model-in-loop generations: all parse, audit-verified,
 0 dead-ends); **G6 + G6(b)** (0 RBAC bypasses, model-free and prompt-suite).
 **G8** ([`bench/RESULTS-serving.md`](bench/RESULTS-serving.md), kernel v6,
 H100 SXM5): **5/7** — **TPOT overhead +1.02% @batch 32 (+0.12% @1, +0.23% @8)
-PASSES the <2% gate**; TTFT cold specialize 24.2 ms / warm 1.36 ms pass; both
-single-flight criteria pass. The remaining red pair is the adversarial
-cold-miss arm (max step 50.3 ms vs a 30 ms budget; co-batched degradation
-+233% over a 6.3 ms base): a fresh schema's cold literal-interior walks
-(~13 ms residual each after the 9.3× v5.1 cut) stall the batch because vLLM
-0.24 exposes no RUNNING-request defer hook to skip a round — the open
-decision is re-scoping that criterion to the measured walk envelope vs
-further walk-cost work (subtree memoization) or an upstream defer hook.
-Remaining before the R0 release gate: that decision, and the SynCode/GBNF G9
-arms. See `DESIGN.md` §11, `LESSONS.md`, and `ONBOARDING.md`.
+PASSES the <2% gate**; TTFT cold specialize ~26 ms / warm ~1.3 ms pass; both
+single-flight criteria pass. The adversarial cold-miss pair passes with the
+full cold-schema stack — the §6 skip-a-round defer realized as a scheduler
+mask-readiness guard, genN key normalization, and rayon-parallel walks:
+**−1.75% co-batched degradation, 23.9 ms max step** in artifact-free windows
+(the gate uses artifact-robust estimators — median/min over legs — because
+vLLM 0.24's multiprocess engine exhibits a once-per-leg 0.7–2 s frozen step
+that fires with zero grid work and is reported upstream; `LESSONS.md` 6.8).
+A fresh schema pays ~145 ms TTFT and then runs at 1.00× warm speed — zero
+co-tenant interference by design. The SynCode/GBNF G9 arms are dropped by
+decision (2026-07-10; the G9 KPI was already exceeded with the existing
+arms). Remaining before the R0 release gate: the paper (in draft). See
+`DESIGN.md` §11, `LESSONS.md`, and `ONBOARDING.md`.

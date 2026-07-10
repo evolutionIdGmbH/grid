@@ -166,9 +166,13 @@ def test_v2_aggregate_over_repeats():
         steps[0] = step_max
         reds.append(B.reduce_adversarial_v2(steps, times, "fresh"))
     agg = B.aggregate_adversarial_v2(reds, baseline_warm_tpot_ms=10.0)
-    assert abs(agg["warm_tpot_mean_ms"] - 11.0) < 1e-9      # mean(10, 12)
+    # Estimator change (ratified 2026-07-10, LESSONS 6.8): median over legs
+    # for warm TPOT, MIN over legs for max step (artifact-free window against
+    # the exogenous once-per-leg vLLM-multiprocess freeze); raw maxima kept.
+    assert abs(agg["warm_tpot_mean_ms"] - 11.0) < 1e-9      # median(10, 12)
     assert abs(agg["tpot_degradation_pct"] - 10.0) < 1e-9   # vs baseline 10
-    assert abs(agg["max_step_ms"] - 20.0) < 1e-9            # max over repeats
+    assert abs(agg["max_step_ms"] - 12.0) < 1e-9            # MIN over repeats
+    assert agg["max_step_raw_ms"] == [12.0, 20.0]
     assert abs(agg["fresh_effective_tpot_ms"] - 20.0) < 1e-9
     assert agg["soft_bound_ok"] is True                     # 20/11 < 3
     assert agg["n_repeats"] == 2 and agg["n_warm"] == 4
@@ -248,3 +252,25 @@ def test_report_legacy_adversarial_dict_still_renders(tmp_path):
     text = out.read_text()
     assert "skip-a-round/overlap contract holds" in text
     assert "metric v2" not in text
+
+
+def test_v2_aggregate_artifact_robust_estimators():
+    """A once-per-leg exogenous engine freeze (LESSONS 6.8) poisoning a
+    MINORITY of legs must not move the gate values: degradation uses the
+    median-over-legs warm mean, max step uses the min-over-legs per-leg max
+    (the artifact-free window); raw maxima stay reported."""
+    from vllm_serving_bench import aggregate_adversarial_v2
+
+    clean = {"warm_tpot_mean_ms": 6.4, "max_step_ms": 24.0, "n_warm": 31,
+             "fresh_ttft_ms": 150.0, "fresh_completion_ms": 1600.0,
+             "fresh_effective_tpot_ms": 16.0}
+    poisoned = {"warm_tpot_mean_ms": 27.0, "max_step_ms": 2100.0, "n_warm": 31,
+                "fresh_ttft_ms": 150.0, "fresh_completion_ms": 3600.0,
+                "fresh_effective_tpot_ms": 37.0}
+    legs = [dict(clean), dict(clean), dict(poisoned), dict(clean), dict(poisoned)]
+    agg = aggregate_adversarial_v2(legs, baseline_warm_tpot_ms=6.25)
+    assert agg["warm_tpot_mean_ms"] == 6.4, "median must ignore the poisoned minority"
+    assert agg["max_step_ms"] == 24.0, "min-over-legs is the artifact-free window"
+    assert agg["max_step_raw_ms"] == [24.0, 24.0, 24.0, 2100.0, 2100.0]
+    assert abs(agg["tpot_degradation_pct"] - 100.0 * (6.4 - 6.25) / 6.25) < 1e-9
+    assert agg["soft_bound_ok"] is True  # median fresh 16.0 <= 3x median warm
