@@ -154,9 +154,11 @@ class MaskProducer:
         # kernel v7: cold-miss materialization fully in-kernel (walk_payload +
         # register_blob, one GIL-released call each; Python keeps only a thin
         # MaskEntryV7). Read once; effective only with the kernel present.
-        # Kill switch GRID_V7=0 (the default until the perf gates are green)
-        # is byte-for-byte today's walk()/make_entry/register_bytes path.
-        self._v7 = os.environ.get("GRID_V7", "0") != "0"
+        # Default ON since the kernel-v7 H100 stamp (G8 6/7: adversarial max
+        # step 407->15 ms PASS, co-batch degradation 115%->34%). Kill switch
+        # GRID_V7=0 is byte-for-byte today's walk()/make_entry/register_bytes
+        # path (digest-fuzz identical, both key regimes).
+        self._v7 = os.environ.get("GRID_V7", "1") != "0"
 
     _MEMO_CAP = 200_000
     _INTERN_CAP = 2_000_000  # kernel arena reset threshold (kidx regeneration)

@@ -34,12 +34,43 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
 
+def _nice_this_thread() -> None:
+    """Lower THIS thread's scheduling priority (Linux; no-op elsewhere).
+    GRID_POOL_NICE (default 10, 0 disables): pool workers doing cold walks
+    share the host with the live engine loop — under CPU/memory-bandwidth
+    contention during a fresh schema's window, the engine must win. Uses
+    per-thread setpriority(PRIO_PROCESS, tid) via ctypes (os.nice would
+    renice the whole process)."""
+    import ctypes
+    import os
+    import sys
+
+    if sys.platform != "linux":
+        return
+    try:
+        nice = min(int(os.environ.get("GRID_POOL_NICE", "10")), 19)
+    except ValueError:
+        nice = 10
+    if nice <= 0:
+        return
+    try:
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        tid = libc.syscall(186)  # SYS_gettid on x86_64; aarch64 uses 178
+        if tid < 0:
+            tid = libc.syscall(178)
+        if tid > 0:
+            libc.setpriority(0, tid, nice)  # PRIO_PROCESS
+    except Exception:
+        pass  # scheduling hint only; never fail a build over it
+
+
 class MaskPrefetcher:
     """Successor-state mask builder: hide cold walks behind the forward pass."""
 
     def __init__(self, max_workers: int = 1) -> None:
         self._pool = ThreadPoolExecutor(max_workers=max_workers,
-                                        thread_name_prefix="grid-mask-prefetch")
+                                        thread_name_prefix="grid-mask-prefetch",
+                                        initializer=_nice_this_thread)
         self._inflight: dict[int, tuple[Any, Future]] = {}  # id(state) -> (state ref, future)
         self._lock = threading.Lock()
         self.stats = {"scheduled": 0, "deduped": 0, "waits": 0,

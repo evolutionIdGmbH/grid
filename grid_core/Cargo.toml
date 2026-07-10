@@ -13,6 +13,7 @@ rayon = "1.11"
 # kernel v7: in-kernel entry_id = BLAKE2b-128(key_repr || tag || payload),
 # byte-identical to hashlib.blake2b(digest_size=16) (tests/mask/test_v7_encode.py)
 blake2 = "0.10"
+libc = "0.2"
 
 [profile.release]
 lto = true

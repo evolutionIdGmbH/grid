@@ -180,7 +180,25 @@ fn walk_pool(threads: usize) -> Option<Arc<rayon::ThreadPool>> {
             std::mem::forget(slot.take());
         }
     }
-    let pool = Arc::new(rayon::ThreadPoolBuilder::new().num_threads(want).build().ok()?);
+    // GRID_WALK_NICE (default 10): walk threads yield to the engine under
+    // host CPU/membw contention — the fresh-schema window's co-batch
+    // degradation is walk compute sharing the host with the engine loop
+    // (measured: MORE walk threads = LESS degradation because the window
+    // shrinks; niceness attacks the residual). Linux-only; 0 disables.
+    let nice = env_usize("GRID_WALK_NICE", 10).min(19) as i32;
+    let mut builder = rayon::ThreadPoolBuilder::new().num_threads(want);
+    if nice > 0 {
+        builder = builder.start_handler(move |_| {
+            #[cfg(target_os = "linux")]
+            unsafe {
+                let tid = libc::syscall(libc::SYS_gettid) as libc::id_t;
+                libc::setpriority(libc::PRIO_PROCESS, tid, nice);
+            }
+            #[cfg(not(target_os = "linux"))]
+            let _ = nice;
+        });
+    }
+    let pool = Arc::new(builder.build().ok()?);
     *slot = Some((pid, want, Arc::clone(&pool)));
     Some(pool)
 }

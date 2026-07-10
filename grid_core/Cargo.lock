@@ -93,6 +93,7 @@ name = "grid_core"
 version = "0.1.0"
 dependencies = [
  "blake2",
+ "libc",
  "pyo3",
  "rayon",
 ]
