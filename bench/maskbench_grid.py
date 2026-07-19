@@ -60,17 +60,21 @@ class BenchTimeout(Exception):
 class GridEngine:
     name = "GRID"
 
-    def __init__(self, tokenizer) -> None:
+    def __init__(self, tokenizer, strict: bool = False) -> None:
         from grid.models.hf_adapter import HFTokenizerAdapter
         from grid.trie.build import build_trie
 
         self.tokenizer = tokenizer
+        self.strict = strict
         self.adapter = HFTokenizerAdapter(tokenizer)
         self.trie = build_trie(self.adapter)  # per-tokenizer, shared across schemas
         self.extra: dict = {}
 
     def compile_grammar(self, schema: dict) -> None:
-        from json_schema_to_grid import compile_schema
+        from json_schema_to_grid import compile_schema as _compile
+
+        def compile_schema(s):
+            return _compile(s, strict=self.strict)
 
         from grid.grammar import spec
         from grid.grammar.projection import RoleProjection
@@ -411,6 +415,8 @@ def main() -> None:
     ap.add_argument("--tokenizer", default="unsloth/Meta-Llama-3.1-8B-Instruct")
     ap.add_argument("--time-limit", type=int, default=120, help="seconds per schema")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--strict", action="store_true",
+                    help="grid: raise on unenforced constraints (llguidance-style)")
     ap.add_argument("--report", nargs="*", help="aggregate these out-dirs into a report")
     ap.add_argument("--report-out", default="bench/RESULTS-maskbench.md")
     args = ap.parse_args()
@@ -436,7 +442,10 @@ def main() -> None:
     from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
-    engine = ENGINES[args.engine](tokenizer)
+    if args.engine == "grid":
+        engine = ENGINES[args.engine](tokenizer, strict=args.strict)
+    else:
+        engine = ENGINES[args.engine](tokenizer)
 
     def on_alarm(signum, frame):
         raise BenchTimeout()
@@ -457,7 +466,7 @@ def main() -> None:
     with open(os.path.join(out_dir, "_meta.json"), "w") as f:
         json.dump({"engine": engine.name, "version": ver, "tokenizer": args.tokenizer,
                    "sample": args.sample, "seed": args.seed, "splits": splits,
-                   "time_limit": args.time_limit}, f)
+                   "time_limit": args.time_limit, "strict": bool(args.strict)}, f)
 
     t_start = time.monotonic()
     for i, file in enumerate(files):

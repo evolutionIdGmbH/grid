@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "grid-guardrail"
-version = "0.0.7"
+version = "0.2.0"
 description = "GRID - Grammar-Railed Decoding: grammar-constrained LLM decoding with RBAC grammars and an audit trail"
 requires-python = ">=3.11"
 license = { text = "Proprietary" }

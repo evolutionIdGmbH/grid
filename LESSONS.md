@@ -740,3 +740,45 @@ every one of these before any debugging session:
 | Serving contract (§6) | overlap (GIL-released cold walk + worker prefetch, 88% main-thread liveness) and E17 single-flight implemented in `grid/serving/`, wired into the scheduler-side vLLM backend |
 | Verified locally this phase | flat per-token cost (hit p50 under 10 µs), audit-trail replay (1k-gen replay + 100% tamper detection), soundness/completeness/termination walk arm (10k, 0 failures, quotas met), model-free policy enforcement (0 bypasses, controls non-vacuous) |
 | Remaining | declared-runner numbers (batched serving TPOT/TTFT/throughput, model-in-loop soundness arm, adversarial-prompt policy suite), T2 cache tier, additional cross-engine comparison arms |
+
+## Phase 7 — The 0.2.x correctness epoch: JSON Schema coverage
+
+Goal (DESIGN-JSON-COVERAGE.md): zero error across every jsonschemabench metric,
+speed explicitly out of scope (kernel v7 frozen; timings recorded, not tuned).
+
+One sprint, bridge-only (bench/jsonschema_normalize.py, bench/jsonschema_rx.py,
+bench/json_schema_to_grid.py rewrite; engine untouched):
+
+| metric (315-schema sample, seed 0) | 0.0.7 | 0.2.0 | llguidance 1.7.6 | XGrammar 0.2.3 |
+|---|---:|---:|---:|---:|
+| passing | 206 | **268** | 251 | 283 |
+| compile error (declared) | 79 | 40 | 62 | 0 |
+| validation error (silent false-reject) | 0 | **0** | 3 | 27 |
+| invalidation error (silent false-accept) | 30 | **7** | 0 | 37 |
+
+What made the difference, in causal order: (1) schema normalization — allOf
+keyword-merge (the single largest compile-error family), $ref-sibling merge,
+dependencies/if-then-else/not rewrites into internal markers; (2) constraint
+terminals — ECMA-pattern/format/length/bounds compiled to escape- and
+UTF-8-aware byte regexes over CANONICAL serializations only (json.dumps is the
+only writer: exactness needs to hold on canonical forms, nothing else ever
+reaches the mask); (3) the **order-free object machine** — the tails
+construction assumed declaration order; real instances violate it (MCPspec),
+so objects now track only the subset of required keys seen (2^R chain rules,
+R<=10) and accept any key order; (4) hash-consing the rule set — identical
+per-branch sub-rules were the root cause of most LALR reduce-reduce conflicts,
+merging them fixed 3 of 5 conflict schemas and shrank tables; (5) scanner
+budget — two large constrained terminals in one scanner multiply subset states
+(email-format x unanchored pattern took build_scanner from 0.7s to >120s);
+keep the largest, degrade the rest to generic STRING, recorded.
+
+Mistake to remember: the first big-window length terminals emitted ~700 bytes
+per counted char (full char-precise alternation); unbounded ANY runs now emit
+the compact STRING_RX byte form (~10x smaller) — but bounded windows still
+need char precision, so maxLength beyond ~80 stays recorded until the regex
+dialect grows {m,n} (engine-adjacent, next).
+
+Residue (all declared, none silent): big length windows (dialect {m,n}),
+uniqueItems/contains (M3 semantic refinement), oneOf-exclusivity residue,
+multipleOf, ~27 adversarial Handwritten/not-existential compile shapes.
+TTFM p50 6.8 ms / p90 51 ms (bigger grammars; epoch policy: recorded, deferred).

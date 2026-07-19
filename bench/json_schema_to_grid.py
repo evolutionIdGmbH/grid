@@ -1,59 +1,87 @@
-"""JSON Schema -> .grid grammar compiler (MaskBench arm; v1 subset).
+"""JSON Schema -> .grid grammar compiler (MaskBench arm; 0.2.x coverage epoch).
 
-Supported (mirrors the cross-engine conventions from guidance-ai/maskbench):
-- types: object, array, string, number, integer, boolean, null; type lists;
-- object properties in DEFINITION ORDER (the stable order the MaskBench data is
-  normalized to), optional properties skippable, `required` enforced by
-  construction, declared-keys-only (XGrammar's default assumption);
-- arrays with `items`; enum/const via exact serialized literals (default
-  json.dumps separators — byte-identical to the runner's instance serialization);
-- anyOf/oneOf as alternation (oneOf exclusivity not enforced — recorded);
-- local $ref/$defs/definitions with cycles (CFG recursion).
+Pipeline: jsonschema_normalize.normalize() rewrites allOf/$ref-siblings/
+dependencies/if-then-else/not into the core subset (M2), then this compiler
+enforces the remaining constraints (M1):
 
-Ignored-but-accepted (recorded per schema, like XGrammar's default mode):
-pattern, format, min/max{Length,imum,Items,Properties}, multipleOf,
-uniqueItems, contains, default/title/description/examples annotations.
+- objects accept properties in ANY key order (an order-free member machine
+  tracking the subset of required keys seen — 2^R chain rules, R capped);
+  `required` enforced by construction, extras per additionalProperties
+  (default: allowed, generic);
+- string constraints as constrained terminals: pattern (ECMA subset), format
+  (curated table), min/maxLength (unrolled, escape/UTF-8 aware),
+  x-grid-not-values (finite complement) — one dimension enforced per
+  position, the rest recorded;
+- numeric bounds as digit-range terminals (integers exact; numbers over
+  canonical float forms for integer-valued bounds);
+- min/maxItems (unrolled ≤ cap), tuple arrays (draft-07 items-list +
+  additionalItems; 2020-12 prefixItems + items), min/maxProperties on
+  generic objects;
+- enum/const via exact serialized literals, statically filtered against
+  sibling constraints (numeric values admit both canonical forms: 2 and 2.0);
+- anyOf/oneOf as alternation; oneOf exclusivity is NOT enforced — recorded,
+  except when branches are provably disjoint (types / required-discriminator);
+- local $ref/$defs/definitions with cycles (CFG recursion);
+- x-grid-forbid-keys (from the dependencies rewrite): forbidden declared
+  props dropped, extras key terminal excludes the forbidden names.
 
-Unsupported (raises Unsupported -> "compile error" bucket, llguidance-style
-honesty): allOf (non-trivial), not, if/then/else, patternProperties,
-propertyNames, dependencies, unevaluated*, external $ref, prefixItems,
-additionalProperties-as-schema alongside properties, false schemas, and
-grammars past the v1 size caps.
+Modes: default records unenforced constraints per schema (XGrammar-default
+convention; they can surface as invalidation errors); strict=True raises
+Unsupported instead (llguidance-style declared non-support).
 
-Whitespace: %ignore /[ \t\n\r]+/ — the JSON-spec definition (the llama.cpp
-MaskBench arm modifies its generator to exactly this).
+Still unsupported (raises Unsupported -> "compile error" bucket):
+patternProperties, propertyNames (next stage), residual not/if/unevaluated*,
+external $ref, false schemas, grammars past the size caps.
+
+Whitespace: %ignore /[ \\t\\n\\r]+/ — the JSON-spec definition.
 """
 
 from __future__ import annotations
 
 import json
+import math
 from typing import Any
 
-MAX_PROPERTIES = 120
-MAX_NAMED_TERMINALS = 300
-MAX_RULES = 3000
+import jsonschema_rx as rx
+from jsonschema_normalize import FALSE_SCHEMA, normalize
+
+MAX_PROPERTIES = 256
+MAX_NAMED_TERMINALS = 800
+MAX_RULES = 20_000
+MAX_ITEMS_UNROLL = 256
+MAX_TERMINAL_SRC = 6_000    # scanner-DFA budget per constrained terminal
 
 _ANNOTATIONS = {
     "title", "description", "default", "examples", "$schema", "$id", "$comment",
-    "readOnly", "writeOnly", "deprecated", "$defs", "definitions",
+    "readOnly", "writeOnly", "deprecated", "$defs", "definitions", "id",
+    "$vocabulary", "$anchor",
 }
-_IGNORED_CONSTRAINTS = {
-    "pattern", "format", "minLength", "maxLength", "minimum", "maximum",
-    "exclusiveMinimum", "exclusiveMaximum", "multipleOf", "minItems", "maxItems",
-    "uniqueItems", "contains", "minContains", "maxContains", "minProperties",
-    "maxProperties", "dependentRequired", "contentMediaType", "contentEncoding",
+# recorded when present but not enforced at this position
+_RECORD_ONLY = {
+    "uniqueItems", "contains", "minContains", "maxContains", "multipleOf",
+    "contentMediaType", "contentEncoding", "unevaluatedItems",
 }
 _UNSUPPORTED_KEYS = {
-    "not", "if", "then", "else", "patternProperties", "propertyNames",
-    "dependencies", "dependentSchemas", "unevaluatedProperties",
-    "unevaluatedItems", "prefixItems", "additionalItems",
+    "not", "if", "then", "else",
+    "dependencies", "dependentRequired", "dependentSchemas",
+    "unevaluatedProperties",
 }
+_STRING_KEYS = {"pattern", "format", "minLength", "maxLength"}
+_NUMBER_KEYS = {"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum",
+                "multipleOf"}
 
 _REGEX_META = set("()[]{}*+?|\\./")
 
+_HEX = "[0-9a-fA-F]"
+STRING_RX = (
+    r'"([^"\\\x00-\x1f]|\\(["\\/bfnrt]|u' + _HEX + _HEX + _HEX + _HEX + r"))*\""
+)
+NUMBER_RX = r"-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?"
+INT_RX = r"-?(0|[1-9][0-9]*)"
+
 
 class Unsupported(Exception):
-    """Schema uses a feature outside the v1 subset (counted as compile error)."""
+    """Schema uses a feature outside the supported subset."""
 
 
 def _regex_literal(text: str) -> str:
@@ -70,36 +98,51 @@ def _regex_literal(text: str) -> str:
     return "".join(out)
 
 
-# JSON string/number terminals (grid regex subset: no bounded repetition — \uXXXX
-# hex quads are expanded; escapes and byte classes per grid/lexer/dfa.py).
-_HEX = "[0-9a-fA-F]"
-STRING_RX = (
-    r'"([^"\\\x00-\x1f]|\\(["\\/bfnrt]|u' + _HEX + _HEX + _HEX + _HEX + r"))*\""
-)
-NUMBER_RX = r"-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?"
-INT_RX = r"-?(0|[1-9][0-9]*)"
+def _num_literal_rx(v) -> str:
+    """Regex admitting every canonical serialization equal to number v."""
+    if isinstance(v, bool):
+        return _regex_literal(json.dumps(v))
+    if isinstance(v, int):
+        return _regex_literal(str(v)) + r"(\.0)?"
+    if isinstance(v, float) and v.is_integer() and abs(v) < 10**15:
+        base = _regex_literal(str(int(v)))
+        return base + r"(\.0)?"
+    return _regex_literal(json.dumps(v))
 
 
 class SchemaCompiler:
-    def __init__(self, root_schema: dict) -> None:
+    def __init__(self, root_schema: Any, strict: bool = False) -> None:
         self.root = root_schema
+        self.strict = strict
         self.rules: dict[str, list[str]] = {}
         self.rule_order: list[str] = []
         self.memo: dict[int, str] = {}          # id(schema node) -> rule name
-        self._keepalive: list[Any] = []         # nodes behind memo ids (id-reuse guard)
+        self._keepalive: list[Any] = []         # nodes behind memo ids
         self.key_terms: dict[str, str] = {}     # property name -> terminal
-        self.lit_terms: dict[str, str] = {}     # serialized enum/const value -> terminal
+        self.lit_terms: dict[str, str] = {}     # literal regex -> terminal
+        self.rx_terms: dict[str, str] = {}      # constrained regex -> terminal
         self.needs: set[str] = set()            # STRING | NUMBER | INT | generic
-        self.ignored: set[str] = set()          # recorded ignored constraints
+        self.ignored: set[str] = set()          # recorded unenforced constraints
+        self.degraded: set[str] = set()         # terminals demoted to STRING
         self._n = 0
 
-    # ------------------------------------------------------------- utilities
+    # ------------------------------------------------------------- budget
+
+    def _record(self, feat: str) -> None:
+        if self.strict:
+            raise Unsupported(f"strict: {feat}")
+        self.ignored.add(feat)
+
+    def _check_terms(self) -> None:
+        if len(self.key_terms) + len(self.lit_terms) + len(self.rx_terms) \
+                > MAX_NAMED_TERMINALS:
+            raise Unsupported("terminal budget exceeded (size cap)")
 
     def _rule(self, hint: str) -> str:
         name = f"r{self._n}_{hint}"
         self._n += 1
         if self._n > MAX_RULES:
-            raise Unsupported("rule budget exceeded (v1 size cap)")
+            raise Unsupported("rule budget exceeded (size cap)")
         self.rules[name] = []
         self.rule_order.append(name)
         return name
@@ -109,18 +152,27 @@ class SchemaCompiler:
         if t is None:
             t = f"K{len(self.key_terms)}"
             self.key_terms[key] = t
-            if len(self.key_terms) + len(self.lit_terms) > MAX_NAMED_TERMINALS:
-                raise Unsupported("terminal budget exceeded (v1 size cap)")
+            self._check_terms()
         return t
 
     def _lit_term(self, value: Any) -> str:
-        s = json.dumps(value, ensure_ascii=False)  # match the runner's serialization
-        t = self.lit_terms.get(s)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            src = _num_literal_rx(value)
+        else:
+            src = _regex_literal(json.dumps(value, ensure_ascii=False))
+        t = self.lit_terms.get(src)
         if t is None:
             t = f"E{len(self.lit_terms)}"
-            self.lit_terms[s] = t
-            if len(self.key_terms) + len(self.lit_terms) > MAX_NAMED_TERMINALS:
-                raise Unsupported("terminal budget exceeded (v1 size cap)")
+            self.lit_terms[src] = t
+            self._check_terms()
+        return t
+
+    def _rx_term(self, source: str) -> str:
+        t = self.rx_terms.get(source)
+        if t is None:
+            t = f"S{len(self.rx_terms)}"
+            self.rx_terms[source] = t
+            self._check_terms()
         return t
 
     def _resolve_ref(self, ref: str) -> Any:
@@ -144,8 +196,14 @@ class SchemaCompiler:
     def rule_for(self, schema: Any) -> str:
         if schema is True or schema == {}:
             return self.generic_value()
-        if schema is False:
-            raise Unsupported("false schema")
+        if schema is False or schema == FALSE_SCHEMA:
+            # empty language: a grammar no canonical instance can enter —
+            # every MaskBench instance is correctly rejected mid-stream
+            if "never_v" not in self.rules:
+                self.rules["never_v"] = ["NEVER"]
+                self.rule_order.append("never_v")
+                self.rx_terms.setdefault("\\x00", "NEVER")
+            return "never_v"
         if not isinstance(schema, dict):
             raise Unsupported(f"schema node of type {type(schema).__name__}")
 
@@ -154,44 +212,44 @@ class SchemaCompiler:
             return got
 
         if "$ref" in schema:
-            extra = set(schema) - {"$ref"} - _ANNOTATIONS
-            if extra - _IGNORED_CONSTRAINTS:
+            from jsonschema_normalize import _ASSERTIONS
+            extra = (set(schema) - {"$ref"} - _ANNOTATIONS) & _ASSERTIONS
+            if extra:
+                # normalize() merges mergeable siblings; the residue is real
                 raise Unsupported(f"$ref with sibling keys {sorted(extra)}")
-            self.ignored.update(extra)
             return self.rule_for(self._resolve_ref(schema["$ref"]))
 
         name = self._rule("v")
         self.memo[id(schema)] = name  # pre-register: recursive schemas terminate
         self._keepalive.append(schema)
-        self.rules[name] = self._alternatives(schema, name)
+        self.rules[name] = self._alternatives(schema)
         return name
 
-    def _alternatives(self, schema: dict, self_name: str) -> list[str]:
+    def _alternatives(self, schema: dict) -> list[str]:
         bad = set(schema) & _UNSUPPORTED_KEYS
         if bad:
             raise Unsupported(f"unsupported keys {sorted(bad)}")
-        for k in set(schema) & _IGNORED_CONSTRAINTS:
-            self.ignored.add(k)
+        for k in set(schema) & _RECORD_ONLY:
+            if k == "multipleOf":
+                continue        # handled (or recorded) in the numeric path
+            self._record(k)
 
         if "allOf" in schema:
             branches = schema["allOf"]
             if len(branches) == 1 and not (set(schema) - {"allOf"} - _ANNOTATIONS):
                 return [self.rule_for(branches[0])]
-            raise Unsupported("allOf")
+            raise Unsupported("allOf (merge failed)")
 
         if "enum" in schema or "const" in schema:
-            values = schema["enum"] if "enum" in schema else [schema["const"]]
-            if not values:
-                raise Unsupported("empty enum")
-            return [self._lit_term(v) for v in values]
+            return self._enum_alts(schema)
 
         if "anyOf" in schema or "oneOf" in schema:
             key = "anyOf" if "anyOf" in schema else "oneOf"
-            if key == "oneOf":
-                self.ignored.add("oneOf-exclusivity")
-            rest = set(schema) - {key} - _ANNOTATIONS - _IGNORED_CONSTRAINTS
+            if key == "oneOf" and not self._provably_disjoint(schema[key]):
+                self._record("oneOf-exclusivity")
+            rest = set(schema) - {key} - _ANNOTATIONS - _RECORD_ONLY
             if rest - {"type"}:
-                raise Unsupported(f"{key} with sibling keys {sorted(rest)}")
+                raise Unsupported(f"{key} with sibling keys {sorted(rest - {'type'})}")
             return [self.rule_for(b) for b in schema[key]]
 
         types = schema.get("type")
@@ -203,96 +261,714 @@ class SchemaCompiler:
                 out.append(self.rule_for(sub))
             return out
         if types is None:
-            if "properties" in schema or "required" in schema or "additionalProperties" in schema:
-                types = "object"
-            elif "items" in schema:
-                types = "array"
-            else:
-                return [self.generic_value()]
+            return self._untyped(schema)
 
         if types == "object":
             return [self._object(schema)]
         if types == "array":
-            items = schema.get("items", True)
-            item_rule = self.rule_for(items)
-            elems = self._rule("el")
-            self.rules[elems] = [item_rule, f'{elems} "," {item_rule}']
-            return ['"[" "]"', f'"[" {elems} "]"']
+            return self._array_alts(schema)
         if types == "string":
-            self.needs.add("STRING")
-            return ["STRING"]
+            return [self._string_term(schema)]
         if types == "number":
-            self.needs.add("NUMBER")
-            return ["NUMBER"]
+            return [self._number_term(schema, integer=False)]
         if types == "integer":
-            self.needs.add("INT")
-            return ["INT"]
+            return [self._number_term(schema, integer=True)]
         if types == "boolean":
             return ['"true"', '"false"']
         if types == "null":
             return ['"null"']
         raise Unsupported(f"type {types!r}")
 
+    # ---------------------------------------------------------- untyped
+
+    def _untyped(self, schema: dict) -> list[str]:
+        keys = set(schema) - _ANNOTATIONS - _RECORD_ONLY - {"x-grid-not-values"}
+        if keys & {"properties", "required", "additionalProperties",
+                   "minProperties", "maxProperties", "x-grid-forbid-keys",
+                   "patternProperties", "propertyNames"}:
+            sub = dict(schema)
+            sub["type"] = "object"
+            return [self._object(sub)]
+        if keys & {"items", "prefixItems", "additionalItems",
+                   "minItems", "maxItems"}:
+            sub = dict(schema)
+            sub["type"] = "array"
+            return self._array_alts(sub)
+        s_keys = keys & _STRING_KEYS
+        n_keys = keys & (_NUMBER_KEYS - {"multipleOf"})
+        if not s_keys and not n_keys:
+            if schema.get("x-grid-not-values"):
+                return self._not_values_generic(schema["x-grid-not-values"])
+            return [self.generic_value()]
+        # typeless string/number constraints: constrain those leaves only,
+        # leave every other JSON type unconstrained
+        self.generic_value()
+        alts = ["json_object", "json_array", '"true"', '"false"', '"null"']
+        alts.append(self._string_term(schema) if s_keys else "STRING")
+        if n_keys:
+            alts.append(self._number_term(schema, integer=False))
+        else:
+            alts.append("NUMBER")
+        return alts
+
+    def _not_values_generic(self, values: list) -> list[str]:
+        if all(isinstance(v, str) for v in values):
+            body = rx.not_literals_body(list(values))
+            self.generic_value()
+            return ["json_object", "json_array", '"true"', '"false"', '"null"',
+                    "NUMBER", self._rx_term(rx.string_terminal_rx(body))]
+        self._record("not-values")
+        return [self.generic_value()]
+
+    # ------------------------------------------------------------- enums
+
+    def _enum_alts(self, schema: dict) -> list[str]:
+        values = [schema["const"]] if "const" in schema else list(schema["enum"])
+        if not values:
+            raise Unsupported("empty enum")
+        rest = {k: v for k, v in schema.items()
+                if k not in ("enum", "const") and k not in _ANNOTATIONS}
+        if rest:
+            from jsonschema_normalize import _valid
+            kept = [v for v in values if _valid(v, rest, self.root)]
+        else:
+            kept = values
+        if not kept:
+            raise Unsupported("enum emptied by sibling constraints")
+        return [self._lit_term(v) for v in kept]
+
+    # ------------------------------------------------------------ strings
+
+    def _string_term(self, schema: dict) -> str:
+        pattern = schema.get("pattern")
+        fmt = schema.get("format")
+        min_l = schema.get("minLength", 0)
+        max_l = schema.get("maxLength")
+        notv = schema.get("x-grid-not-values")
+        has_len = bool(min_l) or max_l is not None
+
+        body = None
+        if pattern is not None:
+            try:
+                body = rx.pattern_body(pattern)
+                for k in ("format", "minLength", "maxLength"):
+                    if k in schema:
+                        self._record(f"{k}-with-pattern")
+                if notv:
+                    self._record("not-values")
+            except rx.RxUnsupported as e:
+                self._record(f"pattern ({e})")
+                body = None
+        if body is None and fmt is not None:
+            fb = rx.format_body(fmt)
+            if fb is None:
+                self._record(f"format:{fmt}")
+            else:
+                body = fb
+                if has_len:
+                    self._record("length-with-format")
+                if notv:
+                    self._record("not-values")
+        if body is None and notv is not None:
+            if all(isinstance(v, str) for v in notv):
+                body = rx.not_literals_body(list(notv))
+                if has_len:
+                    self._record("length-with-not-values")
+            else:
+                self._record("not-values")
+        notp = schema.get("x-grid-not-patterns")
+        if notp:
+            if body is None and len(notp) == 1 and not has_len:
+                try:
+                    body = rx.pattern_complement_body(notp[0])
+                    if body is None:
+                        raise Unsupported(
+                            "not-pattern matches every string (false)")
+                except rx.RxUnsupported as e:
+                    self._record(f"not-pattern ({e})")
+            else:
+                self._record("not-pattern")
+        if body is None and has_len:
+            try:
+                body = rx.length_body(min_l, max_l)
+            except rx.RxUnsupported as e:
+                self._record(f"length ({e})")
+        if body is not None and len(body) > MAX_TERMINAL_SRC:
+            self._record("string-constraint-terminal-too-large")
+            body = None
+        if body is None:
+            self.needs.add("STRING")
+            return "STRING"
+        return self._rx_term(rx.string_terminal_rx(body))
+
+    # ------------------------------------------------------------ numbers
+
+    def _bounds(self, schema: dict):
+        lo, excl_lo = None, False
+        if "minimum" in schema:
+            lo, excl_lo = schema["minimum"], False
+        if "exclusiveMinimum" in schema and isinstance(
+                schema["exclusiveMinimum"], (int, float)) and not isinstance(
+                schema["exclusiveMinimum"], bool):
+            e = schema["exclusiveMinimum"]
+            if lo is None or e >= lo:
+                lo, excl_lo = e, True
+        hi, excl_hi = None, False
+        if "maximum" in schema:
+            hi, excl_hi = schema["maximum"], False
+        if "exclusiveMaximum" in schema and isinstance(
+                schema["exclusiveMaximum"], (int, float)) and not isinstance(
+                schema["exclusiveMaximum"], bool):
+            e = schema["exclusiveMaximum"]
+            if hi is None or e <= hi:
+                hi, excl_hi = e, True
+        return lo, excl_lo, hi, excl_hi
+
+    def _number_term(self, schema: dict, integer: bool) -> str:
+        if "multipleOf" in schema and schema["multipleOf"] not in (1, 1.0):
+            self._record("multipleOf")
+        lo, excl_lo, hi, excl_hi = self._bounds(schema)
+        if schema.get("x-grid-not-values"):
+            self._record("not-values")
+        if lo is None and hi is None:
+            self.needs.add("INT" if integer else "NUMBER")
+            return "INT" if integer else "NUMBER"
+        if integer:
+            int_lo = None
+            if lo is not None:
+                int_lo = math.floor(lo) + 1 if excl_lo else math.ceil(lo)
+            int_hi = None
+            if hi is not None:
+                int_hi = math.ceil(hi) - 1 if excl_hi else math.floor(hi)
+            if int_lo is not None and int_hi is not None and int_lo > int_hi:
+                raise Unsupported("unsatisfiable integer bounds")
+            try:
+                return self._rx_term(rx.int_range_rx(int_lo, int_hi))
+            except rx.RxUnsupported as e:
+                self._record(f"integer-bounds ({e})")
+                self.needs.add("INT")
+                return "INT"
+        src = rx.number_range_rx(lo, hi, excl_lo, excl_hi)
+        if src is None:
+            for k in _NUMBER_KEYS & set(schema):
+                if k != "multipleOf":
+                    self._record(k)
+            self.needs.add("NUMBER")
+            return "NUMBER"
+        return self._rx_term(src)
+
+    # ------------------------------------------------------------- arrays
+
+    def _array_alts(self, schema: dict) -> list[str]:
+        min_i = schema.get("minItems", 0) or 0
+        max_i = schema.get("maxItems")
+        # tuple forms: draft-07 items-list (+additionalItems) or 2020-12
+        # prefixItems (+items as the tail schema)
+        prefix: list | None = None
+        tail_schema: Any = True
+        items = schema.get("items", None)
+        if isinstance(items, list):
+            prefix = items
+            tail_schema = schema.get("additionalItems", True)
+        elif "prefixItems" in schema:
+            prefix = schema["prefixItems"]
+            tail_schema = items if items is not None else True
+        if prefix is not None:
+            return self._tuple_array(prefix, tail_schema, min_i, max_i)
+
+        item_rule = self.rule_for(items if items is not None else True)
+        if min_i == 0 and max_i is None:
+            elems = self._rule("el")
+            self.rules[elems] = [item_rule, f'{elems} "," {item_rule}']
+            return ['"[" "]"', f'"[" {elems} "]"']
+        if (max_i is not None and max_i > MAX_ITEMS_UNROLL) or \
+                min_i > MAX_ITEMS_UNROLL:
+            for k in ("minItems", "maxItems"):
+                if k in schema:
+                    self._record(f"{k}-beyond-cap")
+            elems = self._rule("el")
+            self.rules[elems] = [item_rule, f'{elems} "," {item_rule}']
+            return ['"[" "]"', f'"[" {elems} "]"']
+        if max_i is not None and min_i > max_i:
+            raise Unsupported("unsatisfiable item counts")
+        return self._counted_seq(item_rule, min_i, max_i, "[", "]")
+
+    def _tuple_array(self, prefix: list, tail_schema: Any,
+                     min_i: int, max_i: int | None) -> list[str]:
+        n = len(prefix)
+        if n > MAX_ITEMS_UNROLL or min_i > MAX_ITEMS_UNROLL or \
+                (max_i is not None and max_i > MAX_ITEMS_UNROLL):
+            raise Unsupported("tuple beyond unroll cap")
+        prefix_rules = [self.rule_for(s) for s in prefix]
+        tail_allowed = tail_schema is not False and tail_schema != FALSE_SCHEMA
+        tail_rule = self.rule_for(tail_schema) if tail_allowed else None
+        if max_i is not None and min_i > max_i:
+            raise Unsupported("unsatisfiable item counts")
+
+        # build right-to-left: pos i may start item i (prefix[i] or tail)
+        # count window applies to the total number of items
+        eff_max = max_i
+        if not tail_allowed and (eff_max is None or eff_max > n):
+            eff_max = n
+        if eff_max is not None and min_i > eff_max:
+            raise Unsupported("unsatisfiable item counts")
+
+        def item_at(i: int) -> str:
+            return prefix_rules[i] if i < n else tail_rule  # type: ignore
+
+        # cont(i): continuation after item i-1, i.e. items from index i on
+        upper = eff_max if eff_max is not None else max(n, min_i)
+        conts: dict[int, str] = {}
+
+        def cont(i: int) -> str:
+            # returns a rule name matching ("," item_i ...) continuations,
+            # or "" when no continuation is possible
+            if eff_max is not None and i >= eff_max:
+                return ""
+            if i in conts:
+                return conts[i]
+            name = self._rule(f"tp{i}")
+            conts[i] = name
+            alts = []
+            if i >= min_i:
+                alts.append("|EPS|")
+            if eff_max is None and i >= n:
+                # unbounded tail: left-recursive list of tail items
+                more = self._rule("tt")
+                self.rules[more] = [f'"," {tail_rule}', f'{more} "," {tail_rule}']
+                if i >= min_i:
+                    alts.append(more)
+                else:
+                    # still below min: fixed prefix then unbounded
+                    seq = " ".join(f'"," {tail_rule}' for _ in range(i, min_i))
+                    alts.append(f"{seq}")
+                    alts.append(f"{seq} {more}")
+                self.rules[name] = alts
+                return name
+            if i < upper:
+                nxt = item_at(i)
+                if nxt is not None:
+                    alts.append(f'"," {nxt} {cont(i + 1)}'.strip())
+            self.rules[name] = alts
+            return name
+
+        out = []
+        if min_i == 0:
+            out.append('"[" "]"')
+        first = item_at(0) if (upper > 0 or eff_max is None) else None
+        if first is not None:
+            out.append(f'"[" {first} {cont(1)} "]"')
+        if not out:
+            out.append('"[" "]"')
+        return out
+
+    def _counted_seq(self, item_rule: str, m: int, n: int | None,
+                     open_b: str, close_b: str) -> list[str]:
+        """Bracketed comma list with m..n items (n <= cap or None)."""
+        out = []
+        if m == 0:
+            out.append(f'"{open_b}" "{close_b}"')
+        # chain: c_k = continuation when k items already emitted
+        conts: dict[int, str] = {}
+
+        def cont(k: int) -> str:
+            if n is not None and k >= n:
+                return ""                    # no further items possible
+            if k in conts:
+                return conts[k]
+            name = self._rule(f"c{k}")
+            conts[k] = name
+            alts = []
+            if k >= m:
+                alts.append("|EPS|")
+            if n is None:
+                more = self._rule("cm")
+                self.rules[more] = [f'"," {item_rule}', f'{more} "," {item_rule}']
+                if k >= m:
+                    alts.append(more)
+                else:
+                    seq = " ".join(f'"," {item_rule}' for _ in range(k, m))
+                    alts.append(seq)
+                    alts.append(f"{seq} {more}")
+            else:
+                alts.append(f'"," {item_rule} {cont(k + 1)}'.strip())
+            self.rules[name] = alts
+            return name
+
+        if n is None or n >= 1:
+            out.append(f'"{open_b}" {item_rule} {cont(1)} "{close_b}"')
+        return out
+
+    # ------------------------------------------------------------- objects
+
+    def _pattern_minus_keys(self, pat: str, keys: list[str]) -> str | None:
+        """Serialized body for (pattern-language MINUS declared key names),
+        for the supported pattern shapes; None when not constructible."""
+        try:
+            ast = rx.parse_ecma(pat)
+            items = rx._flatten_cat(ast)
+            lead = bool(items) and items[0].kind == "caret"
+            trail = bool(items) and items[-1].kind == "dollar"
+            if not lead and not trail and rx._nullable(ast):
+                # matches every string: minus-keys is just NOT_LIT
+                return rx.not_literals_body(list(keys))
+            if lead and trail:
+                atoms = rx._atoms(items[1:-1])
+                if atoms and all(a[0] == atoms[0][0] for a in atoms):
+                    cls = atoms[0][0]
+                    m = sum(1 for a in atoms if a[1] in ("1", "plus"))
+                    n = None if any(a[1] in ("star", "plus") for a in atoms) \
+                        else len(atoms)
+                    return rx.class_window_minus_literals(cls, m, n, list(keys))
+        except rx.RxUnsupported:
+            return None
+        return None
+
+    def _pp_disjoint(self, pats: list[str]) -> bool:
+        """Provable pairwise disjointness of key patterns via anchored
+        first-char classes."""
+        firsts = []
+        for p in pats:
+            try:
+                ast = rx.parse_ecma(p)
+            except rx.RxUnsupported:
+                return False
+            items = rx._flatten_cat(ast)
+            if not items or items[0].kind != "caret" or len(items) < 2:
+                return False
+            head = items[1]
+            if head.kind == "ch":
+                firsts.append(head.ranges)
+            elif head.kind == "plus" and head.kids[0].kind == "ch":
+                firsts.append(head.kids[0].ranges)
+            else:
+                return False
+        for i in range(len(firsts)):
+            for j in range(i + 1, len(firsts)):
+                if rx._subtract(firsts[i], rx._subtract(firsts[i], firsts[j])):
+                    return False        # intersection nonempty
+        return True
+
+    def _provably_disjoint(self, branches: list) -> bool:
+        infos = []
+        for b in branches:
+            if not isinstance(b, dict):
+                return False
+            t = b.get("type")
+            ts = set([t] if isinstance(t, str) else (t or []))
+            if "integer" in ts:
+                ts.add("number")
+            discs = {}
+            req = set(b.get("required", []) or [])
+            props = b.get("properties", {}) or {}
+            for k in req:
+                sub = props.get(k)
+                if isinstance(sub, dict):
+                    if "const" in sub:
+                        discs[k] = {json.dumps(sub["const"])}
+                    elif "enum" in sub:
+                        discs[k] = {json.dumps(v) for v in sub["enum"]}
+            enum_vals = None
+            if "enum" in b:
+                enum_vals = {json.dumps(v) for v in b["enum"]}
+            if "const" in b:
+                enum_vals = {json.dumps(b["const"])}
+            infos.append((ts, discs, enum_vals))
+        for i in range(len(infos)):
+            for j in range(i + 1, len(infos)):
+                ti, di, ei = infos[i]
+                tj, dj, ej = infos[j]
+                if ei is not None and ej is not None and not (ei & ej):
+                    continue
+                if ti and tj and not (ti & tj):
+                    continue
+                shared = [k for k in di if k in dj and not (di[k] & dj[k])]
+                if shared:
+                    continue
+                return False
+        return True
+
+    def _propname_body(self, pn: Any) -> str | None:
+        """propertyNames schema -> serialized key-body regex (None = no
+        constraint); raises Unsupported outside the supported subset."""
+        if pn is True or pn == {}:
+            return None
+        if pn is False or pn == FALSE_SCHEMA:
+            raise Unsupported("propertyNames: false")
+        if not isinstance(pn, dict):
+            raise Unsupported("propertyNames shape")
+        if "$ref" in pn:
+            return self._propname_body(self._resolve_ref(pn["$ref"]))
+        keys = set(pn) - _ANNOTATIONS - {"type"}
+        if pn.get("type") not in (None, "string"):
+            raise Unsupported("propertyNames non-string type")
+        try:
+            if keys == {"const"}:
+                return rx.literals_body([pn["const"]])
+            if keys == {"enum"}:
+                if not all(isinstance(v, str) for v in pn["enum"]):
+                    raise Unsupported("propertyNames enum non-string")
+                return rx.literals_body(list(pn["enum"]))
+            if keys == {"pattern"}:
+                return rx.pattern_body(pn["pattern"])
+            if keys == {"x-grid-not-values"}:
+                vals = pn["x-grid-not-values"]
+                if not all(isinstance(v, str) for v in vals):
+                    raise Unsupported("propertyNames not-values non-string")
+                return rx.not_literals_body(list(vals))
+            if keys and keys <= {"minLength", "maxLength"}:
+                return rx.length_body(pn.get("minLength", 0), pn.get("maxLength"))
+            if not keys:
+                return None
+        except rx.RxUnsupported as e:
+            raise Unsupported(f"propertyNames ({e})")
+        raise Unsupported(f"propertyNames keys {sorted(keys)}")
+
     def _object(self, schema: dict) -> str:
-        props: dict[str, Any] = schema.get("properties", {}) or {}
+        props: dict[str, Any] = dict(schema.get("properties", {}) or {})
         required = set(schema.get("required", []) or [])
+        forbid = set(schema.get("x-grid-forbid-keys", []) or [])
         ap = schema.get("additionalProperties", None)
+        min_p = schema.get("minProperties", 0) or 0
+        max_p = schema.get("maxProperties")
+        pp = dict(schema.get("patternProperties") or {})
+        pn = schema.get("propertyNames")
+
+        if forbid & required:
+            raise Unsupported("required key is forbidden (unsatisfiable)")
+        for f in forbid:
+            props.pop(f, None)
+        if pp and (pn is not None or forbid):
+            raise Unsupported("patternProperties with propertyNames/forbid")
+        if pn is not None and forbid:
+            raise Unsupported("propertyNames with forbidden keys")
+
+        pn_body = self._propname_body(pn) if pn is not None else None
+        if pn is not None:
+            from jsonschema_normalize import _valid
+            for k in list(props):
+                if not _valid(k, pn, self.root):
+                    if k in required:
+                        raise Unsupported("required key violates propertyNames")
+                    props.pop(k)
+
         if len(props) > MAX_PROPERTIES:
-            raise Unsupported(f"{len(props)} properties (v1 cap {MAX_PROPERTIES})")
+            raise Unsupported(f"{len(props)} properties (size cap)")
         unknown_req = required - set(props)
         if unknown_req and not props:
-            # required-only schema: fall back to generic members (can't order)
-            self.ignored.add("required-without-properties")
+            self._record("required-without-properties")
 
-        # JSON Schema default: additionalProperties is ALLOWED unless explicitly
-        # false; a schema-valued ap types the extra values.
-        extras = ap is not False
+        extras = ap is not False and ap != FALSE_SCHEMA
         extra_val = None
         if extras:
-            extra_val = self.generic_value() if ap in (None, True) else self.rule_for(ap)
+            extra_val = self.generic_value() if ap in (None, True) \
+                else self.rule_for(ap)
+
+        # patternProperties: pattern-keyed pairs; extras keys must then be
+        # the complement (a matching key must take its pattern's pair)
+        pp_pairs: list[str] = []
+        extras_body: str | None = None      # None -> plain STRING
+        pp_key_body: dict[str, str] = {}
+        if pp:
+            pats = list(pp)
+            import re as _re
+            from jsonschema_normalize import Unmergeable, merge2, normalize as _n2
+            overlap: dict[str, list[str]] = {}
+            for k in list(props):
+                for pat in pats:
+                    try:
+                        hit = _re.search(pat, k) is not None
+                    except _re.error:
+                        raise Unsupported(f"patternProperties bad pattern {pat!r}")
+                    if not hit:
+                        continue
+                    # declared key matching a pattern: both schemas apply
+                    try:
+                        props[k] = _n2(merge2(props[k], pp[pat], self.root))
+                    except Unmergeable:
+                        raise Unsupported(
+                            "patternProperties overlaps declared key (merge)")
+                    overlap.setdefault(pat, []).append(k)
+            for pat, km in overlap.items():
+                # the pattern pair must EXCLUDE the declared names, else a
+                # declared key could take the (weaker) pattern path
+                body = self._pattern_minus_keys(pat, km)
+                if body is None:
+                    raise Unsupported("patternProperties overlaps declared key")
+                pp_key_body[pat] = body
+            if len(pats) > 1 and not self._pp_disjoint(pats):
+                raise Unsupported("overlapping patternProperties")
+            for pat in pats:
+                try:
+                    body = pp_key_body.get(pat) or rx.pattern_body(pat)
+                except rx.RxUnsupported as e:
+                    raise Unsupported(f"patternProperties pattern {pat!r} ({e})")
+                kt = self._rx_term(rx.string_terminal_rx(body))
+                vr = self.rule_for(pp[pat])
+                pr = self._rule("pp")
+                self.rules[pr] = [f'{kt} ":" {vr}']
+                pp_pairs.append(pr)
+            if extras:
+                if len(pats) > 1:
+                    raise Unsupported(
+                        "additionalProperties with multiple patternProperties")
+                try:
+                    comp = rx.pattern_complement_body(pats[0])
+                except rx.RxUnsupported as e:
+                    raise Unsupported(
+                        f"patternProperties complement {pats[0]!r} ({e})")
+                if comp is None:
+                    extras = False      # every key matches the pattern
+                    extra_val = None
+                else:
+                    extras_body = comp
+        elif pn_body is not None:
+            extras_body = pn_body
+
+        def extras_key_term() -> str:
+            if extras_body is not None:
+                return self._rx_term(rx.string_terminal_rx(extras_body))
+            if forbid:
+                body = rx.not_literals_body(sorted(forbid))
+                return self._rx_term(rx.string_terminal_rx(body))
+            self.needs.add("STRING")
+            return "STRING"
+
+        # generic member pairs: extras pair (if any) + pattern pairs
+        generic_pairs: list[str] = list(pp_pairs)
+        if extras:
+            gp = self._rule("xp")
+            self.rules[gp] = [f'{extras_key_term()} ":" {extra_val}']
+            generic_pairs.append(gp)
 
         if not props:
-            # generic object (typed extras if given)
-            self.needs.add("STRING")
-            val = extra_val if extras else self.generic_value()
-            pair = self._rule("gp")
-            self.rules[pair] = [f'STRING ":" {val}']
-            members = self._rule("gm")
-            self.rules[members] = [pair, f'{members} "," {pair}']
+            if not generic_pairs and (required or min_p > 0):
+                raise Unsupported("unsatisfiable: no members possible")
+            if required:
+                self._record("required names outside properties")
+            if generic_pairs:
+                member = self._rule("gp")
+                self.rules[member] = list(generic_pairs)
+            else:
+                obj = self._rule("go")
+                self.rules[obj] = ['"{" "}"']
+                return obj
+            if (min_p == 0 and max_p is None) or \
+                    (max_p is not None and max_p > MAX_ITEMS_UNROLL) or \
+                    min_p > MAX_ITEMS_UNROLL:
+                if not (min_p == 0 and max_p is None):
+                    for k in ("minProperties", "maxProperties"):
+                        if k in schema:
+                            self._record(f"{k}-beyond-cap")
+                members = self._rule("gm")
+                self.rules[members] = [member, f'{members} "," {member}']
+                obj = self._rule("go")
+                self.rules[obj] = ['"{" "}"', f'"{{" {members} "}}"']
+                return obj
+            if max_p is not None and min_p > max_p:
+                raise Unsupported("unsatisfiable property counts")
+            alts = self._counted_seq(member, min_p, max_p, "{", "}")
             obj = self._rule("go")
-            self.rules[obj] = ['"{" "}"', f'"{{" {members} "}}"']
+            self.rules[obj] = alts
             return obj
-        if unknown_req:
-            self.ignored.add("required names outside properties")
 
+        # required keys outside `properties`: credit them by declaring them
+        # with the extras schema (they must exist; their value follows ap)
+        if unknown_req:
+            if not extras:
+                raise Unsupported("required key with additionalProperties:false")
+            for k in sorted(unknown_req):
+                props[k] = ap if isinstance(ap, dict) else {}
+        # count constraints with declared properties: enforce only the
+        # statically-decidable case
+        if min_p or max_p is not None:
+            n_req = len(required & set(props))
+            n_max = len(props) if not extras else None
+            if not extras and set(props) == (required & set(props)):
+                count = len(props)
+                if count < min_p or (max_p is not None and count > max_p):
+                    raise Unsupported("unsatisfiable property counts")
+                # vacuously satisfied — nothing to record
+            else:
+                if min_p > (n_req if n_req else 0):
+                    self._record("minProperties")
+                if max_p is not None and (n_max is None or max_p < n_max):
+                    self._record("maxProperties")
+
+        # ---- order-free object machine ----
+        # Instances present keys in arbitrary order (the bench data is NOT
+        # normalized to declaration order). Track only which REQUIRED keys
+        # have been seen: 2^R member-chain rules; optional and generic pairs
+        # are order- and state-transparent.
+        req_list = sorted(required & set(props))
+        R = len(req_list)
+        if R > 10 or (1 << R) * (len(props) + len(generic_pairs) + 1) > 40_000:
+            # subset machine too large: fall back to the declaration-order
+            # machine (accepts declaration order with optional skips) and
+            # record the order assumption — an out-of-order instance would
+            # surface as a visible validation error, never silently
+            self._record("property-order-assumed (required-set beyond cap)")
+            return self._ordered_object(props, required, generic_pairs, min_p)
+        bit = {k: 1 << i for i, k in enumerate(req_list)}
+        FULL = (1 << R) - 1
+
+        units: list[tuple[str, int]] = []       # (pair grammar, state bit)
+        for k, v in props.items():
+            pair_src = f'{self._key_term(k)} ":" {self.rule_for(v)}'
+            units.append((pair_src, bit.get(k, 0)))
+        for g in generic_pairs:
+            units.append((g, 0))
+
+        mrules: dict[int, str] = {}
+
+        def member_chain(S: int) -> str:
+            got = mrules.get(S)
+            if got is not None:
+                return got
+            name = self._rule(f"m{S:x}")
+            mrules[S] = name
+            alts = []
+            for pair_src, b in units:
+                S2 = S | b
+                if S2 == FULL:
+                    alts.append(pair_src)
+                alts.append(f'{pair_src} "," {member_chain(S2)}')
+            self.rules[name] = alts
+            return name
+
+        obj = self._rule("o")
+        alts = []
+        if R == 0 and min_p == 0:
+            alts.append('"{" "}"')
+        if units:
+            alts.append(f'"{{" {member_chain(0)} "}}"')
+        if not alts:
+            alts.append('"{" "}"')
+        self.rules[obj] = alts
+        return obj
+
+    def _ordered_object(self, props: dict, required: set,
+                        generic_pairs: list[str], min_p: int) -> str:
+        """Declaration-order member machine (fallback beyond the subset cap):
+        declared properties in schema order with optional skips, generic
+        pairs interleavable. Order violations reject visibly."""
         items = [
             (self._key_term(k), self.rule_for(v), k in required)
             for k, v in props.items()
         ]
         n = len(items)
-
-        gpair = ""
-        if extras:
-            self.needs.add("STRING")
-            gpair = self._rule("xp")
-            self.rules[gpair] = [f'STRING ":" {extra_val}']
+        has_gen = bool(generic_pairs)
 
         def pair(i: int) -> str:
             kt, vr, _req = items[i]
             return f'{kt} ":" {vr}'
 
-        # tail_j: what may follow once properties < j have been handled. With
-        # extras, tail_j also admits ", <generic pair>" and recurses on itself
-        # (extra properties may appear between declared ones); LALR stays
-        # conflict-free because the lookahead key terminal (K_i vs STRING)
-        # separates the alternatives. Without extras, tails[n] is inline-empty
-        # and tails[0] is never referenced (reducedness).
         tails: list[str] = [""] * (n + 1)
         req_from = [False] * (n + 1)
         for j in range(n - 1, -1, -1):
             req_from[j] = req_from[j + 1] or items[j][2]
-        lo = 0 if extras else 1
-        hi = n if extras else n - 1
+        lo = 0 if has_gen else 1
+        hi = n if has_gen else n - 1
         for j in range(hi, lo - 1, -1):
             name = self._rule(f"t{j}")
             alts = [] if req_from[j] else ["|EPS|"]
@@ -300,8 +976,8 @@ class SchemaCompiler:
                 if k > j and any(items[m][2] for m in range(j, k)):
                     break  # skipping a required property is not viable
                 alts.append(f'"," {pair(k)} {tails[k + 1]}'.strip())
-            if extras:
-                alts.append(f'"," {gpair} {name}')
+            for g in generic_pairs:
+                alts.append(f'"," {g} {name}')
             self.rules[name] = alts
             tails[j] = name
 
@@ -310,12 +986,12 @@ class SchemaCompiler:
             if k > 0 and any(items[m][2] for m in range(k)):
                 break
             heads.append(f"{pair(k)} {tails[k + 1]}".strip())
-        if extras:
-            heads.append(f"{gpair} {tails[0]}")
+        for g in generic_pairs:
+            heads.append(f"{g} {tails[0]}")
 
         obj = self._rule("o")
         alts = []
-        if not req_from[0]:
+        if not req_from[0] and min_p == 0:
             alts.append('"{" "}"')
         alts += [f'"{{" {h} "}}"' for h in heads]
         self.rules[obj] = alts
@@ -338,15 +1014,89 @@ class SchemaCompiler:
                 self.rule_order.append(r)
         return "json_value"
 
+    # ---------------------------------------------------------- dedupe
+
+    def _dedupe_rules(self, start: str) -> str:
+        """Hash-cons the rule set: merge rules with identical alternative
+        lists (self-references canonicalized) to a fixpoint. Identical
+        per-branch sub-rules otherwise produce LALR reduce-reduce conflicts
+        between equal reductions — and needlessly large tables."""
+        alias: dict[str, str] = {}
+
+        def resolve(n: str) -> str:
+            while n in alias:
+                n = alias[n]
+            return n
+
+        changed = True
+        while changed:
+            changed = False
+            seen: dict[tuple, str] = {}
+            for name in self.rule_order:
+                if name in alias or name not in self.rules:
+                    continue
+                key_parts = []
+                for alt in self.rules[name]:
+                    toks = tuple("@SELF" if resolve(t) == name else resolve(t)
+                                 for t in alt.split())
+                    key_parts.append(toks)
+                key = tuple(key_parts)
+                canon = seen.get(key)
+                if canon is None:
+                    seen[key] = name
+                elif canon != name:
+                    alias[name] = canon
+                    changed = True
+
+        if not alias:
+            return start
+        new_rules: dict[str, list[str]] = {}
+        new_order: list[str] = []
+        for name in self.rule_order:
+            if resolve(name) != name or name not in self.rules:
+                continue
+            alts = []
+            for alt in self.rules[name]:
+                if alt in ("", "|EPS|"):
+                    alts.append(alt)
+                    continue
+                alts.append(" ".join(resolve(t) for t in alt.split()))
+            new_rules[name] = alts
+            new_order.append(name)
+        self.rules = new_rules
+        self.rule_order = new_order
+        return resolve(start)
+
     # ---------------------------------------------------------------- emit
+
+    _SCANNER_BIG = 600      # combined-DFA safety: two large position-machines
+                            # in one scanner multiply subset states
+
+    def _apply_scanner_budget(self) -> None:
+        """The union scanner DFA is a product of live terminal position sets;
+        two large constrained terminals in one schema can blow up subset
+        construction (observed: email-format x unanchored pattern). Keep the
+        largest, degrade the rest to generic STRING — recorded, not silent."""
+        bigs = [(len(src), src) for src in self.rx_terms
+                if len(src) > self._SCANNER_BIG and src.startswith('"')]
+        if len(bigs) <= 1:
+            return
+        bigs.sort(reverse=True)
+        for _, src in bigs[1:]:
+            self._record("scanner-budget: constrained string degraded")
+            self.degraded.add(self.rx_terms[src])
 
     def compile(self) -> str:
         start = self.rule_for(self.root)
+        self._apply_scanner_budget()
+        start = self._dedupe_rules(start)
         lines = ["%start start", "%ignore WS", r"WS: /[ \t\n\r]+/"]
         for key, term in self.key_terms.items():
             lines.append(f"{term}: /{_regex_literal(json.dumps(key, ensure_ascii=False))}/")
         for lit, term in self.lit_terms.items():
-            lines.append(f"{term}: /{_regex_literal(lit)}/")
+            lines.append(f"{term}: /{lit}/")
+        for src, term in self.rx_terms.items():
+            lines.append(f"{term}: /{STRING_RX if term in self.degraded else src}/")
         if "STRING" in self.needs:
             lines.append(f"STRING: /{STRING_RX}/")
         if "NUMBER" in self.needs:
@@ -358,14 +1108,21 @@ class SchemaCompiler:
             alts = self.rules.get(name)
             if not alts:
                 continue
-            # eps alternative (only ever first) renders as a leading "|"
             rendered = ["" if a == "|EPS|" else a for a in alts]
             lines.append(f"{name}: " + " | ".join(rendered))
         return "\n".join(lines) + "\n"
 
 
-def compile_schema(schema: dict) -> tuple[str, set[str]]:
-    """-> (.grid source, ignored-feature set). Raises Unsupported."""
-    c = SchemaCompiler(schema)
+def compile_schema(schema: Any, strict: bool = False) -> tuple[str, set[str]]:
+    """-> (.grid source, recorded-unenforced set). Raises Unsupported."""
+    normalized = normalize(schema)
+    root = normalized if isinstance(normalized, dict) else schema
+    if isinstance(root, dict) and isinstance(schema, dict):
+        # rewrites can restructure the root; keep resolution targets reachable
+        for dk in ("$defs", "definitions"):
+            if dk in schema and dk not in root:
+                root = dict(root)
+                root[dk] = schema[dk]
+    c = SchemaCompiler(root, strict=strict)
     src = c.compile()
     return src, c.ignored
