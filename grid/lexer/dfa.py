@@ -26,6 +26,21 @@ from grid.grammar.spec import Terminal
 # ---------------------------------------------------------------- regex parser
 
 _ESCAPES = {"n": ord("\n"), "t": ord("\t"), "r": ord("\r"), "0": 0}
+_MAX_REPEAT = 8192      # {m,n} bound cap: expansion is linear in n
+
+
+def _expand_repeat(node: "_Node", m: int, n: int | None, pattern: str) -> "_Node":
+    """{m,n} -> m copies + (n-m) optionals ({m,} -> m copies + a star tail).
+    Expansion happens at parse time; the NFA builder is unchanged and shared
+    subtrees are safe (construction walks per visit)."""
+    kids: list[_Node] = [node] * m
+    if n is None:
+        kids.append(_Node("star", kids=(node,)))
+    else:
+        kids.extend([_Node("opt", kids=(node,))] * (n - m))
+    if not kids:
+        return _Node("eps")
+    return kids[0] if len(kids) == 1 else _Node("cat", kids=tuple(kids))
 
 
 @dataclass
@@ -64,10 +79,52 @@ def _parse_regex(pattern: str) -> _Node:
 
     def parse_post() -> _Node:
         node = parse_atom()
-        while peek() in ("*", "+", "?"):
-            op = take()
-            node = _Node({"*": "star", "+": "plus", "?": "opt"}[op], kids=(node,))
+        while True:
+            c = peek()
+            if c in ("*", "+", "?"):
+                op = take()
+                node = _Node({"*": "star", "+": "plus", "?": "opt"}[op], kids=(node,))
+            elif c == "{":
+                rep = try_parse_repeat()
+                if rep is None:
+                    break               # literal '{' consumed by parse_atom later
+                m, n = rep
+                node = _expand_repeat(node, m, n, pattern)
+            else:
+                break
         return node
+
+    def try_parse_repeat():
+        """Parse {m} / {m,} / {m,n} after an atom; None (no input consumed)
+        when the braces are not a valid quantifier — the '{' then reads as a
+        literal, matching the ECMA convention."""
+        nonlocal pos
+        save = pos
+        take()                          # '{'
+        digits = ""
+        while peek() is not None and peek().isdigit():
+            digits += take()
+        if not digits:
+            pos = save
+            return None
+        m = int(digits)
+        n: int | None = m
+        if peek() == ",":
+            take()
+            digits = ""
+            while peek() is not None and peek().isdigit():
+                digits += take()
+            n = int(digits) if digits else None
+        if peek() != "}":
+            pos = save
+            return None
+        take()                          # '}'
+        if n is not None and n < m:
+            raise GrammarInvalid(f"bad repetition {{{m},{n}}} in regex {pattern!r}")
+        if m > _MAX_REPEAT or (n is not None and n > _MAX_REPEAT):
+            raise GrammarInvalid(
+                f"repetition bound over {_MAX_REPEAT} in regex {pattern!r}")
+        return m, n
 
     def parse_atom() -> _Node:
         ch = take()

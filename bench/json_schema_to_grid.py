@@ -124,6 +124,8 @@ class SchemaCompiler:
         self.needs: set[str] = set()            # STRING | NUMBER | INT | generic
         self.ignored: set[str] = set()          # recorded unenforced constraints
         self.degraded: set[str] = set()         # terminals demoted to STRING
+        self.degraded_keep: set[str] = set()    # demoted, kept as clones
+        self.rx_costs: dict[str, int] = {}      # terminal -> scanner-cost proxy
         self._n = 0
 
     # ------------------------------------------------------------- budget
@@ -167,12 +169,14 @@ class SchemaCompiler:
             self._check_terms()
         return t
 
-    def _rx_term(self, source: str) -> str:
+    def _rx_term(self, source: str, cost: int | None = None) -> str:
         t = self.rx_terms.get(source)
         if t is None:
             t = f"S{len(self.rx_terms)}"
             self.rx_terms[source] = t
             self._check_terms()
+        self.rx_costs[t] = max(self.rx_costs.get(t, 0),
+                               cost if cost is not None else len(source))
         return t
 
     def _resolve_ref(self, ref: str) -> Any:
@@ -399,7 +403,10 @@ class SchemaCompiler:
         if body is None:
             self.needs.add("STRING")
             return "STRING"
-        return self._rx_term(rx.string_terminal_rx(body))
+        cost = None
+        if body is not None and "{" in body and (min_l or max_l is not None):
+            cost = 40 * (max_l if max_l is not None else min_l)
+        return self._rx_term(rx.string_terminal_rx(body), cost=cost)
 
     # ------------------------------------------------------------ numbers
 
@@ -1048,8 +1055,6 @@ class SchemaCompiler:
                     alias[name] = canon
                     changed = True
 
-        if not alias:
-            return start
         new_rules: dict[str, list[str]] = {}
         new_order: list[str] = []
         for name in self.rule_order:
@@ -1058,9 +1063,12 @@ class SchemaCompiler:
             alts = []
             for alt in self.rules[name]:
                 if alt in ("", "|EPS|"):
-                    alts.append(alt)
+                    if alt not in alts:
+                        alts.append(alt)
                     continue
-                alts.append(" ".join(resolve(t) for t in alt.split()))
+                r = " ".join(resolve(t) for t in alt.split())
+                if r not in alts:       # aliasing can create duplicate alts
+                    alts.append(r)
             new_rules[name] = alts
             new_order.append(name)
         self.rules = new_rules
@@ -1077,18 +1085,62 @@ class SchemaCompiler:
         two large constrained terminals in one schema can blow up subset
         construction (observed: email-format x unanchored pattern). Keep the
         largest, degrade the rest to generic STRING — recorded, not silent."""
-        bigs = [(len(src), src) for src in self.rx_terms
-                if len(src) > self._SCANNER_BIG and src.startswith('"')]
-        if len(bigs) <= 1:
+        # length windows multiply with every co-resident terminal (enum
+        # literals and keys share the '"' prefix): enforce them only where
+        # the product stays cheap — measured: (0,64) x 100 keys = 2.3s,
+        # (0,128) x 196 terminals = 145s
+        n_terms = len(self.key_terms) + len(self.lit_terms) + len(self.rx_terms)
+        for src, name in list(self.rx_terms.items()):
+            cost = self.rx_costs.get(name, len(src))
+            is_window = "{" in src and cost >= 40 * 32
+            if is_window and (cost > 40 * 64 or n_terms > 80) \
+                    and name not in self.degraded:
+                self._record("scanner-budget: length window degraded")
+                self.degraded.add(name)
+        costed = [(self.rx_costs.get(name, len(src)), src)
+                  for src, name in self.rx_terms.items()
+                  if src.startswith('"') and name not in self.degraded]
+        bigs = [(c, src) for c, src in costed if c > self._SCANNER_BIG]
+        if not bigs:
             return
         bigs.sort(reverse=True)
         for _, src in bigs[1:]:
             self._record("scanner-budget: constrained string degraded")
             self.degraded.add(self.rx_terms[src])
+        # a very large keeper (length window) multiplies with ANY other
+        # nontrivial position machine — degrade those too
+        if bigs[0][0] > 2_500:
+            for c, src in costed:
+                if src != bigs[0][1] and c > 200 and \
+                        self.rx_terms[src] not in self.degraded:
+                    self._record("scanner-budget: constrained string degraded")
+                    self.degraded.add(self.rx_terms[src])
 
     def compile(self) -> str:
         start = self.rule_for(self.root)
         self._apply_scanner_budget()
+        if self.degraded and len(self.degraded) <= 3:
+            # few degraded terminals: keep them as separate STRING_RX clones —
+            # the small live-set overhead is fine, and distinct names avoid
+            # collapsing structurally-different rules into LALR conflicts
+            self.degraded_keep = set(self.degraded)
+            self.degraded = set()
+        if self.degraded:
+            # many degraded terminals all sharing STRING_RX — N identical
+            # automata would put every one of them in every live set
+            # (h_max ~= N) and blow up the scanner closure; alias them to
+            # the ONE generic STRING terminal instead
+            self.needs.add("STRING")
+            self.rx_terms = {src: name for src, name in self.rx_terms.items()
+                             if name not in self.degraded}
+            for name, alts in self.rules.items():
+                self.rules[name] = [
+                    " ".join("STRING" if t in self.degraded else t
+                             for t in alt.split()) if alt not in ("", "|EPS|")
+                    else alt
+                    for alt in alts
+                ]
+            self.degraded = set()
         start = self._dedupe_rules(start)
         lines = ["%start start", "%ignore WS", r"WS: /[ \t\n\r]+/"]
         for key, term in self.key_terms.items():
@@ -1096,7 +1148,8 @@ class SchemaCompiler:
         for lit, term in self.lit_terms.items():
             lines.append(f"{term}: /{lit}/")
         for src, term in self.rx_terms.items():
-            lines.append(f"{term}: /{STRING_RX if term in self.degraded else src}/")
+            demoted = term in self.degraded or term in self.degraded_keep
+            lines.append(f"{term}: /{STRING_RX if demoted else src}/")
         if "STRING" in self.needs:
             lines.append(f"STRING: /{STRING_RX}/")
         if "NUMBER" in self.needs:

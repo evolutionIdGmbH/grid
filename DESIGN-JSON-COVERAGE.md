@@ -174,6 +174,7 @@ Sample (15/split, 315 schemas, seed 0), all error classes:
 | + M1/M2 core     | 253 | 46 | 1 | 9 | 6 |
 | + structural/order-free | 260 | 47 | 0 | 8 | 0 |
 | **v0.2.0** (residual sweep) | **268** | **40** | **0** | **7** | **0** |
+| **v0.2.1** (dialect {m,n}, windows <=64 enforced) | 268 | 41 | 0 | **6** | 0 |
 
 Reference points, same sample: llguidance 251/62/3/0, XGrammar 283/0/27/37.
 GRID 0.2.0 passes the most schemas among honest-declaring engines with zero

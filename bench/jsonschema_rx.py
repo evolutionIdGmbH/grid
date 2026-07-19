@@ -16,10 +16,11 @@ This module therefore compiles value-level constraints into byte-level grid
 regexes that are exact over canonical serializations (non-canonical forms never
 reach the mask, in either the valid or the invalid direction).
 
-Grid regex dialect (grid/lexer/dfa.py): byte-level; ``* + ?`` (no ``{m,n}`` —
-we unroll), ``|``, ``( )``, classes ``[..]`` with ranges, ``\\xHH``; no
-anchors (terminals are whole-match). We never emit ``.``, negated classes, or
-raw ``/ ] ^ -`` inside classes.
+Grid regex dialect (grid/lexer/dfa.py): byte-level; ``* + ? {m,n}`` (bounded
+repetition landed with the 0.2.x epoch; expansion happens at engine parse
+time), ``|``, ``( )``, classes ``[..]`` with ranges, ``\\xHH``; no anchors
+(terminals are whole-match). We never emit ``.``, negated classes, or raw
+``/ ] ^ -`` inside classes.
 
 ECMA-262 pattern subset: literals, escapes (\\d \\D \\w \\W \\s \\S \\xHH
 \\uHHHH \\n \\t \\r \\f \\v \\0, identity escapes), classes, ``.``, groups
@@ -112,9 +113,10 @@ _DOT = _complement([(0x0A, 0x0A), (0x0D, 0x0D), (0x2028, 0x2029)])
 
 @dataclass(frozen=True)
 class N:
-    kind: str                # ch|cat|alt|star|plus|opt|eps|caret|dollar
+    kind: str                # ch|cat|alt|star|plus|opt|eps|caret|dollar|rep
     ranges: tuple = ()
     kids: tuple = ()
+    bounds: tuple = ()       # rep only: (m, n) with n None for open
 
 
 EPS = N("eps")
@@ -485,6 +487,17 @@ def _merge_byte_ranges(rs: list[tuple[int, int]]) -> list[tuple[int, int]]:
 _BYTE_ANY = (r'([^"\\\x00-\x1f]|\\(["\\/bfnrt]'
              r"|u[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]))")
 
+# Counting form: exactly ONE decoded char per match, kept deliberately coarse
+# (collapsed escape/UTF-8 classes over-admit only byte forms that canonical
+# json.dumps never emits — the STRING_RX looseness convention). ~20 NFA
+# states per counted char vs ~150 for the char-precise alternation, which is
+# what makes {m,n} length windows buildable.
+_BYTE_CHAR = (r'([\x20-\x21\x23-\x5b\x5d-\x7f]'
+              r'|\\(["\\/bfnrt]|u[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F])'
+              r"|[\xc2-\xdf][\x80-\xbf]"
+              r"|[\xe0-\xef][\x80-\xbf][\x80-\xbf]"
+              r"|[\xf0-\xf4][\x80-\xbf][\x80-\xbf][\x80-\xbf])")
+
 
 def emit(node: N) -> str:
     """Value AST -> grid regex over the serialized JSON string BODY."""
@@ -514,6 +527,31 @@ def _emit(node: N) -> str:
         if not _is_atom(inner):
             inner = "(" + inner + ")"
         return inner + {"star": "*", "plus": "+", "opt": "?"}[k]
+    if k == "rep":
+        m, n = node.bounds
+        kid = node.kids[0]
+        if kid.kind == "ch" and kid.ranges == ANY_CHAR:
+            if m == 0 and n is None:
+                return _BYTE_ANY + "*"
+            suffix = "{%d,}" % m if n is None else \
+                ("{%d}" % m if m == n else "{%d,%d}" % (m, n))
+            return _BYTE_CHAR + suffix
+        inner = _emit(kid)
+        if not inner:
+            return ""
+        if not _is_atom(inner):
+            inner = "(" + inner + ")"
+        if m == 0 and n is None:
+            return inner + "*"
+        if m == 1 and n is None:
+            return inner + "+"
+        if m == 0 and n == 1:
+            return inner + "?"
+        if n is None:
+            return inner + "{%d,}" % m
+        if m == n:
+            return inner + "{%d}" % m
+        return inner + "{%d,%d}" % (m, n)
     if k in ("caret", "dollar"):
         raise RxUnsupported("unprocessed anchor (call anchor() first)")
     raise AssertionError(k)
@@ -555,11 +593,16 @@ def string_terminal_rx(body: str) -> str:
 
 # --------------------------------------------------------------- lengths
 
+LENGTH_CAP = 128        # window cap: scanner build is super-linear in n
+                        # (0.45s @64, 23s @256 measured); beyond -> recorded
+
+
 def length_body(min_len: int, max_len: int | None) -> str:
-    """CHAR-count window over decoded chars (escape/UTF-8 aware)."""
-    if min_len > MAX_UNROLL or (max_len is not None and max_len > MAX_UNROLL):
+    """CHAR-count window over decoded chars (escape/UTF-8 aware), emitted
+    with dialect {m,n} bounded repetition (DFA linear in the bound)."""
+    if min_len > LENGTH_CAP or (max_len is not None and max_len > LENGTH_CAP):
         raise RxUnsupported(f"length window ({min_len},{max_len}) beyond cap")
-    return emit(unroll(ANY, min_len, max_len))
+    return emit(N("rep", kids=(ANY,), bounds=(min_len, max_len)))
 
 
 # ----------------------------------------------------- NOT-literals (keys)
@@ -905,6 +948,8 @@ def _too_short_ast(k: int) -> N | None:
     """All strings with length < k (any chars)."""
     if k <= 0:
         return None
+    if k > 8:
+        return N("rep", kids=(ANY,), bounds=(0, k - 1))
     return unroll(ANY, 0, k - 1)
 
 

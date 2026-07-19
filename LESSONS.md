@@ -782,3 +782,17 @@ Residue (all declared, none silent): big length windows (dialect {m,n}),
 uniqueItems/contains (M3 semantic refinement), oneOf-exclusivity residue,
 multipleOf, ~27 adversarial Handwritten/not-existential compile shapes.
 TTFM p50 6.8 ms / p90 51 ms (bigger grammars; epoch policy: recorded, deferred).
+
+### 7.1 — Dialect {m,n} (0.2.1)
+
+Added bounded repetition to the grid regex dialect (grid/lexer/dfa.py,
+parse-time expansion; kernel untouched; additive — no existing grammar changes
+meaning). What it bought and what it taught: emitted-source size was never the
+real limit — the Python scanner build is super-linear in window size and in
+co-resident terminals (measured: (0,64) 0.45s alone, 2.3s with 100 keys;
+(0,128) x 196 terminals 145s; N degraded STRING-clones drive h_max to N).
+Policy landed: enforce length windows <= 64 chars via a compact counting-char
+form (canonical-looseness convention), record beyond; degraded terminals alias
+to STRING when numerous. Net on the sample: invalidation 7 -> 6, timeouts 0,
+worst TTFM 5.2s. The remaining big-window hinges (>=255 chars) now wait on a
+scanner-build optimization or native counted states — 0.3.x work.
