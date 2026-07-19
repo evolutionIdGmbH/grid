@@ -175,6 +175,14 @@ Sample (15/split, 315 schemas, seed 0), all error classes:
 | + structural/order-free | 260 | 47 | 0 | 8 | 0 |
 | **v0.2.0** (residual sweep) | **268** | **40** | **0** | **7** | **0** |
 | **v0.2.1** (dialect {m,n}, windows <=64 enforced) | 268 | 41 | 0 | **6** | 0 |
+| **v0.2.2** (full-set validation-error hunt: 5 root bugs) | 270 | 39 | 0 | 6 | 0 |
+
+Full set (11,306): v0.2.0 measured passing 9,551 (84.5%) / compile 1,082 /
+validation 31 / invalidation 629 / timeout 13 — all BFCL splits 100%.
+v0.2.2 fixes: composite-enum max-munch capture, untyped type-sniffing,
+token-level anyOf branch capture (const harmonization), legacy draft $ref
+semantics, ordered-fallback false-rejects, emptied-enum never-grammar,
+reachability pruning.
 
 Reference points, same sample: llguidance 251/62/3/0, XGrammar 283/0/27/37.
 GRID 0.2.0 passes the most schemas among honest-declaring engines with zero

@@ -110,6 +110,27 @@ def _num_literal_rx(v) -> str:
     return _regex_literal(json.dumps(v))
 
 
+def _const_schema(v) -> dict:
+    """Structural schema exactly matching the composite constant v."""
+    if isinstance(v, dict):
+        return {
+            "type": "object",
+            "properties": {k: _const_schema(x) if isinstance(x, (dict, list))
+                           else {"const": x} for k, x in v.items()},
+            "required": sorted(v.keys()),
+            "additionalProperties": False,
+        }
+    if isinstance(v, list):
+        return {
+            "type": "array",
+            "prefixItems": [_const_schema(x) if isinstance(x, (dict, list))
+                            else {"const": x} for x in v],
+            "items": False,
+            "minItems": len(v),
+        }
+    return {"const": v}
+
+
 class SchemaCompiler:
     def __init__(self, root_schema: Any, strict: bool = False) -> None:
         self.root = root_schema
@@ -286,28 +307,39 @@ class SchemaCompiler:
     # ---------------------------------------------------------- untyped
 
     def _untyped(self, schema: dict) -> list[str]:
+        """Typeless schema: every keyword constrains ONLY instances of its
+        own type — other JSON types pass free (e.g. {'properties': {}} on a
+        string is vacuously valid)."""
         keys = set(schema) - _ANNOTATIONS - _RECORD_ONLY - {"x-grid-not-values"}
-        if keys & {"properties", "required", "additionalProperties",
-                   "minProperties", "maxProperties", "x-grid-forbid-keys",
-                   "patternProperties", "propertyNames"}:
-            sub = dict(schema)
-            sub["type"] = "object"
-            return [self._object(sub)]
-        if keys & {"items", "prefixItems", "additionalItems",
-                   "minItems", "maxItems"}:
-            sub = dict(schema)
-            sub["type"] = "array"
-            return self._array_alts(sub)
+        obj_keys = keys & {"properties", "required", "additionalProperties",
+                           "minProperties", "maxProperties",
+                           "x-grid-forbid-keys", "patternProperties",
+                           "propertyNames"}
+        arr_keys = keys & {"items", "prefixItems", "additionalItems",
+                           "minItems", "maxItems"}
         s_keys = keys & _STRING_KEYS
         n_keys = keys & (_NUMBER_KEYS - {"multipleOf"})
-        if not s_keys and not n_keys:
-            if schema.get("x-grid-not-values"):
+        notv = bool(schema.get("x-grid-not-values"))
+        if not (obj_keys or arr_keys or s_keys or n_keys):
+            if notv:
                 return self._not_values_generic(schema["x-grid-not-values"])
             return [self.generic_value()]
-        # typeless string/number constraints: constrain those leaves only,
-        # leave every other JSON type unconstrained
+        if notv:
+            self._record("not-values")
         self.generic_value()
-        alts = ["json_object", "json_array", '"true"', '"false"', '"null"']
+        alts: list[str] = ['"true"', '"false"', '"null"']
+        if obj_keys:
+            sub = dict(schema)
+            sub["type"] = "object"
+            alts.append(self._object(sub))
+        else:
+            alts.append("json_object")
+        if arr_keys:
+            sub = dict(schema)
+            sub["type"] = "array"
+            alts.extend(self._array_alts(sub))
+        else:
+            alts.append("json_array")
         alts.append(self._string_term(schema) if s_keys else "STRING")
         if n_keys:
             alts.append(self._number_term(schema, integer=False))
@@ -338,8 +370,19 @@ class SchemaCompiler:
         else:
             kept = values
         if not kept:
-            raise Unsupported("enum emptied by sibling constraints")
-        return [self._lit_term(v) for v in kept]
+            # genuinely unsatisfiable: every instance must be rejected
+            return [self.rule_for(dict(FALSE_SCHEMA))]
+        alts = []
+        for v in kept:
+            if isinstance(v, (dict, list)):
+                # composite values CANNOT be single terminals: they'd start
+                # with '{'/'[' and hard maximal munch would hold the scanner
+                # hostage past the structural literal (observed: an
+                # enum-object shadowing every object-open in the grammar)
+                alts.append(self.rule_for(_const_schema(v)))
+            else:
+                alts.append(self._lit_term(v))
+        return alts
 
     # ------------------------------------------------------------ strings
 
@@ -910,12 +953,14 @@ class SchemaCompiler:
         req_list = sorted(required & set(props))
         R = len(req_list)
         if R > 10 or (1 << R) * (len(props) + len(generic_pairs) + 1) > 40_000:
-            # subset machine too large: fall back to the declaration-order
-            # machine (accepts declaration order with optional skips) and
-            # record the order assumption — an out-of-order instance would
-            # surface as a visible validation error, never silently
-            self._record("property-order-assumed (required-set beyond cap)")
-            return self._ordered_object(props, required, generic_pairs, min_p)
+            # subset machine too large. The ordered fallback FALSE-REJECTS
+            # out-of-order instances (observed on the full set), which is the
+            # forbidden error class — so drop required-tracking instead:
+            # any order accepted, missing-required becomes a RECORDED
+            # invalidation risk (the allowed class)
+            self._record("required-not-enforced (required-set beyond cap)")
+            req_list = []
+            R = 0
         bit = {k: 1 << i for i, k in enumerate(req_list)}
         FULL = (1 << R) - 1
 
@@ -1142,22 +1187,47 @@ class SchemaCompiler:
                 ]
             self.degraded = set()
         start = self._dedupe_rules(start)
+
+        # reachability prune: rewrites (enum filtering, degradation, branch
+        # drops) can orphan rules/terminals; the spec loader rejects
+        # non-reduced grammars
+        reach: set[str] = set()
+        stack = [start]
+        while stack:
+            r = stack.pop()
+            if r in reach or r not in self.rules:
+                continue
+            reach.add(r)
+            for alt in self.rules[r]:
+                for t in alt.split():
+                    if t in self.rules and t not in reach:
+                        stack.append(t)
+        used = {t for r in reach for alt in self.rules[r] for t in alt.split()}
+
         lines = ["%start start", "%ignore WS", r"WS: /[ \t\n\r]+/"]
         for key, term in self.key_terms.items():
+            if term not in used:
+                continue
             lines.append(f"{term}: /{_regex_literal(json.dumps(key, ensure_ascii=False))}/")
         for lit, term in self.lit_terms.items():
+            if term not in used:
+                continue
             lines.append(f"{term}: /{lit}/")
         for src, term in self.rx_terms.items():
+            if term not in used:
+                continue
             demoted = term in self.degraded or term in self.degraded_keep
             lines.append(f"{term}: /{STRING_RX if demoted else src}/")
-        if "STRING" in self.needs:
+        if "STRING" in used:
             lines.append(f"STRING: /{STRING_RX}/")
-        if "NUMBER" in self.needs:
+        if "NUMBER" in used:
             lines.append(f"NUMBER: /{NUMBER_RX}/")
-        if "INT" in self.needs:
+        if "INT" in used:
             lines.append(f"INT: /{INT_RX}/")
         lines.append(f"start: {start}")
         for name in self.rule_order:
+            if name not in reach:
+                continue
             alts = self.rules.get(name)
             if not alts:
                 continue

@@ -67,6 +67,12 @@ class Unmergeable(Exception):
 
 FALSE_SCHEMA = {"not": {}}      # canonical unsatisfiable schema
 
+# draft-07 and earlier: $ref REPLACES the schema — sibling keywords are
+# IGNORED, not merged (2019-09 changed this). Set per-normalize() run from
+# the root $schema; single-threaded bench usage.
+_LEGACY_REF = False
+_LEGACY_MARKERS = ("draft-03", "draft-04", "draft-06", "draft-07")
+
 
 def _is_true(s: Any) -> bool:
     return s is True or s == {}
@@ -257,7 +263,8 @@ def merge2(a: Any, b: Any, root: Any, _depth: int = 0) -> dict:
         if "$ref" in s:
             seen = set()
             node: Any = s
-            rest = {k: v for k, v in s.items() if k != "$ref"}
+            rest = {} if _LEGACY_REF else \
+                {k: v for k, v in s.items() if k != "$ref"}
             ref = s["$ref"]
             while True:
                 if ref in seen:
@@ -476,9 +483,17 @@ def fold_allof(schema: dict, root: Any) -> dict:
 
 def normalize(schema: Any, root: Any = None) -> Any:
     """Best-effort top-down rewrite; leaves unrewritable constructs intact."""
+    global _LEGACY_REF
     if root is None:
         root = schema
-    return _norm(schema, root, depth=0)
+    prev = _LEGACY_REF
+    if isinstance(schema, dict):
+        uri = schema.get("$schema") or ""
+        _LEGACY_REF = any(m in uri for m in _LEGACY_MARKERS)
+    try:
+        return _norm(schema, root, depth=0)
+    finally:
+        _LEGACY_REF = prev
 
 
 def _norm(schema: Any, root: Any, depth: int) -> Any:
@@ -510,7 +525,11 @@ def _norm(schema: Any, root: Any, depth: int) -> Any:
         if isinstance(s.get(key), list):
             s[key] = [_norm(x, root, depth + 1) for x in s[key]]
 
-    # $ref with meaningful siblings (vendor/unknown keys are annotations)
+    # $ref with meaningful siblings (vendor/unknown keys are annotations);
+    # in draft-07-and-earlier schemas, $ref REPLACES its siblings entirely
+    if "$ref" in s and _LEGACY_REF:
+        return {k: v for k, v in s.items()
+                if k == "$ref" or k in _ANNOTATIONS}
     if "$ref" in s:
         sib = (set(s) - {"$ref"} - _ANNOTATIONS) & _ASSERTIONS
         if not sib and set(s) - {"$ref"} - _ANNOTATIONS:
@@ -624,7 +643,50 @@ def _norm(schema: Any, root: Any, depth: int) -> Any:
                     return _norm(out, root, depth + 1)
                 except Unmergeable:
                     return s
+    for key in ("anyOf", "oneOf"):
+        if isinstance(s.get(key), list) and len(s[key]) > 1:
+            s = dict(s)
+            s[key] = _harmonize_string_consts(s[key])
     return s
+
+
+def _harmonize_string_consts(branches: list) -> list:
+    """anyOf branches where one branch pins a property to a string const and
+    another leaves it plain-string collide at the TOKEN level (the const
+    lexeme wins maximal-munch priority and commits the parse to one branch).
+    Rewrite the plain-string side as (consts | string-minus-consts) so the
+    terminals partition the lexeme space and every branch stays live."""
+    consts: dict[str, set] = {}
+    for b in branches:
+        if not isinstance(b, dict):
+            continue
+        for k, v in (b.get("properties") or {}).items():
+            if isinstance(v, dict):
+                if isinstance(v.get("const"), str):
+                    consts.setdefault(k, set()).add(v["const"])
+                elif isinstance(v.get("enum"), list) and v["enum"] and \
+                        all(isinstance(x, str) for x in v["enum"]):
+                    consts.setdefault(k, set()).update(v["enum"])
+    if not consts:
+        return branches
+    out = []
+    for b in branches:
+        if not isinstance(b, dict):
+            out.append(b)
+            continue
+        props = dict(b.get("properties") or {})
+        changed = False
+        for k, cset in consts.items():
+            v = props.get(k)
+            if isinstance(v, dict) and v.get("type") == "string" and not (
+                    set(v) & {"const", "enum", "pattern", "format",
+                              "minLength", "maxLength", "x-grid-not-values",
+                              "x-grid-not-patterns"}):
+                props[k] = {"anyOf": [{"enum": sorted(cset)},
+                                      {**v, "x-grid-not-values": sorted(cset)}]}
+                changed = True
+        out.append({**b, "properties": props} if changed else b)
+    return out
 
 
 def _expand_dep(variants: list[dict], dk: str, present_extra: dict, root: Any) -> list[dict]:

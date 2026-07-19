@@ -796,3 +796,33 @@ form (canonical-looseness convention), record beyond; degraded terminals alias
 to STRING when numerous. Net on the sample: invalidation 7 -> 6, timeouts 0,
 worst TTFM 5.2s. The remaining big-window hinges (>=255 chars) now wait on a
 scanner-build optimization or native counted states — 0.3.x work.
+
+### 7.2 — Validation-error hunt on the full set (0.2.2)
+
+First full-set run (11,306 schemas, v0.2.0): passing 9,551 (84.5%), compile
+1,082, validation 31, invalidation 629, timeouts 13. All BFCL splits 100%.
+The 31 validation errors — the forbidden class — traced to five real bugs:
+
+1. **Hard maximal munch vs composite enum literals**: an enum-OBJECT value
+   emitted as a single terminal starts with '{' and holds the scanner hostage
+   past every object-open. Composite enum values now compile structurally
+   (_const_schema: exact-object/array grammars); scalar enums stay terminals.
+2. **Type-sniffing untyped schemas**: {'properties': {}} constrains only
+   OBJECT instances; the compiler forced object-shape on all types. _untyped
+   now builds per-type alternations (constrained type + free other types).
+3. **Token-level branch capture**: a const lexeme ("lumi") beats generic
+   STRING at equal length and commits the parse to one anyOf branch before
+   the discriminator arrives. normalize() now harmonizes sibling branches:
+   plain-string properties colliding with another branch's const become
+   (consts | string-minus-consts) — disjoint terminals, all branches stay
+   live through LALR state merging.
+4. **Ordered fallback beyond the required-cap false-rejected out-of-order
+   instances**: replaced with order-free-without-required-tracking + recorded
+   'required-not-enforced' (trades the forbidden class for the allowed one).
+5. **Legacy $ref semantics**: draft-07-and-earlier $ref REPLACES siblings
+   (2019-09 changed it to merge). Merging over-constrained legacy schemas —
+   false-rejects plus most of the 114-schema '$ref with sibling' compile
+   family. normalize() is now draft-aware via the root $schema.
+
+Also: emptied enums (88 schemas) now compile to the never-grammar (all
+instances correctly rejected) instead of erroring.
