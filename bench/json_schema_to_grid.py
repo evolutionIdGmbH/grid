@@ -146,6 +146,10 @@ class SchemaCompiler:
         self.ignored: set[str] = set()          # recorded unenforced constraints
         self.degraded: set[str] = set()         # terminals demoted to STRING
         self.degraded_keep: set[str] = set()    # demoted, kept as clones
+        self.routing_terms: set[str] = set()    # key-position terminals: NEVER
+                                                # degrade (they route pairs; a
+                                                # STRING clone breaks pp/pn
+                                                # disjointness -> false rejects)
         self.rx_costs: dict[str, int] = {}      # terminal -> scanner-cost proxy
         self._n = 0
 
@@ -854,6 +858,7 @@ class SchemaCompiler:
                 except rx.RxUnsupported as e:
                     raise Unsupported(f"patternProperties pattern {pat!r} ({e})")
                 kt = self._rx_term(rx.string_terminal_rx(body))
+                self.routing_terms.add(kt)
                 vr = self.rule_for(pp[pat])
                 pr = self._rule("pp")
                 self.rules[pr] = [f'{kt} ":" {vr}']
@@ -877,10 +882,14 @@ class SchemaCompiler:
 
         def extras_key_term() -> str:
             if extras_body is not None:
-                return self._rx_term(rx.string_terminal_rx(extras_body))
+                t = self._rx_term(rx.string_terminal_rx(extras_body))
+                self.routing_terms.add(t)
+                return t
             if forbid:
                 body = rx.not_literals_body(sorted(forbid))
-                return self._rx_term(rx.string_terminal_rx(body))
+                t = self._rx_term(rx.string_terminal_rx(body))
+                self.routing_terms.add(t)
+                return t
             self.needs.add("STRING")
             return "STRING"
 
@@ -1136,6 +1145,8 @@ class SchemaCompiler:
         # (0,128) x 196 terminals = 145s
         n_terms = len(self.key_terms) + len(self.lit_terms) + len(self.rx_terms)
         for src, name in list(self.rx_terms.items()):
+            if name in self.routing_terms:
+                continue
             cost = self.rx_costs.get(name, len(src))
             is_window = "{" in src and cost >= 40 * 32
             if is_window and (cost > 40 * 64 or n_terms > 80) \
@@ -1144,7 +1155,8 @@ class SchemaCompiler:
                 self.degraded.add(name)
         costed = [(self.rx_costs.get(name, len(src)), src)
                   for src, name in self.rx_terms.items()
-                  if src.startswith('"') and name not in self.degraded]
+                  if src.startswith('"') and name not in self.degraded
+                  and name not in self.routing_terms]
         bigs = [(c, src) for c, src in costed if c > self._SCANNER_BIG]
         if not bigs:
             return
