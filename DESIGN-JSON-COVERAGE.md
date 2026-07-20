@@ -179,6 +179,11 @@ Sample (15/split, 315 schemas, seed 0), all error classes:
 
 Full set (11,306): v0.2.0 measured passing 9,551 (84.5%) / compile 1,082 /
 validation 31 / invalidation 629 / timeout 13 — all BFCL splits 100%.
+**v0.2.2 measured: passing 9,955 (88.1%) / compile 847 / validation 2 /
+invalidation 490 / timeout 12** (RESULTS-jsonschemabench-v0.2.2-full.md);
+49 former passers traded into declared/recorded classes (29 LALR-declared
+from branch harmonization, 8 required-cap recordings), zero new silent
+false-rejects.
 v0.2.2 fixes: composite-enum max-munch capture, untyped type-sniffing,
 token-level anyOf branch capture (const harmonization), legacy draft $ref
 semantics, ordered-fallback false-rejects, emptied-enum never-grammar,

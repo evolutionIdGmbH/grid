@@ -826,3 +826,13 @@ The 31 validation errors — the forbidden class — traced to five real bugs:
 
 Also: emptied enums (88 schemas) now compile to the never-grammar (all
 instances correctly rejected) instead of erroring.
+
+### 7.3 — Definitive v0.2.2 full set
+
+11,306 schemas: passing 9,551 -> 9,955 (88.1%), compile 1,082 -> 847,
+validation 31 -> 2, invalidation 629 -> 490, timeouts 13 -> 12. The two
+residual validation errors are singletons (one deep anyOf branch-capture,
+one exotic format). 49 former passers moved to DECLARED/RECORDED classes
+(the harmonizer's disjoint-terminal split creates LALR conflicts in ~29
+overlapping-branch schemas — honest, visible, next on the list), zero moved
+to silent errors. Trade direction throughout: forbidden class -> declared.
