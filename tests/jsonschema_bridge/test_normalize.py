@@ -2,6 +2,7 @@
 (markers translated back to standard form) must validate exactly like the
 original under the reference validator, over curated + generated instances."""
 
+import json
 import pathlib
 import sys
 
@@ -162,8 +163,16 @@ def test_draft4_exclusive_booleans():
     assert v.is_valid(6) and not v.is_valid(5)
 
 
-def test_unrewritable_left_intact():
+def test_not_property_discriminator_rewrites():
+    # ¬(a present ∧ integer) = a absent ∨ (a present ∧ ¬integer)
     s = {"not": {"properties": {"a": {"type": "integer"}}, "required": ["a"]}}
+    n = normalize(s)
+    equivalent(s, n, probes=[{}, {"a": 1}, {"a": "x"}, {"b": 1}, {"a": 1.5},
+                             {"a": None}, 5, "s", [1]])
+
+
+def test_unrewritable_left_intact():
+    s = {"not": {"patternProperties": {"^a": {"type": "integer"}}}}
     n = normalize(s)
     assert n == s
 

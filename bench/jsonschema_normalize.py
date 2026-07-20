@@ -55,6 +55,7 @@ _ASSERTIONS = {
     "uniqueItems", "pattern", "format", "minLength", "maxLength",
     "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
     "x-grid-forbid-keys", "x-grid-not-values", "x-grid-not-patterns",
+    "x-grid-extra-patterns",
 }
 # keyword classes used by the merge algebra
 _MIN_KEYS = {"minimum", "minLength", "minItems", "minProperties", "minContains"}
@@ -197,6 +198,16 @@ def negate(schema: Any, root: Any = None) -> list[dict]:
         return [{"x-grid-not-values": [schema["const"]]}]
     if keys == {"enum"}:
         return [{"x-grid-not-values": list(schema["enum"])}]
+    if keys <= {"properties", "required"} and "properties" in schema:
+        props = schema.get("properties") or {}
+        req = list(schema.get("required") or [])
+        if len(props) == 1 and req == list(props):
+            (k, sub), = props.items()
+            # ¬(k present ∧ sub(k)) = k absent ∨ (k present ∧ ¬sub(k))
+            out = [{"x-grid-forbid-keys": [k]}]
+            for nb in negate(sub, root):
+                out.append({"required": [k], "properties": {k: nb}})
+            return out
     if keys == {"type"}:
         ts = schema["type"]
         ts = [ts] if isinstance(ts, str) else list(ts)
@@ -204,6 +215,10 @@ def negate(schema: Any, root: Any = None) -> list[dict]:
         # integer ⊂ number: ¬number excludes integers too
         if "number" in ts and "integer" in comp:
             comp.remove("integer")
+        # ¬integer is NOT a type list: "number" in the complement would
+        # re-admit integers (every integer is a number)
+        if "integer" in ts and "number" not in ts and "number" in comp:
+            raise Unmergeable("negate: ¬integer not type-expressible")
         if not comp:
             return [dict(FALSE_SCHEMA)]
         return [{"type": comp}]
@@ -229,6 +244,9 @@ def to_std(schema: Any) -> Any:
         elif k == "x-grid-not-patterns":
             existing = out.get("allOf", [])
             out["allOf"] = existing + [{"not": {"pattern": p}} for p in v]
+        elif k == "x-grid-extra-patterns":
+            existing = out.get("allOf", [])
+            out["allOf"] = existing + [{"pattern": p} for p in v]
         else:
             out[k] = to_std(v)
     return out
@@ -397,7 +415,9 @@ def merge2(a: Any, b: Any, root: Any, _depth: int = 0) -> dict:
             if va == vb:
                 out[k] = va
             else:
-                raise Unmergeable("two distinct patterns")
+                out[k] = va
+                extra = out.get("x-grid-extra-patterns", [])
+                out["x-grid-extra-patterns"] = extra + [vb]
         elif k == "format":
             if va != vb:
                 raise Unmergeable("two distinct formats")
@@ -406,9 +426,24 @@ def merge2(a: Any, b: Any, root: Any, _depth: int = 0) -> dict:
             out[k] = merge2(va, vb, root, _depth + 1)
         elif k in ("uniqueItems",):
             out[k] = bool(va) or bool(vb)
-        elif k in ("contains", "not", "if", "then", "else",
+        elif k == "not":
+            # ¬A ∧ ¬B = ¬(A ∨ B)
+            out[k] = va if va == vb else {"anyOf": [va, vb]}
+        elif k == "multipleOf":
+            if va == vb:
+                out[k] = va
+            elif isinstance(va, int) and isinstance(vb, int) and va > 0 and vb > 0:
+                import math as _m
+                out[k] = va * vb // _m.gcd(va, vb)
+            else:
+                out[k] = va     # recorded downstream (multipleOf unenforced)
+        elif k == "contains":
+            out[k] = va         # recorded downstream (contains unenforced)
+        elif k == "x-grid-extra-patterns":
+            out[k] = va + [x for x in vb if x not in va]
+        elif k in ("if", "then", "else",
                    "dependencies", "dependentRequired", "dependentSchemas",
-                   "unevaluatedProperties", "unevaluatedItems", "multipleOf"):
+                   "unevaluatedProperties", "unevaluatedItems"):
             if va == vb:
                 out[k] = va
             else:

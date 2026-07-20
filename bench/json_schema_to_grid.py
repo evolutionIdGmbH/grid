@@ -427,6 +427,8 @@ class SchemaCompiler:
                     self._record("length-with-not-values")
             else:
                 self._record("not-values")
+        if schema.get("x-grid-extra-patterns"):
+            self._record("extra-patterns (pattern conjunction)")
         notp = schema.get("x-grid-not-patterns")
         if notp:
             if body is None and len(notp) == 1 and not has_len:
@@ -495,7 +497,7 @@ class SchemaCompiler:
             if hi is not None:
                 int_hi = math.ceil(hi) - 1 if excl_hi else math.floor(hi)
             if int_lo is not None and int_hi is not None and int_lo > int_hi:
-                raise Unsupported("unsatisfiable integer bounds")
+                return self.rule_for(dict(FALSE_SCHEMA))
             try:
                 return self._rx_term(rx.int_range_rx(int_lo, int_hi))
             except rx.RxUnsupported as e:
@@ -544,7 +546,7 @@ class SchemaCompiler:
             self.rules[elems] = [item_rule, f'{elems} "," {item_rule}']
             return ['"[" "]"', f'"[" {elems} "]"']
         if max_i is not None and min_i > max_i:
-            raise Unsupported("unsatisfiable item counts")
+            return [self.rule_for(dict(FALSE_SCHEMA))]
         return self._counted_seq(item_rule, min_i, max_i, "[", "]")
 
     def _tuple_array(self, prefix: list, tail_schema: Any,
@@ -557,7 +559,7 @@ class SchemaCompiler:
         tail_allowed = tail_schema is not False and tail_schema != FALSE_SCHEMA
         tail_rule = self.rule_for(tail_schema) if tail_allowed else None
         if max_i is not None and min_i > max_i:
-            raise Unsupported("unsatisfiable item counts")
+            return [self.rule_for(dict(FALSE_SCHEMA))]
 
         # build right-to-left: pos i may start item i (prefix[i] or tail)
         # count window applies to the total number of items
@@ -565,7 +567,7 @@ class SchemaCompiler:
         if not tail_allowed and (eff_max is None or eff_max > n):
             eff_max = n
         if eff_max is not None and min_i > eff_max:
-            raise Unsupported("unsatisfiable item counts")
+            return [self.rule_for(dict(FALSE_SCHEMA))]
 
         def item_at(i: int) -> str:
             return prefix_rules[i] if i < n else tail_rule  # type: ignore
@@ -789,7 +791,7 @@ class SchemaCompiler:
         pn = schema.get("propertyNames")
 
         if forbid & required:
-            raise Unsupported("required key is forbidden (unsatisfiable)")
+            return self.rule_for(dict(FALSE_SCHEMA))
         for f in forbid:
             props.pop(f, None)
         if pp and (pn is not None or forbid):
@@ -902,7 +904,7 @@ class SchemaCompiler:
 
         if not props:
             if not generic_pairs and (required or min_p > 0):
-                raise Unsupported("unsatisfiable: no members possible")
+                return self.rule_for(dict(FALSE_SCHEMA))
             if required:
                 self._record("required names outside properties")
             if generic_pairs:
@@ -925,7 +927,7 @@ class SchemaCompiler:
                 self.rules[obj] = ['"{" "}"', f'"{{" {members} "}}"']
                 return obj
             if max_p is not None and min_p > max_p:
-                raise Unsupported("unsatisfiable property counts")
+                return self.rule_for(dict(FALSE_SCHEMA))
             alts = self._counted_seq(member, min_p, max_p, "{", "}")
             obj = self._rule("go")
             self.rules[obj] = alts
@@ -935,7 +937,7 @@ class SchemaCompiler:
         # with the extras schema (they must exist; their value follows ap)
         if unknown_req:
             if not extras:
-                raise Unsupported("required key with additionalProperties:false")
+                return self.rule_for(dict(FALSE_SCHEMA))
             for k in sorted(unknown_req):
                 props[k] = ap if isinstance(ap, dict) else {}
         # count constraints with declared properties: enforce only the
@@ -946,7 +948,7 @@ class SchemaCompiler:
             if not extras and set(props) == (required & set(props)):
                 count = len(props)
                 if count < min_p or (max_p is not None and count > max_p):
-                    raise Unsupported("unsatisfiable property counts")
+                    return self.rule_for(dict(FALSE_SCHEMA))
                 # vacuously satisfied — nothing to record
             else:
                 if min_p > (n_req if n_req else 0):
