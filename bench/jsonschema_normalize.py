@@ -55,7 +55,7 @@ _ASSERTIONS = {
     "uniqueItems", "pattern", "format", "minLength", "maxLength",
     "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
     "x-grid-forbid-keys", "x-grid-not-values", "x-grid-not-patterns",
-    "x-grid-extra-patterns",
+    "x-grid-extra-patterns", "x-grid-branch-unified",
 }
 # keyword classes used by the merge algebra
 _MIN_KEYS = {"minimum", "minLength", "minItems", "minProperties", "minContains"}
@@ -427,7 +427,7 @@ def merge2(a: Any, b: Any, root: Any, _depth: int = 0) -> dict:
                 out[k] = va
             else:
                 out[k] = va
-                extra = out.get("x-grid-extra-patterns", [])
+                extra = out.get("x-grid-extra-patterns", "x-grid-branch-unified", [])
                 out["x-grid-extra-patterns"] = extra + [vb]
         elif k == "format":
             if va != vb:
@@ -713,7 +713,33 @@ def _harmonize_string_consts(branches: list) -> list:
                 elif isinstance(v.get("enum"), list) and v["enum"] and \
                         all(isinstance(x, str) for x in v["enum"]):
                     consts.setdefault(k, set()).update(v["enum"])
-    if not consts:
+    # constrained-string collisions: two branches giving the same prop
+    # DIFFERENT string terminals either LALR-conflict or deterministically
+    # capture the parse (hard maximal munch + priority). Unify the prop to
+    # the anyOf-union in EVERY branch — identical value rules dedupe into
+    # one, keeping all branches live; the lost per-branch tightness is
+    # marked for recording.
+    constrained: dict[str, list] = {}
+    for b in branches:
+        if not isinstance(b, dict):
+            continue
+        for k, v in (b.get("properties") or {}).items():
+            if isinstance(v, dict) and v.get("type") == "string" and (
+                    set(v) & {"pattern", "format", "minLength", "maxLength",
+                              "x-grid-not-values", "x-grid-not-patterns"}):
+                constrained.setdefault(k, []).append(v)
+    unify: dict[str, list] = {}
+    for b in branches:
+        if not isinstance(b, dict):
+            continue
+        for k, v in (b.get("properties") or {}).items():
+            if k in constrained and isinstance(v, dict) and                     json.dumps(v, sort_keys=True) != json.dumps(
+                        constrained[k][0], sort_keys=True):
+                subs = unify.setdefault(k, [])
+                for cand in constrained[k] + [v]:
+                    if cand not in subs:
+                        subs.append(cand)
+    if not consts and not unify:
         return branches
     out = []
     for b in branches:
@@ -730,6 +756,13 @@ def _harmonize_string_consts(branches: list) -> list:
                               "x-grid-not-patterns"}):
                 props[k] = {"anyOf": [{"enum": sorted(cset)},
                                       {**v, "x-grid-not-values": sorted(cset)}]}
+                changed = True
+        for k, subs in unify.items():
+            v = props.get(k)
+            if isinstance(v, dict) and (v.get("type") == "string" or
+                                        v in subs):
+                props[k] = {"anyOf": list(subs),
+                            "x-grid-branch-unified": True}
                 changed = True
         out.append({**b, "properties": props} if changed else b)
     return out

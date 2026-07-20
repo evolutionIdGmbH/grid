@@ -288,6 +288,10 @@ class SchemaCompiler:
         if "enum" in schema or "const" in schema:
             return self._enum_alts(schema)
 
+        if schema.get("x-grid-branch-unified"):
+            self._record("branch-string-values-unified")
+            schema = {k: v for k, v in schema.items()
+                      if k != "x-grid-branch-unified"}
         if "anyOf" in schema or "oneOf" in schema:
             key = "anyOf" if "anyOf" in schema else "oneOf"
             if key == "oneOf" and not self._provably_disjoint(schema[key]):
@@ -958,13 +962,30 @@ class SchemaCompiler:
             self.rules[obj] = alts
             return obj
 
-        # required keys outside `properties`: credit them by declaring them
-        # with the extras schema (they must exist; their value follows ap)
+        # required keys outside `properties`: a key matching a
+        # patternProperties pattern is NOT "additional" (ap:false does not
+        # forbid it) — credit it with the pattern's value schema; otherwise
+        # credit via the extras schema; truly impossible only when neither
         if unknown_req:
-            if not extras:
-                return self.rule_for(dict(FALSE_SCHEMA))
+            import re as _re2
+            still = set()
             for k in sorted(unknown_req):
-                props[k] = ap if isinstance(ap, dict) else {}
+                matched = None
+                for pat in (pp or {}):
+                    try:
+                        if _re2.search(pat, k):
+                            matched = pat
+                            break
+                    except _re2.error:
+                        pass
+                if matched is not None:
+                    props[k] = pp[matched]
+                elif extras:
+                    props[k] = ap if isinstance(ap, dict) else {}
+                else:
+                    still.add(k)
+            if still:
+                return self.rule_for(dict(FALSE_SCHEMA))
         # count constraints with declared properties: enforce only the
         # statically-decidable case
         if min_p or max_p is not None:
