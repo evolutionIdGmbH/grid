@@ -154,12 +154,22 @@ def test_pp_multiple_disjoint():
            {"ab": 1, "AB": "x"}, {"a1": 1}])
 
 
-def test_pp_multiple_overlapping_raises():
-    with pytest.raises(Unsupported):
-        compile_schema({"type": "object",
-                        "patternProperties": {"^[a-z]+$": {"type": "integer"},
-                                              "^[a-c]+$": {"type": "string"}},
-                        "additionalProperties": False})
+def test_pp_multiple_overlapping_records():
+    # overlapping patterns: a multi-matching key takes ONE pair (union
+    # over-admission) — recorded, not declared; single-pattern keys stay exact
+    schema = {"type": "object",
+              "patternProperties": {"^[a-z]+$": {"type": "integer"},
+                                    "^[A-C]+$": {"type": "string"},
+                                    "^[a-cX]+$": {"type": "string"}},
+              "additionalProperties": False}
+    src, ignored = compile_schema(schema)
+    assert "patternProperties-overlap" in ignored
+    guide = build_guide(src, TOK)
+    v = jsonschema.Draft202012Validator(schema)
+    # probes whose keys match exactly one pattern must agree with the validator
+    for inst in [{"zz": 1}, {"zz": "s"}, {"AB": "s"}, {"AB": 1}, {"X": "s"}]:
+        s = json.dumps(inst, indent=None, ensure_ascii=False)
+        assert accepts(guide, s) == v.is_valid(inst), s
 
 
 def test_pp_prefix_pattern():

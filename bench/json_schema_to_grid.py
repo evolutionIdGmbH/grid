@@ -46,7 +46,7 @@ import jsonschema_rx as rx
 from jsonschema_normalize import FALSE_SCHEMA, normalize
 
 MAX_PROPERTIES = 256
-MAX_NAMED_TERMINALS = 800
+MAX_NAMED_TERMINALS = 2000
 MAX_RULES = 20_000
 MAX_ITEMS_UNROLL = 256
 MAX_TERMINAL_SRC = 6_000    # scanner-DFA budget per constrained terminal
@@ -810,10 +810,15 @@ class SchemaCompiler:
             return self.rule_for(dict(FALSE_SCHEMA))
         for f in forbid:
             props.pop(f, None)
-        if pp and (pn is not None or forbid):
-            raise Unsupported("patternProperties with propertyNames/forbid")
+        if pp and pn is not None:
+            self._record("propertyNames-with-patternProperties")
+            pn = None
+        if pp and forbid:
+            self._record("forbid-keys-with-patternProperties")
+            forbid = set()
         if pn is not None and forbid:
-            raise Unsupported("propertyNames with forbidden keys")
+            self._record("propertyNames-with-forbidden-keys")
+            forbid = set()
 
         pn_body = self._propname_body(pn) if pn is not None else None
         if pn is not None:
@@ -858,18 +863,18 @@ class SchemaCompiler:
                     try:
                         props[k] = _n2(merge2(props[k], pp[pat], self.root))
                     except Unmergeable:
-                        raise Unsupported(
-                            "patternProperties overlaps declared key (merge)")
+                        self._record("pp-overlap-merge-unenforced")
                     overlap.setdefault(pat, []).append(k)
             for pat, km in overlap.items():
                 # the pattern pair must EXCLUDE the declared names, else a
                 # declared key could take the (weaker) pattern path
                 body = self._pattern_minus_keys(pat, km)
                 if body is None:
-                    raise Unsupported("patternProperties overlaps declared key")
-                pp_key_body[pat] = body
+                    self._record("pp-overlap-unsubtracted")
+                else:
+                    pp_key_body[pat] = body
             if len(pats) > 1 and not self._pp_disjoint(pats):
-                raise Unsupported("overlapping patternProperties")
+                self._record("patternProperties-overlap")
             for pat in pats:
                 try:
                     body = pp_key_body.get(pat) or rx.pattern_body(pat)
@@ -883,18 +888,17 @@ class SchemaCompiler:
                 pp_pairs.append(pr)
             if extras:
                 if len(pats) > 1:
-                    raise Unsupported(
-                        "additionalProperties with multiple patternProperties")
-                try:
-                    comp = rx.pattern_complement_body(pats[0])
-                except rx.RxUnsupported as e:
-                    raise Unsupported(
-                        f"patternProperties complement {pats[0]!r} ({e})")
-                if comp is None:
-                    extras = False      # every key matches the pattern
-                    extra_val = None
-                else:
-                    extras_body = comp
+                    self._record("extras-with-multiple-patternProperties")
+                elif True:
+                    try:
+                        comp = rx.pattern_complement_body(pats[0])
+                        if comp is None:
+                            extras = False   # every key matches the pattern
+                            extra_val = None
+                        else:
+                            extras_body = comp
+                    except rx.RxUnsupported:
+                        self._record("pp-extras-complement-unavailable")
         elif pn_body is not None:
             extras_body = pn_body
 
@@ -904,7 +908,12 @@ class SchemaCompiler:
                 self.routing_terms.add(t)
                 return t
             if forbid:
-                body = rx.not_literals_body(sorted(forbid))
+                try:
+                    body = rx.not_literals_body(sorted(forbid))
+                except rx.RxUnsupported:
+                    self._record("forbid-keys-terminal-too-large")
+                    self.needs.add("STRING")
+                    return "STRING"
                 t = self._rx_term(rx.string_terminal_rx(body))
                 self.routing_terms.add(t)
                 return t

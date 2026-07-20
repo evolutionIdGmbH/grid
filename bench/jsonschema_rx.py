@@ -1118,8 +1118,9 @@ def pattern_complement_body(pattern: str) -> str | None:
         return N("cat", kids=tuple(kids))
 
     if not lead:
-        # unanchored search: only a single one-char atom is supported
-        if len(atoms) == 1 and atoms[0][1] == "1":
+        # unanchored search: single class atom (also with +: a match exists
+        # iff the string CONTAINS a class char, so the complement is [^c]*)
+        if len(atoms) == 1 and atoms[0][1] in ("1", "plus"):
             comp = _subtract(ANY_CHAR, atoms[0][0])
             if not comp:
                 return None         # pattern matches any nonempty... and ""? a
