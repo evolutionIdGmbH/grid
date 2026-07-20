@@ -836,3 +836,18 @@ one exotic format). 49 former passers moved to DECLARED/RECORDED classes
 (the harmonizer's disjoint-terminal split creates LALR conflicts in ~29
 overlapping-branch schemas — honest, visible, next on the list), zero moved
 to silent errors. Trade direction throughout: forbidden class -> declared.
+
+### 7.4 — Full-set three-engine comparison (one machine, current versions)
+
+| 11,306 schemas | passing | declared | false-rejects | silent-accepts |
+|---|---:|---:|---:|---:|
+| GRID 0.2.4+fixes (99% counted) | 10,021+ (89.6%) | 646 | **3** | 502 (recorded) |
+| llguidance 1.7.6 | 9,487 (83.9%) | 1,797 | 22 | 0 |
+| XGrammar 0.2.3 | 10,212 (90.3%) | 51 | 427 | 627 |
+
+Three quantified philosophies: llguidance declares 16% of the set; XGrammar
+compiles everything and carries 1,054 silent errors; GRID sits at the
+frontier — within ~0.7pt of the best coverage, 3 false-rejects (all the
+documented M0-fallback capture class), every unenforced constraint named.
+GRID's 7 fallback-era false-rejects were root-caused and fixed the same day
+(branch string-value unification; required-through-patternProperties).
