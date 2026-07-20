@@ -254,10 +254,26 @@ class SchemaCompiler:
         self.rules[name] = self._alternatives(schema)
         return name
 
+    _RECORDABLE_UNSUPPORTED = {
+        "not", "if", "then", "else", "dependencies", "dependentRequired",
+        "dependentSchemas", "unevaluatedProperties", "unevaluatedItems",
+    }
+
     def _alternatives(self, schema: dict) -> list[str]:
         bad = set(schema) & _UNSUPPORTED_KEYS
         if bad:
-            raise Unsupported(f"unsupported keys {sorted(bad)}")
+            # narrowing keywords normalize() could not rewrite: in default
+            # mode they are RECORDED and dropped (XGrammar-default
+            # convention; strict mode still declares) — structural keywords
+            # (patternProperties/propertyNames) stay hard errors because
+            # dropping them breaks key routing
+            rec = bad & self._RECORDABLE_UNSUPPORTED
+            hard = bad - rec
+            if hard:
+                raise Unsupported(f"unsupported keys {sorted(hard)}")
+            for k in sorted(rec):
+                self._record(f"{k}-unenforced")
+            schema = {k: v for k, v in schema.items() if k not in rec}
         for k in set(schema) & _RECORD_ONLY:
             if k == "multipleOf":
                 continue        # handled (or recorded) in the numeric path

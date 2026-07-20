@@ -184,11 +184,6 @@ def negate(schema: Any, root: Any = None) -> list[dict]:
         return out
     if keys == {"pattern"}:
         return [{"x-grid-not-patterns": [schema["pattern"]]}]
-    if keys == {"required"}:
-        req = schema["required"]
-        if not isinstance(req, list) or not req:
-            raise Unmergeable("negate: bad required")
-        return [{"x-grid-forbid-keys": [k]} for k in req]
     if keys == {"minItems"}:
         n = schema["minItems"]
         return [{"maxItems": n - 1}] if n >= 1 else [dict(FALSE_SCHEMA)]
@@ -198,16 +193,32 @@ def negate(schema: Any, root: Any = None) -> list[dict]:
         return [{"x-grid-not-values": [schema["const"]]}]
     if keys == {"enum"}:
         return [{"x-grid-not-values": list(schema["enum"])}]
-    if keys <= {"properties", "required"} and "properties" in schema:
+    if keys <= {"properties", "required", "type"} and \
+            ("properties" in schema or "required" in schema) and \
+            schema.get("type") in (None, "object"):
         props = schema.get("properties") or {}
         req = list(schema.get("required") or [])
-        if len(props) == 1 and req == list(props):
-            (k, sub), = props.items()
-            # ¬(k present ∧ sub(k)) = k absent ∨ (k present ∧ ¬sub(k))
-            out = [{"x-grid-forbid-keys": [k]}]
+        out: list[dict] = []
+        if schema.get("type") == "object":
+            # payload excludes non-objects, so the complement includes them
+            out.append({"type": [t for t in _TYPES
+                                 if t not in ("object", "integer")]})
+        # NOTE: for a TYPELESS payload, non-objects satisfy properties/
+        # required vacuously and are NOT in the complement — every branch
+        # below must pin type:object (a typeless branch would silently admit
+        # non-objects: latent hole in the earlier single-prop version)
+        for r in req:
+            out.append({"type": "object", "x-grid-forbid-keys": [r]})
+        for k, sub in props.items():
             for nb in negate(sub, root):
-                out.append({"required": [k], "properties": {k: nb}})
-            return out
+                if _is_false(nb):
+                    continue
+                out.append({"type": "object", "required": [k],
+                            "properties": {k: nb}})
+        out = [b for b in out if not _is_false(b)]
+        if not out:
+            return [dict(FALSE_SCHEMA)]
+        return out
     if keys == {"type"}:
         ts = schema["type"]
         ts = [ts] if isinstance(ts, str) else list(ts)

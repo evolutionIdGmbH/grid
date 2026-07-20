@@ -180,10 +180,15 @@ def test_unrewritable_left_intact():
 def test_negate_shapes():
     assert negate({"minItems": 1}) == [{"maxItems": 0}]
     assert negate({"maxItems": 2}) == [{"minItems": 3}]
-    assert negate({"required": ["a", "b"]}) == [{"x-grid-forbid-keys": ["a"]},
-                                                {"x-grid-forbid-keys": ["b"]}]
+    # required-negation pins type:object — non-objects satisfy `required`
+    # vacuously so they are NOT in the complement
+    assert negate({"required": ["a", "b"]}) == [
+        {"type": "object", "x-grid-forbid-keys": ["a"]},
+        {"type": "object", "x-grid-forbid-keys": ["b"]}]
+    # a vacuously-true payload has a FALSE complement
+    assert negate({"properties": {"a": {}}}) == [FALSE_SCHEMA]
     with pytest.raises(Unmergeable):
-        negate({"properties": {"a": {}}})
+        negate({"patternProperties": {"^a": {}}})
 
 
 def test_merge_bounds_and_lengths():
