@@ -8,11 +8,25 @@ version = "0.2.5"
 description = "GRID - Grammar-Railed Decoding: grammar-constrained LLM decoding with RBAC grammars and an audit trail"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
+readme = "README.md"
+keywords = ["constrained-decoding", "structured-output", "json-schema", "llm", "grammar"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
 dependencies = [
     "numpy",
     "torch",
     "pyyaml",
 ]
+
+[project.urls]
+Repository = "https://github.com/evolutionIdGmbH/grid"
+Changelog = "https://github.com/evolutionIdGmbH/grid/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = [
