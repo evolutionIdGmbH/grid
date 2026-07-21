@@ -29,7 +29,8 @@ jobs:
       - name: Build Rust kernel (grid_core)
         run: |
           cd grid_core
-          maturin develop --release
+          maturin build --release --out dist
+          pip install --force-reinstall dist/*.whl
       - name: Lint
         run: ruff check grid tests
       - name: Tests (gates G0-G4 slice + mini-G5/G6/G10a)
