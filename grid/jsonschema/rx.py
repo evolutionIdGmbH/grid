@@ -533,8 +533,8 @@ def _emit(node: N) -> str:
         if kid.kind == "ch" and kid.ranges == ANY_CHAR:
             if m == 0 and n is None:
                 return _BYTE_ANY + "*"
-            suffix = "{%d,}" % m if n is None else \
-                ("{%d}" % m if m == n else "{%d,%d}" % (m, n))
+            suffix = f"{{{m},}}" if n is None else \
+                (f"{{{m}}}" if m == n else f"{{{m},{n}}}")
             return _BYTE_CHAR + suffix
         inner = _emit(kid)
         if not inner:
@@ -548,10 +548,10 @@ def _emit(node: N) -> str:
         if m == 0 and n == 1:
             return inner + "?"
         if n is None:
-            return inner + "{%d,}" % m
+            return inner + f"{{{m},}}"
         if m == n:
-            return inner + "{%d}" % m
-        return inner + "{%d,%d}" % (m, n)
+            return inner + f"{{{m}}}"
+        return inner + f"{{{m},{n}}}"
     if k in ("caret", "dollar"):
         raise RxUnsupported("unprocessed anchor (call anchor() first)")
     raise AssertionError(k)

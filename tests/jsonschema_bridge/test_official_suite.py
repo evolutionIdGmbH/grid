@@ -23,8 +23,8 @@ import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "bench"))
 
-from grid.jsonschema import Unsupported, compile_json_schema  # noqa: E402
 from grid.generate import build_guide  # noqa: E402
+from grid.jsonschema import Unsupported, compile_json_schema  # noqa: E402
 from grid.models.tokenizer_adapter import MockTokenizer  # noqa: E402
 
 warnings.filterwarnings("ignore", message=".*L-REC01.*")
@@ -82,7 +82,7 @@ def test_official_suite_honesty_contract():
             except Unsupported:
                 stats["declared"] += 1
                 continue
-            except Exception as e:                      # engine-level refusal
+            except Exception:                      # engine-level refusal
                 stats["declared"] += 1
                 continue
             stats["compiled"] += 1

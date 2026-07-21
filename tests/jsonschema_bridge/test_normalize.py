@@ -2,7 +2,6 @@
 (markers translated back to standard form) must validate exactly like the
 original under the reference validator, over curated + generated instances."""
 
-import json
 import pathlib
 import sys
 
@@ -12,9 +11,13 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "bench"))
 
 import jsonschema  # noqa: E402
 from jsonschema_normalize import (  # noqa: E402
-    FALSE_SCHEMA, Unmergeable, merge2, negate, normalize, to_std,
+    FALSE_SCHEMA,
+    Unmergeable,
+    merge2,
+    negate,
+    normalize,
+    to_std,
 )
-
 
 PROBES = [
     {}, {"a": 1}, {"a": "x"}, {"a": 1, "b": "y"}, {"b": "y"}, {"a": 2},

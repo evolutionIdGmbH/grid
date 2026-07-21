@@ -18,6 +18,7 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "bench"))
 
 import jsonschema_rx as rx  # noqa: E402
+
 from grid.lexer.dfa import _parse_regex  # noqa: E402
 
 

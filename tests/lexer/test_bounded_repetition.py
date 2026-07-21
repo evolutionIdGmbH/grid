@@ -5,7 +5,7 @@ import pytest
 
 from grid.errors import GrammarInvalid
 from grid.grammar.spec import Terminal
-from grid.lexer.dfa import build_scanner, _parse_regex
+from grid.lexer.dfa import _parse_regex, build_scanner
 
 
 def _accepts(pattern: str, text: str) -> bool:

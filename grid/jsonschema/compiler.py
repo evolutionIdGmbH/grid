@@ -801,7 +801,7 @@ class SchemaCompiler:
             if not keys:
                 return None
         except rx.RxUnsupported as e:
-            raise Unsupported(f"propertyNames ({e})")
+            raise Unsupported(f"propertyNames ({e})") from None
         raise Unsupported(f"propertyNames keys {sorted(keys)}")
 
     def _object(self, schema: dict) -> str:
@@ -857,14 +857,16 @@ class SchemaCompiler:
         if pp:
             pats = list(pp)
             import re as _re
-            from grid.jsonschema.normalize import Unmergeable, merge2, normalize as _n2
+
+            from grid.jsonschema.normalize import Unmergeable, merge2
+            from grid.jsonschema.normalize import normalize as _n2
             overlap: dict[str, list[str]] = {}
             for k in list(props):
                 for pat in pats:
                     try:
                         hit = _re.search(pat, k) is not None
                     except _re.error:
-                        raise Unsupported(f"patternProperties bad pattern {pat!r}")
+                        raise Unsupported(f"patternProperties bad pattern {pat!r}") from None
                     if not hit:
                         continue
                     # declared key matching a pattern: both schemas apply
@@ -887,7 +889,7 @@ class SchemaCompiler:
                 try:
                     body = pp_key_body.get(pat) or rx.pattern_body(pat)
                 except rx.RxUnsupported as e:
-                    raise Unsupported(f"patternProperties pattern {pat!r} ({e})")
+                    raise Unsupported(f"patternProperties pattern {pat!r} ({e})") from None
                 kt = self._rx_term(rx.string_terminal_rx(body))
                 self.routing_terms.add(kt)
                 vr = self.rule_for(pp[pat])

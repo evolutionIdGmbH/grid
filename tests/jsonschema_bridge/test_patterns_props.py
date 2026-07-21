@@ -12,7 +12,7 @@ import pytest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "bench"))
 
 import jsonschema_rx as rx  # noqa: E402
-from json_schema_to_grid import Unsupported, compile_schema  # noqa: E402
+from json_schema_to_grid import compile_schema  # noqa: E402
 
 from grid.generate import build_guide  # noqa: E402
 from grid.models.tokenizer_adapter import MockTokenizer  # noqa: E402
