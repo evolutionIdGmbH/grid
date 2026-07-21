@@ -1,0 +1,16 @@
+cff-version: 1.2.0
+message: "If you use GRID, please cite the paper below."
+title: "GRID: Grammar-Railed Decoding"
+authors:
+  - family-names: Arjmandi
+    given-names: Mohsen
+license: Apache-2.0
+repository-code: "https://github.com/evolutionIdGmbH/grid"
+preferred-citation:
+  type: article
+  title: "GRID: Grammar-Railed Decoding for Enterprise SQL Generation"
+  authors:
+    - family-names: Arjmandi
+      given-names: Mohsen
+  year: 2026
+  url: "https://arxiv.org/abs/2607.11951"

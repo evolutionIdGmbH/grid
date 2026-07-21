@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "grid-guardrail"
-version = "0.2.4"
+version = "0.2.5"
 description = "GRID - Grammar-Railed Decoding: grammar-constrained LLM decoding with RBAC grammars and an audit trail"
 requires-python = ">=3.11"
-license = { text = "Proprietary" }
+license = { file = "LICENSE" }
 dependencies = [
     "numpy",
     "torch",

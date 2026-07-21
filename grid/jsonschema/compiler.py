@@ -29,9 +29,10 @@ Modes: default records unenforced constraints per schema (XGrammar-default
 convention; they can surface as invalidation errors); strict=True raises
 Unsupported instead (llguidance-style declared non-support).
 
-Still unsupported (raises Unsupported -> "compile error" bucket):
-patternProperties, propertyNames (next stage), residual not/if/unevaluated*,
-external $ref, false schemas, grammars past the size caps.
+Still declared (raises Unsupported -> "compile error" bucket): external
+$ref, un-negatable propertyNames shapes, allOf webs beyond the merge algebra,
+grammars past the size caps. See grid/jsonschema/SUPPORT.md for the full
+enforced/recorded/declared keyword matrix.
 
 Whitespace: %ignore /[ \\t\\n\\r]+/ — the JSON-spec definition.
 """
