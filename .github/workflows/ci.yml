@@ -17,11 +17,19 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: grid_core
       - name: Install (CPU torch)
         run: |
           python -m pip install --upgrade pip
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install -e ".[dev]"
+          pip install -e ".[dev]" maturin
+      - name: Build Rust kernel (grid_core)
+        run: |
+          cd grid_core
+          maturin develop --release
       - name: Lint
         run: ruff check grid tests
       - name: Tests (gates G0-G4 slice + mini-G5/G6/G10a)
