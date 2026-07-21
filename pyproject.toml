@@ -17,6 +17,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest",
+    "jsonschema",  # reference validator: enum filtering + equivalence tests
     "hypothesis",
     "lark",          # grammar authoring/validation and test oracles ONLY (DESIGN.md §12)
     "ruff",
