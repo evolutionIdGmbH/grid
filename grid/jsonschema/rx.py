@@ -597,9 +597,16 @@ LENGTH_CAP = 128        # window cap: scanner build is super-linear in n
                         # (0.45s @64, 23s @256 measured); beyond -> recorded
 
 
-def length_body(min_len: int, max_len: int | None) -> str:
+def length_body(min_len, max_len) -> str:
     """CHAR-count window over decoded chars (escape/UTF-8 aware), emitted
-    with dialect {m,n} bounded repetition (DFA linear in the bound)."""
+    with dialect {m,n} bounded repetition (DFA linear in the bound).
+    JSON Schema allows integer-valued decimal counts (2.0) — coerce them;
+    non-integer counts are outside the subset."""
+    if min_len != int(min_len) or \
+            (max_len is not None and max_len != int(max_len)):
+        raise RxUnsupported("non-integer length bound")
+    min_len = int(min_len)
+    max_len = None if max_len is None else int(max_len)
     if min_len > LENGTH_CAP or (max_len is not None and max_len > LENGTH_CAP):
         raise RxUnsupported(f"length window ({min_len},{max_len}) beyond cap")
     return emit(N("rep", kids=(ANY,), bounds=(min_len, max_len)))

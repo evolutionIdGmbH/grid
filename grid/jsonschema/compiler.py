@@ -539,9 +539,18 @@ class SchemaCompiler:
 
     # ------------------------------------------------------------- arrays
 
+    @staticmethod
+    def _int_count(v, default=None):
+        """JSON Schema count keywords may be integer-valued decimals (2.0)."""
+        if v is None:
+            return default
+        if isinstance(v, float):
+            return int(v) if v.is_integer() else default
+        return v
+
     def _array_alts(self, schema: dict) -> list[str]:
-        min_i = schema.get("minItems", 0) or 0
-        max_i = schema.get("maxItems")
+        min_i = self._int_count(schema.get("minItems"), 0) or 0
+        max_i = self._int_count(schema.get("maxItems"))
         # tuple forms: draft-07 items-list (+additionalItems) or 2020-12
         # prefixItems (+items as the tail schema)
         prefix: list | None = None
@@ -809,8 +818,8 @@ class SchemaCompiler:
         required = set(schema.get("required", []) or [])
         forbid = set(schema.get("x-grid-forbid-keys", []) or [])
         ap = schema.get("additionalProperties", None)
-        min_p = schema.get("minProperties", 0) or 0
-        max_p = schema.get("maxProperties")
+        min_p = self._int_count(schema.get("minProperties"), 0) or 0
+        max_p = self._int_count(schema.get("maxProperties"))
         pp = dict(schema.get("patternProperties") or {})
         pn = schema.get("propertyNames")
 
