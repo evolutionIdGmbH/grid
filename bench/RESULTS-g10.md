@@ -1,4 +1,4 @@
-# Audit-trail replay and tamper detection — full-scale run (E14)
+# Audit-trail replay and tamper detection - full-scale run (E14)
 
 Host: local dev (unpinned) | grammar: `grammars/sql_subset.grid` | MockTokenizer (48 tokens) | mode-1 GRID-owned loop, max_tokens 40 | key format: v2
 

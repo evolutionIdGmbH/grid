@@ -1,4 +1,4 @@
-# End-to-end soundness/completeness/termination at scale — model arm
+# End-to-end soundness/completeness/termination at scale - model arm
 
 Host: Lambda 1xH100 PCIe 80GB, Ubuntu 24.04 (declared runner) | grammar: `grammars/sql_subset.grid` + L3 schema lexicons | model: `Qwen/Qwen2.5-0.5B-Instruct` | mode-1 GRID-owned loop, multinomial sampler | 1,000 seeded generations | wall 35.2 min
 

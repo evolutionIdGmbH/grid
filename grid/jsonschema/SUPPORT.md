@@ -1,19 +1,19 @@
-# JSON Schema support matrix — `grid.jsonschema`
+# JSON Schema support matrix - `grid.jsonschema`
 
 Status of every keyword when compiling JSON Schema to a GRID grammar
 (`compile_json_schema(schema, strict=False)`), as of the 0.2.x coverage epoch.
 
-**Legend** — every keyword lands in exactly one bucket per use site:
+**Legend** - every keyword lands in exactly one bucket per use site:
 
-- **enforced** — compiled into the grammar; the mask makes violations
+- **enforced** - compiled into the grammar; the mask makes violations
   unreachable.
-- **recorded** — accepted but not (fully) enforced; the constraint name is
+- **recorded** - accepted but not (fully) enforced; the constraint name is
   returned in the `recorded` set (per schema). Under `strict=True` these
   raise `Unsupported` instead (declared non-support). This is the honesty
   contract: nothing is ever *silently* unenforced.
-- **declared** — compilation refuses (`Unsupported`): the construct cannot be
+- **declared** - compilation refuses (`Unsupported`): the construct cannot be
   expressed soundly, and dropping it would corrupt key routing or masking.
-- **unsatisfiable-aware** — statically contradictory schemas compile to the
+- **unsatisfiable-aware** - statically contradictory schemas compile to the
   never-grammar (all instances correctly rejected), not an error.
 
 Measured on guidance-ai/jsonschemabench (11,306 schemas): 89.6% pass all
@@ -65,7 +65,7 @@ Full numbers: `bench/RESULTS-jsonschemabench-v0.2.4-full.md`.
 | keyword | status | notes |
 |---|---|---|
 | `pattern` | enforced (ECMA subset) | unanchored-search semantics; escape/UTF-8-aware over canonical serializations; lookarounds/backrefs/`\b`/`\p` recorded |
-| `minLength`/`maxLength` | enforced ≤64 chars | dialect `{m,n}` windows; larger windows recorded (scanner-build cost — 0.3.x) |
+| `minLength`/`maxLength` | enforced ≤64 chars | dialect `{m,n}` windows; larger windows recorded (scanner-build cost - 0.3.x) |
 | `format` | enforced: date, time, date-time, uuid, ipv4, email, hostname, uri, uri-reference | others recorded by name (`format:<name>`); regexes reference-validated to avoid over-rejection |
 | pattern ∧ length / multiple patterns | first dimension enforced, rest recorded | regex-language intersection is out of textual reach |
 
@@ -83,7 +83,7 @@ Full numbers: `bench/RESULTS-jsonschemabench-v0.2.4-full.md`.
 - **Default mode** mirrors the XGrammar-default convention (permissive,
   recorded); **strict mode** mirrors llguidance (declared).
 - Exactness is defined over **canonical serializations**
-  (`json.dumps(..., ensure_ascii=False)`) — the only forms a masked decode
+  (`json.dumps(..., ensure_ascii=False)`) - the only forms a masked decode
   can produce.
 - Scanner-cost budgets may demote a *value-position* constrained terminal to
   the generic string terminal (always recorded); *key-position* terminals are

@@ -1,7 +1,7 @@
-# DESIGN-JSON-COVERAGE — the 0.2.x correctness epoch
+# DESIGN-JSON-COVERAGE - the 0.2.x correctness epoch
 
-**Goal:** zero error across all JSONSchemaBench/MaskBench metrics — compile errors,
-validation errors, invalidation errors, timeouts — on the **full** schema set
+**Goal:** zero error across all JSONSchemaBench/MaskBench metrics - compile errors,
+validation errors, invalidation errors, timeouts - on the **full** schema set
 (~9.5k schemas; guidance-ai/jsonschemabench), not the 15/split sample.
 
 **Non-goal (explicit):** speed. Every 0.2.x release records TTFM/TBM but does not
@@ -45,17 +45,17 @@ unclaimed territory.**
 Three enforcement mechanisms plus a universal fallback. The design rule: **no schema
 is ever refused, and nothing accepted is ever unenforced.**
 
-- **M1 — grammar-native enforcement.** Everything CFG/DFA-expressible compiles into
+- **M1 - grammar-native enforcement.** Everything CFG/DFA-expressible compiles into
   the grammar: structure, enums/consts, local `$ref` recursion, bounded repetition
   (min/maxItems, min/maxProperties), tuple arrays (prefixItems/additionalItems),
   string constraints compiled into the lexer DFA (pattern/length/format via
   escape-aware product construction), numeric bounds as digit-range DFAs.
-- **M2 — schema normalization.** A pre-compilation rewrite pass: `allOf` merge
-  (object/constraint conjunction — the llguidance approach), `$ref`-with-siblings
+- **M2 - schema normalization.** A pre-compilation rewrite pass: `allOf` merge
+  (object/constraint conjunction - the llguidance approach), `$ref`-with-siblings
   merge, `if/then/else` → discriminator-guarded alternation when `if` is
   const/enum/required-shaped, `dependencies`/`dependentRequired`/`dependentSchemas`
   expansion, `oneOf` → `anyOf` where branches are **provably disjoint**.
-- **M3 — semantic mask refinement.** The non-CFG residue (uniqueItems, contains
+- **M3 - semantic mask refinement.** The non-CFG residue (uniqueItems, contains
   counting, general multipleOf, residual oneOf-exclusivity, residual `not`,
   unevaluated\*) is enforced *in-mask* by a validator hook consulted only at
   **boundary tokens** (string close, number end, item/object close): a candidate
@@ -63,11 +63,11 @@ is ever refused, and nothing accepted is ever unenforced.**
   tokens that keep the unit extensible pass. This is the SemanticChecker DNA moved
   from post-parse to decode time, satisfying MaskBench's rejected-mid-stream
   semantics. Every veto is recorded in the audit chain (a capability no other engine
-  has — refinement decisions become replayable).
-- **M0 — universal fallback.** If M1+M2 compilation fails for any reason (size caps,
+  has - refinement decisions become replayable).
+- **M0 - universal fallback.** If M1+M2 compilation fails for any reason (size caps,
   LALR conflict, exotic composition), fall back to the generic JSON value grammar
   (always LALR-clean, always compiles) with the *entire* schema enforced through M3.
-  Slower, never wrong. **This is what drives compile errors to zero by construction** —
+  Slower, never wrong. **This is what drives compile errors to zero by construction** -
   the caps and conflicts become performance events, not coverage events.
 
 Validation errors stay zero by policy: a constraint is enforced only when its
@@ -78,12 +78,12 @@ verified stays in M3-off/strict-declared mode rather than guessing (over-strict
 ## 3. Version ladder
 
 Package versions (pyproject `grid-guardrail`); kernel lineage frozen at v7. Each
-release ships `bench/RESULTS-jsonschemabench-v0.2.N.md` — full-bench error metrics
+release ships `bench/RESULTS-jsonschemabench-v0.2.N.md` - full-bench error metrics
 (headline) + recorded-not-optimized TTFM/TBM (footnote), engine versions pinned.
 
 | ver | scope | expected metric movement | gate to ship |
 |---|---|---|---|
-| **0.2.0** | Infra + honesty: full-bench runner (all ~9.5k schemas, not sample); per-keyword error attribution; **strict mode** (ignored→declared, XGrammar-style default/compliant mode pair); CHANGELOG.md; external-`$ref` audit of full bench | invalidation 0 in strict mode (compile errors rise — disclosed) | full run completes; attribution table per split |
+| **0.2.0** | Infra + honesty: full-bench runner (all ~9.5k schemas, not sample); per-keyword error attribution; **strict mode** (ignored→declared, XGrammar-style default/compliant mode pair); CHANGELOG.md; external-`$ref` audit of full bench | invalidation 0 in strict mode (compile errors rise - disclosed) | full run completes; attribution table per split |
 | **0.2.1** | M1 strings: pattern + min/maxLength + format into lexer DFA (escape-aware; format regex set reference-validated) | −pattern(21) −length(26) −format(12) hinges | JSON-Schema-Test-Suite string sections green; validation errors stay 0 |
 | **0.2.2** | M1 numerics: min/max/exclusive digit-range DFAs (int exact; decimal incl. exponent forms); multipleOf decimal-places special case | −minimum(33) −maximum(24) hinges | test-suite numeric sections green |
 | **0.2.3** | M1 counting: min/maxItems, min/maxProperties as bounded repetition (incl. optional-property interplay that caps llguidance at 90%) | −minItems(9) −maxItems(5) −minProperties(6) | test-suite array/object sections green |
@@ -92,10 +92,10 @@ release ships `bench/RESULTS-jsonschemabench-v0.2.N.md` — full-bench error met
 | **0.2.6** | M2: prefixItems/additionalItems; if/then/else discriminator rewrite | −additionalItems(3) −if/then/else(3) | test-suite conditional sections (discriminator subset) green |
 | **0.2.7** | **M3 semantic refinement layer** + audit integration: uniqueItems, contains/min/maxContains, general multipleOf, residual oneOf-exclusivity, small-scope `not` (finite/regular complement) | −uniqueItems(9) −oneOf-excl(18) −not(4) −multipleOf(1) | mid-stream rejection verified against MaskBench runner semantics; audit replay reproduces vetoes bit-for-bit |
 | **0.2.8** | **M0 universal fallback**: generic-JSON grammar + full-M3 path for anything M1/M2 can't compile (size caps, LALR conflicts, unevaluated\*, exotic compositions); caps become fallback triggers, not errors | **compile errors → 0** by construction | every full-bench schema compiles via M1/M2 or M0; timeouts stay 0 |
-| **0.2.9** | Zero-error hardening: fix every residual full-bench discrepancy; LALR conflict factoring for generated grammars (shrinks M0 usage — correctness-neutral, perf-relevant, still recorded-only) | **all four metrics = 0 on the full bench** | 3 consecutive full runs at zero; test-suite (draft-07 + 2020-12 applicable sections) green; differential fuzz clean |
+| **0.2.9** | Zero-error hardening: fix every residual full-bench discrepancy; LALR conflict factoring for generated grammars (shrinks M0 usage - correctness-neutral, perf-relevant, still recorded-only) | **all four metrics = 0 on the full bench** | 3 consecutive full runs at zero; test-suite (draft-07 + 2020-12 applicable sections) green; differential fuzz clean |
 
 Estimated effort: ~2.5–4 months solo alongside the campaign. The upstream PR
-(IMPACT plan, Workstream B) does **not** wait for zero — it goes at 0.2.4 parity;
+(IMPACT plan, Workstream B) does **not** wait for zero - it goes at 0.2.4 parity;
 0.2.9 is its own announcement moment.
 
 ## 4. Runner-semantics fidelity
@@ -105,17 +105,17 @@ instances fully accepted; invalid instances rejected **mid-stream** (some token
 masked before completion). M3 must therefore veto at the earliest completing token,
 not at end-of-sequence validation. `maskbench_grid.py`'s verbatim-semantics
 reproduction is the harness; any ambiguity gets resolved by reading their runner,
-not by convenient interpretation — discrepancies in our favor are bugs.
+not by convenient interpretation - discrepancies in our favor are bugs.
 
 ## 5. Verification (how validation errors stay zero while coverage grows)
 
 1. **Official JSON-Schema-Test-Suite** (draft-07 + 2020-12, applicable sections) in CI
-   from 0.2.1 — each M1/M2 feature lands with its suite section green.
+   from 0.2.1 - each M1/M2 feature lands with its suite section green.
 2. **Differential fuzzing** against a reference validator (`jsonschema`): sample
    instances by walking the compiled grammar (valid side) and by mutating valid
    instances (invalid side); GRID's accept/reject must agree with the reference on
    every sampled instance. Disagreement = release blocker.
-3. **Full-bench nightly** with per-keyword attribution — regressions caught per
+3. **Full-bench nightly** with per-keyword attribution - regressions caught per
    feature, per split.
 4. **Audit invariant**: every M3 veto replayable; `g10_replay`-class tests extended
    to refinement decisions.
@@ -124,15 +124,15 @@ not by convenient interpretation — discrepancies in our favor are bugs.
 
 - Record TTFM/TBM (full distribution) in every versioned report; never optimize
   during this epoch. Timing tables are labeled *"recorded under the correctness
-  epoch — perf work deferred to 0.3.x"*.
+  epoch - perf work deferred to 0.3.x"*.
 - Movement expectations to disclose, not hide: lexer-DFA products (0.2.1–0.2.2) grow
   automata (TTFM up); M3 boundary checks add per-boundary cost (TBM tail); M0
-  fallback schemas run semantic-heavy (slowest class — report their count and share
+  fallback schemas run semantic-heavy (slowest class - report their count and share
   per release; shrinking M0 usage is 0.3.x's roadmap).
-- Hard constraint carried through the epoch: **timeouts stay 0** — M3 stays
+- Hard constraint carried through the epoch: **timeouts stay 0** - M3 stays
   boundary-local (no unbounded lookahead), M0 stays linear in instance length.
 - 0.3.x (perf epoch, later): migrate hot M3 constraints into kernels/grammar, TTFM
-  kernelization, cold-walk tail — measured against the 0.2.9 zero-error baseline,
+  kernelization, cold-walk tail - measured against the 0.2.9 zero-error baseline,
   which becomes the correctness regression floor no perf change may break.
 
 ## 7. Risks
@@ -178,7 +178,7 @@ Sample (15/split, 315 schemas, seed 0), all error classes:
 | **v0.2.2** (full-set validation-error hunt: 5 root bugs) | 270 | 39 | 0 | 6 | 0 |
 
 Full set (11,306): v0.2.0 measured passing 9,551 (84.5%) / compile 1,082 /
-validation 31 / invalidation 629 / timeout 13 — all BFCL splits 100%.
+validation 31 / invalidation 629 / timeout 13 - all BFCL splits 100%.
 **v0.2.2 measured: passing 9,955 (88.1%) / compile 847 / validation 2 /
 invalidation 490 / timeout 12** (RESULTS-jsonschemabench-v0.2.2-full.md);
 49 former passers traded into declared/recorded classes (29 LALR-declared
@@ -193,7 +193,7 @@ Reference points, same sample: llguidance 251/62/3/0, XGrammar 283/0/27/37.
 GRID 0.2.0 passes the most schemas among honest-declaring engines with zero
 false-rejects; full table in `bench/RESULTS-jsonschemabench-v0.2.0.md`.
 
-Remaining invalidation hinges: big length windows (needs dialect `{m,n}` —
+Remaining invalidation hinges: big length windows (needs dialect `{m,n}` -
 engine-adjacent, scheduled), uniqueItems/contains (M3), oneOf-exclusivity
 residue, multipleOf. Remaining compile errors: adversarial Handwritten shapes
 (not-existentials, allOf-not webs), pp+propertyNames combos, one $ref web.
@@ -202,7 +202,7 @@ residue, multipleOf. Remaining compile errors: adversarial Handwritten shapes
 
 - **0.2.x = fewer errors only; 0.3.x = speed.** No release mixes the two intents.
 - Every release: CHANGELOG.md entry, `bench/RESULTS-jsonschemabench-v0.2.N.md`,
-  LESSONS.md entry (what changed, why, measured result, next — repo convention),
+  LESSONS.md entry (what changed, why, measured result, next - repo convention),
   README coverage table updated **with the version pinned next to every number**.
 - Cross-engine comparisons always pin all engine versions (existing convention) and
   credit guidance-ai/jsonschemabench as the benchmark's source.

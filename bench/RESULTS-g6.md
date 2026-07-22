@@ -1,4 +1,4 @@
-# Policy/RBAC enforcement (adversarial arm) — model-independent
+# Policy/RBAC enforcement (adversarial arm) - model-independent
 
 Host: local dev (unpinned) | grammar `grammars/sql_subset.grid` + L3 schema lexicons + role projections | tokenizer `Qwen/Qwen2.5-0.5B-Instruct` (151,665 tokens)
 

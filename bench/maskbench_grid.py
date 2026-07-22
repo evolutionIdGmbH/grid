@@ -12,7 +12,7 @@ Mirrors maskbench/maskbench/runner.py measurement semantics exactly:
 - TBM = pooled per-token times across all schemas of an engine.
 
 Engines: --engine grid | llg | xgr  (xgr in "compliant" mode: any whitespace,
-non-strict — the configuration MaskBench documents for apples-to-apples runs).
+non-strict - the configuration MaskBench documents for apples-to-apples runs).
 The GRID arm compiles schemas via bench/json_schema_to_grid.py (v1 subset;
 unsupported features raise -> compile-error bucket, llguidance-style honesty)
 and shares the per-tokenizer trie across schemas (like llg/xgr tokenizer init).
@@ -327,7 +327,7 @@ def aggregate(out_dir: str) -> dict:
 
 def write_report(path: str, aggs: list[dict], meta_line: str) -> None:
     lines = [
-        "# MaskBench (guidance-ai/jsonschemabench) — GRID vs llguidance vs XGrammar",
+        "# MaskBench (guidance-ai/jsonschemabench) - GRID vs llguidance vs XGrammar",
         "",
         meta_line,
         "",
@@ -370,7 +370,7 @@ def write_report(path: str, aggs: list[dict], meta_line: str) -> None:
         "correctness gaps.",
         "- GRID's TBM p25-p75 is the grid_core kernel hit path (masks up to 512 "
         "terminals run in-kernel); the p90+ tail is cold-miss trie walks over the "
-        "128k vocabulary. MaskBench runs each schema once — the write-back cache "
+        "128k vocabulary. MaskBench runs each schema once - the write-back cache "
         "that amortizes GRID's misses across requests in serving never warms here; "
         "the cold walk was cut 9.3x by the kernel v5.1 verdict-equivalence grouping (this record; TBM p90 27.8 ms -> 208 us vs the v3-era run).",
         "- GRID's TTFM is the Python table build per schema (scanner subset "
@@ -391,7 +391,7 @@ def write_report(path: str, aggs: list[dict], meta_line: str) -> None:
                 "spec path).",
                 "",
                 "Ignored-but-accepted constraints (counted per schema; the XGrammar-default "
-                "convention — these surface as invalidation errors when an invalid instance "
+                "convention - these surface as invalidation errors when an invalid instance "
                 "hinges on them): "
                 + (", ".join(f"{k} ({v})" for k, v in list(a["ignored_features"].items())[:12]) or "none")
                 + ".",

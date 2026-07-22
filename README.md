@@ -1,8 +1,8 @@
-# GRID — Grammar-Railed Decoding
+# GRID - Grammar-Railed Decoding
 
 Constrained decoding for LLMs with **provable guarantees and no silent
 errors**: every constraint is either *enforced* by the token mask, or
-*named* in the output — never quietly dropped.
+*named* in the output. Nothing is quietly dropped.
 
 GRID compiles grammars (SQL-first; JSON Schema via `grid.jsonschema`) into
 LALR(1) tables with constrained terminals, and masks tokens through a
@@ -31,18 +31,18 @@ engine versions):
 
 | engine | passing | declared | false-rejects | silent accepts |
 |---|---:|---:|---:|---:|
-| **GRID 0.2.5** | 10,117 (89.5%) | 668 | **3** | 502 — *every one recorded* |
+| **GRID 0.2.5** | 10,117 (89.5%) | 668 | **3** | 502, *every one recorded* |
 | llguidance 1.7.6 | 9,487 (83.9%) | 1,797 | 22 | 0 |
 | XGrammar 0.2.3 | 10,212 (90.3%) | 51 | 427 | 627 |
 
 Three philosophies: llguidance refuses what it can't enforce perfectly;
-XGrammar compiles everything and leaks silently; GRID sits at the frontier —
+XGrammar compiles everything and leaks silently. GRID sits at the frontier:
 near-best coverage, near-zero false-rejects, and a per-schema record of
 anything unenforced. Keyword-by-keyword status:
 [`grid/jsonschema/SUPPORT.md`](grid/jsonschema/SUPPORT.md). The official
 JSON-Schema-Test-Suite runs in CI under that contract.
 
-Timing note: 0.2.x is the **correctness epoch** — per-token/compile timings
+Timing note: 0.2.x is the **correctness epoch**; per-token/compile timings
 are recorded in the versioned reports but deliberately unoptimized;
 performance is the 0.3.x epoch. On GRID's home turf (SQL/CFG grammars) the
 warm-path mask is p50 3.7 µs (see `bench/RESULTS.md`).
@@ -69,7 +69,7 @@ result = g("List all user names", max_tokens=64, seed=42)
 Per-role and per-schema grammars make unauthorized verbs, tables, and
 columns unreachable at decode time; the audit chain reconstructs, bit for
 bit, what the model was permitted to generate at every step. Decode-time
-masking is deterministic *capability reduction* — pair it with an
+masking is deterministic *capability reduction*; pair it with an
 independent check where the SQL executes, both compiled from one policy
 source.
 
@@ -91,7 +91,7 @@ python -m venv .venv && .venv/bin/pip install -e ".[dev]"
 .venv-bench/bin/python bench/compare_engines.py  # cross-engine SQL harness
 ```
 
-Benchmark methodology and full reports live in `bench/` — pinned engine
+Benchmark methodology and full reports live in `bench/`: pinned engine
 versions, declared runners, full error distributions, no cherry-picking.
 The design credits the Outlines paper as inspiration; GRID's design and
 implementation are its own throughout.

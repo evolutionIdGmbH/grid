@@ -1,4 +1,4 @@
-# End-to-end soundness/completeness/termination at scale — walk arm
+# End-to-end soundness/completeness/termination at scale - walk arm
 
 Host: local M-series dev (unpinned), kernel v4 | grammar: `grammars/sql_subset.grid` + L3 schema lexicons | tokenizer: `Qwen/Qwen2.5-0.5B-Instruct` (151,665 tokens, byte-fallback BPE) | 10,000 seeded generations | wall 5.3 min
 

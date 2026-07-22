@@ -1,4 +1,4 @@
-# Spider dev — execution accuracy (EX), GRID-constrained vs unconstrained
+# Spider dev - execution accuracy (EX), GRID-constrained vs unconstrained
 
 Model: `Qwen/Qwen2.5-7B-Instruct` (cuda, greedy) | sample: 20 dev questions (seed 1) | max_tokens 128 | grammar: `grammars/sql_spider.grid` (100% dev-gold coverage) + per-database L3 lexicons | host: Lambda 1x H100 PCIe 80GB, Ubuntu 24.04 (declared runner; virtualized)
 
@@ -11,6 +11,6 @@ EX = predicted and gold result sets match on the Spider SQLite database (order-s
 | grid-audit-off | 20 | 90.0% | 90.0% | 50.0% | +nan% | 0.0% | 30 | 2.1 |
 | grid-jf-off | 20 | 90.0% | 90.0% | 50.0% | +nan% | 0.0% | 30 | 2.3 |
 
-Arms `grid-cache-off`, `grid-audit-off`, `grid-jf-off` are the throughput ablations (write-back cache / audit trail / jump-forward spans); EX is identical by construction — the column that moves is gen tok/s.
+Arms `grid-cache-off`, `grid-audit-off`, `grid-jf-off` are the throughput ablations (write-back cache / audit trail / jump-forward spans); EX is identical by construction - the column that moves is gen tok/s.
 
 Binding throughput numbers require the pinned runner and the reference model (DESIGN.md SS10); this harness repoints via --model/--device.

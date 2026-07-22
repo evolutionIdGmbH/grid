@@ -1,7 +1,7 @@
-# GRID — Grammar-Railed Decoding
+# GRID - Grammar-Railed Decoding
 ## Implementation Design Document
 
-**Status:** ready for implementation (v1.1 — post-review; findings from the planned 4-lens design review incorporated)
+**Status:** ready for implementation (v1.1 - post-review; findings from the planned 4-lens design review incorporated)
 **Companion:** `GUARDRAIL-REDESIGN.md` (the *why*: design-evolution conclusions, chosen methods, proofs, budgets, benchmark rationale). This document is the *what and how*: modules, entities, state machines, interfaces, error taxonomy, tests, and the properties that verification establishes.
 **Interface convention:** GRID exposes the Guide / instruction / logits-processor / tokenizer / sampler protocol shapes shared across our internal generation tools. The shapes are defined in `grid/protocols.py` (§4.1) with self-contained conformance tests under `tests/protocols/`; GRID has no runtime dependency on any external constrained-decoding library, and its implementation is original throughout.
 
@@ -42,8 +42,8 @@ Out of mask scope (by proof, companion §4.6): column-level RBAC → post-parse 
 
 Two implementations of the same semantics, bound by differential tests:
 
-- **`grid/_reference/`** — pure-Python executable specification: a brute-force trial-parse loop over the vocabulary. Slow, obviously-correct, used as the oracle for the differential-correctness, cache-soundness, and end-to-end soundness/completeness/termination checks. Never shipped in the hot path.
-- **Fast path** — Python orchestration; hot kernels in `grid_core` (Rust/pyo3). **The Python stand-in operates on the final artifact formats from day one** (predating the Rust kernels): `trie/build.py` produces a numpy `uint64` array of DFS-contiguous 8-byte trie nodes plus a token-id table — exactly the buffer `grid_core` consumes zero-copy. The Python walk indexes that array directly (vectorizing only where natural, e.g. batched DFA transitions). The frozen kernel signatures, identical for the Python stand-in and the Rust kernels:
+- **`grid/_reference/`** - pure-Python executable specification: a brute-force trial-parse loop over the vocabulary. Slow, obviously-correct, used as the oracle for the differential-correctness, cache-soundness, and end-to-end soundness/completeness/termination checks. Never shipped in the hot path.
+- **Fast path** - Python orchestration; hot kernels in `grid_core` (Rust/pyo3). **The Python stand-in operates on the final artifact formats from day one** (predating the Rust kernels): `trie/build.py` produces a numpy `uint64` array of DFS-contiguous 8-byte trie nodes plus a token-id table - exactly the buffer `grid_core` consumes zero-copy. The Python walk indexes that array directly (vectorizing only where natural, e.g. batched DFA transitions). The frozen kernel signatures, identical for the Python stand-in and the Rust kernels:
   - `walk(trie_buf, lexer_state, allowed_bitset, l3_refs) -> (ci_mask, cd_token_list)`
   - `check_context_dependent(cd_token_list, stack_ref) -> mask_bits`
   - `lalr_advance(stack_ref, terminal_id) -> stack_ref`
@@ -55,19 +55,19 @@ Two implementations of the same semantics, bound by differential tests:
   Kernel v5 added the scheduler-side `fill_bits` row fill; v5.1 the
   verdict-equivalence CD grouping + packed-row memo; kernel v6 moves the whole
   per-request serving step in-kernel (`session_accept`/`session_fill`, one FFI
-  each — warm step 1.33 µs/request measured locally), gated to `audit is None`
+  each - warm step 1.33 µs/request measured locally), gated to `audit is None`
   paths; audit-enabled and processor-mode guides keep the v5 Python path.
 
   *All four symbols are now bound in `grid_core` (kernel v4): `walk` (RustWalker),
   `check_context_dependent` (RustVerdicts.cd_pass_at), `lalr_advance`
-  (RustVerdicts.advance_frames — reduces+shift on a persistent interned-stack
+  (RustVerdicts.advance_frames - reduces+shift on a persistent interned-stack
   arena, mirrored back into Python StackNodes for the audit hash-chain), and
   `apply_token_bitmask` (fill_bitmask, kernel #4). Kernel v4 adds a persistent,
   structurally-interned stack arena with cross-token memos and a one-call
   `hit_pass` (ci ++ cd-pass ++ eos assembled kernel-side): warm-hit p50 fell
   12.9→3.5 µs on the Apple-silicon dev host, bringing the warm cache-hit path
   under 10 µs locally for the first time. The cold trie walk releases the GIL (`walk_raw` under
-  `py.detach`) so it overlaps the GPU forward window — the §6 overlap contract.*
+  `py.detach`) so it overlaps the GPU forward window - the §6 overlap contract.*
 
 ## 3. Package layout
 
@@ -123,11 +123,11 @@ bench/                  # harness per companion §6; guard-rail-cost microharnes
 
 ## 4. Interface contract (tool-family convention)
 
-### 4.1 Protocol shapes — `grid/protocols.py`
+### 4.1 Protocol shapes - `grid/protocols.py`
 
 The normative definitions live in `grid/protocols.py`; `tests/protocols/` holds
 self-contained conformance tests (expected signatures stated in the tests
-themselves — no third-party sources are read or shipped).
+themselves - no third-party sources are read or shipped).
 
 ```python
 Instruction = Union[Write, Generate]
@@ -155,13 +155,13 @@ class Sampler(Protocol):
 ```
 
 `Write` carries GRID's jump-forward spans **subject to the decode-loop ownership
-rules of §4.5** — a logits processor alone cannot append tokens. `Generate(tokens)`
+rules of §4.5** - a logits processor alone cannot append tokens. `Generate(tokens)`
 carries the exact allowed-token tensor. **`GridGuide` never returns
 `Generate(None)`** (the protocol meaning is "unconstrained"; processors handle it
-defensively by skipping masking for that row — prompt tokens are excluded by
+defensively by skipping masking for that row - prompt tokens are excluded by
 anchoring, not by unconstrained instructions).
 
-### 4.2 `GridGuide` — extended Guide surface
+### 4.2 `GridGuide` - extended Guide surface
 
 Implements the protocol above plus the extended CFG-guide surface:
 
@@ -179,19 +179,19 @@ class GridGuide:
 
 **Normative CFG-mode semantics (differ from legacy internal CFG modes; conformance-tested):**
 1. GRID returns the **full** exact mask every step (never a first-legal-token shortcut), so sampler parameters are meaningful under constraints; `process_logits` applies a hard in-place `masked_fill_(-inf)`.
-2. Token→bytes is GRID's canonical `token_bytes` (§5 E6), used identically by the trie build, the fast path, **and** `ReferenceGuide` — never decode-diffing, which is tokenizer-family-dependent and would make the mask-exactness differentials incoherent on llama-family tokenizers.
-3. A processor **must never union a multi-token `Write` span into one step's mask** — that admits out-of-order span tokens. Spans are applied one token per step (§4.5).
+2. Token→bytes is GRID's canonical `token_bytes` (§5 E6), used identically by the trie build, the fast path, **and** `ReferenceGuide` - never decode-diffing, which is tokenizer-family-dependent and would make the mask-exactness differentials incoherent on llama-family tokenizers.
+3. A processor **must never union a multi-token `Write` span into one step's mask** - that admits out-of-order span tokens. Spans are applied one token per step (§4.5).
 
-### 4.3 `GridLogitsProcessor` — the tool-family processor shape
+### 4.3 `GridLogitsProcessor` - the tool-family processor shape
 
 - `process_logits(input_ids: 2D, logits: 2D) -> logits`; `__call__` normalizes array types (torch/numpy/list/tuple; mlx/jax via guarded imports, §11).
 - `_seq_start_idx` captured on the first `process_logits` call from `len(input_ids[0])` = the **anchor** for the constrained span (companion §6.2). Anchoring is processor state; the Guide never sees prompt ids.
-- State registry (flat per-token guard-rail cost — no Θ(n) per-step prefix hashing): `_guide_states: Dict[int, GridState]`, seeded with the empty-prefix key at construction; an unknown state is reconstructed by looking back one token. GRID keys incrementally: per batch row keep `(prev_key, n_prev)`; `new_key = splitmix64(prev_key XOR (token_id * 0x9E3779B97F4A7C15))`. Entries store `(n_generated, last_token)`; a key hit with mismatched length is treated as a miss and the state is **refolded** from the longest cached prefix (handles beam/batch reordering; rare, O(n) worst case, amortized O(1)). Collision policy: 64-bit accidental collision is detected by the stored `(n_generated, last_token)` check and treated as a miss.
+- State registry (flat per-token guard-rail cost - no Θ(n) per-step prefix hashing): `_guide_states: Dict[int, GridState]`, seeded with the empty-prefix key at construction; an unknown state is reconstructed by looking back one token. GRID keys incrementally: per batch row keep `(prev_key, n_prev)`; `new_key = splitmix64(prev_key XOR (token_id * 0x9E3779B97F4A7C15))`. Entries store `(n_generated, last_token)`; a key hit with mismatched length is treated as a miss and the state is **refolded** from the longest cached prefix (handles beam/batch reordering; rare, O(n) worst case, amortized O(1)). Collision policy: 64-bit accidental collision is detected by the stored `(n_generated, last_token)` check and treated as a miss.
 - `Generate(None)` (never produced by GRID guides): skip masking for that row.
-- **Lifecycle:** the adapter clones the processor with `copy.copy(self.logits_processor)` once per generation; GRID defines `__copy__(self): return self.copy()` — fresh guide (`guide.copy()`), fresh `_guide_states = {seed: initial_state}`, `_seq_start_idx = None`. Without this, sequential generations share the states dict, leak GridStates (pinning E8 stack nodes → unbounded memory), and corrupt anchoring. §9 test: two sequential `g(...)` calls share no processor state.
-- Masking: `logits.masked_fill_(mask, float("-inf"))` — hard mask only (companion §1.7).
+- **Lifecycle:** the adapter clones the processor with `copy.copy(self.logits_processor)` once per generation; GRID defines `__copy__(self): return self.copy()` - fresh guide (`guide.copy()`), fresh `_guide_states = {seed: initial_state}`, `_seq_start_idx = None`. Without this, sequential generations share the states dict, leak GridStates (pinning E8 stack nodes → unbounded memory), and corrupt anchoring. §9 test: two sequential `g(...)` calls share no processor state.
+- Masking: `logits.masked_fill_(mask, float("-inf"))` - hard mask only (companion §1.7).
 
-### 4.4 Entry points and adapter — how the library is called
+### 4.4 Entry points and adapter - how the library is called
 
 Entry-point call shapes:
 
@@ -220,21 +220,21 @@ batch = g(["prompt a", "prompt b"], max_tokens=256)
 
 **`stop_at` policy (INV-OUT1 compatibility):** `generate.sql` rejects `stop_at` with `ValueError` at call time (a mid-statement stop would violate the parse-on-stop invariant). `generate.cfg` parity mode accepts it; STOP_SEQUENCE stops are excluded from INV-OUT1 and flagged in the audit seal.
 
-### 4.5 Decode-loop ownership (normative — jump-forward's home)
+### 4.5 Decode-loop ownership (normative - jump-forward's home)
 
-A logits processor can only mask; it cannot append tokens — and external serving stacks own their decode loops. Therefore GRID defines two execution modes:
+A logits processor can only mask; it cannot append tokens - and external serving stacks own their decode loops. Therefore GRID defines two execution modes:
 
 1. **GRID-owned loop** (transformers path; default for `generate.sql`/`generate.cfg` on local models): a step loop in `grid/generate/api.py`. `Write([t1..tk])` spans are appended **without forward passes**; for each appended token the loop calls `guide.get_next_state` once, registers the intermediate prefix state in `_guide_states`, and emits one `AuditRecord` (`instruction_kind=WRITE`, `mask_entry_id=None`). This is where K5's model-call savings and E15's `MAX_TOKENS_WITH_JUMP_COMPLETE` live.
-2. **Processor-only mode** (vLLM and any external loop): `Write` degrades to a **singleton mask per step** — only `forced_ids[0]` is allowed; the remaining span tokens are forced one step at a time. Semantics preserved, no model-call savings. Jump-complete-at-max_tokens is unavailable here; the stop reason is downgraded and the event recorded in the audit seal. Guard-rail-cost and cross-engine-latency expectations are scoped per mode.
+2. **Processor-only mode** (vLLM and any external loop): `Write` degrades to a **singleton mask per step** - only `forced_ids[0]` is allowed; the remaining span tokens are forced one step at a time. Semantics preserved, no model-call savings. Jump-complete-at-max_tokens is unavailable here; the stop reason is downgraded and the event recorded in the audit seal. Guard-rail-cost and cross-engine-latency expectations are scoped per mode.
 
-**Forced-span detection (normative):** a forced span is the maximal chain obtained by iterating §6 steps 1–9 on hypothetical successor states while the mask (excluding EOS) is a singleton, bounded by `J_max` (config, default 8). The `Write` carries exactly that token chain, so each id is in its own step's mask by construction. Byte-level jump-forward with re-tokenization (XGrammar `find_jump_forward_string`) is a recorded v2 optimization — it can produce non-canonical tokenizations that change audit records and `_guide_states` keys.
+**Forced-span detection (normative):** a forced span is the maximal chain obtained by iterating §6 steps 1–9 on hypothetical successor states while the mask (excluding EOS) is a singleton, bounded by `J_max` (config, default 8). The `Write` carries exactly that token chain, so each id is in its own step's mask by construction. Byte-level jump-forward with re-tokenization (XGrammar `find_jump_forward_string`) is a recorded v2 optimization - it can produce non-canonical tokenizations that change audit records and `_guide_states` keys.
 
 ## 5. Entity catalog and state machines
 
-Conventions: `⊳` marks the initial state; **terminal** states are underlined; transitions carry **triggers**. The single source of truth for every machine is a machine-readable transition table checked into the repo (`grid/_statecharts/*.yaml`: rows of `(state, trigger, next_state)`); the tables below are rendered from it, and §9's tests are generated from the YAML, not from this document. Any transition not in the YAML raises `IllegalTransition` (§7) — no silent defaults. For derived-status machines (E9), tests are observer-style: run generations, assert every observed `(prev, next)` pair is allowed. All fingerprints are BLAKE2b-128 over canonical serializations.
+Conventions: `⊳` marks the initial state; **terminal** states are underlined; transitions carry **triggers**. The single source of truth for every machine is a machine-readable transition table checked into the repo (`grid/_statecharts/*.yaml`: rows of `(state, trigger, next_state)`); the tables below are rendered from it, and §9's tests are generated from the YAML, not from this document. Any transition not in the YAML raises `IllegalTransition` (§7) - no silent defaults. For derived-status machines (E9), tests are observer-style: run generations, assert every observed `(prev, next)` pair is allowed. All fingerprints are BLAKE2b-128 over canonical serializations.
 
 ### E1. DialectGrammar (L1)
-Source lark/BNF text of the SQL dialect core. Fields: `source`, `terminals`, `productions`, `ignored_terminals` (whitespace/comments — first-class, see §6), `start_symbol`, `fingerprint`.
+Source lark/BNF text of the SQL dialect core. Fields: `source`, `terminals`, `productions`, `ignored_terminals` (whitespace/comments - first-class, see §6), `start_symbol`, `fingerprint`.
 
 | State | Trigger → next |
 |---|---|
@@ -250,7 +250,7 @@ Production subset + clause constraints for one role shape. Fields: `role_shape_h
 | State | Trigger → next |
 |---|---|
 | ⊳DECLARED | `compose(L1)` → COMPOSED; unknown production → **INVALID** |
-| COMPOSED | `reduce()` → REDUCED (useless-symbol elimination — **mandatory**) |
+| COMPOSED | `reduce()` → REDUCED (useless-symbol elimination - **mandatory**) |
 | REDUCED | `verify()` → VERIFIED (reducedness + L(G_role) ≠ ∅); empty language → **INVALID(EMPTY_LANGUAGE)** |
 | VERIFIED | register → **CACHED** |
 
@@ -268,10 +268,10 @@ Identifier allow-lists as lexer tries. Fields: `schema_fingerprint`, `categories
 
 E3 lifetime is **subordinate to E4's refcount**: streams reference lexicons only through a CompiledGrammar, so DEPRECATED lexicons stay readable until every pinning grammar retires (mirrors E4; no use-after-free on in-flight trie walks).
 
-Invariant (**identifier composition rule**, companion §3.4): at identifier positions the mask comes from L3 trie intersection — generic-IDENT cache entries are never consulted there. Enforced structurally by E11's type-distinct keys; violation raises `IdentifierMaskBypassError` in **all** builds.
+Invariant (**identifier composition rule**, companion §3.4): at identifier positions the mask comes from L3 trie intersection - generic-IDENT cache entries are never consulted there. Enforced structurally by E11's type-distinct keys; violation raises `IdentifierMaskBypassError` in **all** builds.
 
 ### E4. CompiledGrammar
-LALR tables for one (L1, L2, L3-categories) composition. Fields: `fingerprint` (hash of component fingerprints), `action/goto` tables (**with or without default-reduction compression — decided at compile time and recorded in the artifact**; the §6 step-1 algorithm is correct either way), `terminal_dfas`, `ignored_terminals`, `version`.
+LALR tables for one (L1, L2, L3-categories) composition. Fields: `fingerprint` (hash of component fingerprints), `action/goto` tables (**with or without default-reduction compression - decided at compile time and recorded in the artifact**; the §6 step-1 algorithm is correct either way), `terminal_dfas`, `ignored_terminals`, `version`.
 
 | State | Trigger → next |
 |---|---|
@@ -282,7 +282,7 @@ LALR tables for one (L1, L2, L3-categories) composition. Fields: `fingerprint` (
 Construction is single-flight per fingerprint via E17. READY objects are immutable and shared.
 
 ### E4a. ReserveTable
-Min-completion costs, **denominated in model tokens** (a terminal-denominated reserve under-reserves: one identifier terminal can cost many tokens). Per-terminal cost = minimal number of vocabulary tokens spelling that terminal's shortest lexeme (greedy cover over the TokenTrie; for L3 categories, over the shortest *allowed* identifier). Because costs depend on the tokenizer, the ReserveTable is a **separate artifact keyed by (grammar_fingerprint, tokenizer_fingerprint)** and referenced by CompiledGrammar — grammar identity itself stays tokenizer-independent. States: ⊳COMPUTING → **READY** | **FAILED**. The end-to-end termination check asserts: no reserve-stopped generation exceeds `max_tokens`.
+Min-completion costs, **denominated in model tokens** (a terminal-denominated reserve under-reserves: one identifier terminal can cost many tokens). Per-terminal cost = minimal number of vocabulary tokens spelling that terminal's shortest lexeme (greedy cover over the TokenTrie; for L3 categories, over the shortest *allowed* identifier). Because costs depend on the tokenizer, the ReserveTable is a **separate artifact keyed by (grammar_fingerprint, tokenizer_fingerprint)** and referenced by CompiledGrammar - grammar identity itself stays tokenizer-independent. States: ⊳COMPUTING → **READY** | **FAILED**. The end-to-end termination check asserts: no reserve-stopped generation exceeds `max_tokens`.
 
 ### E5. TokenTrie
 Byte trie over the vocabulary in the final artifact format (§2), built **exclusively from `TokenizerAdapter.token_bytes`** (E6). One per `tokenizer_fingerprint`; special tokens are excluded from the trie and permanently masked (EOS enters masks only via §6 step 7's explicit union). States: ⊳BUILDING → **READY** (immutable) | **FAILED** (`TrieBuildError`, §7).
@@ -290,7 +290,7 @@ Byte trie over the vocabulary in the final artifact format (§2), built **exclus
 ### E6. TokenizerAdapter
 Wraps a HF/llama tokenizer into the `Tokenizer` protocol, plus the **canonical token→bytes function**:
 
-`token_bytes(token_id) -> bytes`, normative rules: byte-level-BPE unicode↔byte remap tables inverted (GPT-2 style); sentencepiece `▁` and BPE `Ġ` → `0x20`; byte-fallback literals `<0xNN>` → the single byte `0xNN`; the id→token reverse map is built and held by the adapter (the protocol exposes `vocabulary: str→int`). `token_bytes` is used by the trie build, the fast path, and `ReferenceGuide` — one definition, three consumers (the mask-exactness differential depends on this).
+`token_bytes(token_id) -> bytes`, normative rules: byte-level-BPE unicode↔byte remap tables inverted (GPT-2 style); sentencepiece `▁` and BPE `Ġ` → `0x20`; byte-fallback literals `<0xNN>` → the single byte `0xNN`; the id→token reverse map is built and held by the adapter (the protocol exposes `vocabulary: str→int`). `token_bytes` is used by the trie build, the fast path, and `ReferenceGuide` - one definition, three consumers (the mask-exactness differential depends on this).
 
 | State | Trigger → next |
 |---|---|
@@ -298,51 +298,51 @@ Wraps a HF/llama tokenizer into the `Tokenizer` protocol, plus the **canonical t
 | | missing bytes → VERIFIED_DEGRADED (warning `W-COMPLETENESS01`; completeness guarantee formally void, soundness unaffected) |
 
 ### E7. LexerRun
-**Immutable value object** (4 fields): `dfa_state: int`, `remainder: bytes` (bounded by the longest in-flight lexeme), `hypotheses: Tuple[(terminal, dfa_state), ...]`, `category_context` (identifier-category flag). `advance(bytes) -> (LexerRun, emitted_terminals)` returns a **new instance** — there is no in-place mutation anywhere (many GridStates alive concurrently in `_guide_states`/beams alias LexerRuns; mutation would corrupt siblings). It is a 4-field struct: plain copies, no persistent-tree machinery.
+**Immutable value object** (4 fields): `dfa_state: int`, `remainder: bytes` (bounded by the longest in-flight lexeme), `hypotheses: Tuple[(terminal, dfa_state), ...]`, `category_context` (identifier-category flag). `advance(bytes) -> (LexerRun, emitted_terminals)` returns a **new instance** - there is no in-place mutation anywhere (many GridStates alive concurrently in `_guide_states`/beams alias LexerRuns; mutation would corrupt siblings). It is a 4-field struct: plain copies, no persistent-tree machinery.
 
-Step-level positions: AT_BOUNDARY ↔ MID_LEXEME (remainder ≠ ε); AMBIGUOUS ⇔ |hypotheses| > 1. Invariant **INV-LEX1**: |hypotheses| ≤ `H_max`, computed at grammar-compile time from the L1/L2 terminal-DFA product (eagerly buildable; L3 identifier categories add at most +1 hypothesis — keyword-vs-identifier — stated as a lemma with a unit test). Runtime assert as backstop → `LexerHypothesisOverflow`.
+Step-level positions: AT_BOUNDARY ↔ MID_LEXEME (remainder ≠ ε); AMBIGUOUS ⇔ |hypotheses| > 1. Invariant **INV-LEX1**: |hypotheses| ≤ `H_max`, computed at grammar-compile time from the L1/L2 terminal-DFA product (eagerly buildable; L3 identifier categories add at most +1 hypothesis - keyword-vs-identifier - stated as a lemma with a unit test). Runtime assert as backstop → `LexerHypothesisOverflow`.
 
 ### E8. ParserStack
-Persistent (immutable-node) stack: `StackNode{lalr_state, goto_symbol, parent*, depth, reserve_sum, config_hash, refcount}`. Push = new node O(1); pop = parent pointer; rollback = retained pointer O(1); nodes shared across beams/speculative branches. **Refcount is a plain field with a single invariant — a node is freed only at refcount 0** (no LIVE/SHARED state machine; beam pruning legitimately drops refcounts back to 1).
+Persistent (immutable-node) stack: `StackNode{lalr_state, goto_symbol, parent*, depth, reserve_sum, config_hash, refcount}`. Push = new node O(1); pop = parent pointer; rollback = retained pointer O(1); nodes shared across beams/speculative branches. **Refcount is a plain field with a single invariant - a node is freed only at refcount 0** (no LIVE/SHARED state machine; beam pruning legitimately drops refcounts back to 1).
 
-- `config_hash` — rolling, **pinned normatively for cross-implementation audit-trail replay**: `H(node) = low 64 bits of BLAKE2b-128( H(parent) || u32le(lalr_state) || u32le(goto_symbol) )`; `H(root) = 0`. O(1) per push. A cross-implementation test-vector file (stack sequence → expected hashes) is checked in; both the Python path and `grid_core` must pass it. `config_hash` is **audit-only** — never used for mask/cache equality — so 2⁻⁶⁴ collision probability is the accepted policy.
-- `reserve_sum` — cumulative token-denominated min-completion cost: `R(node) = R(parent) + cost(pending construct)` from E4a; the stack-top value is the termination reserve.
+- `config_hash` - rolling, **pinned normatively for cross-implementation audit-trail replay**: `H(node) = low 64 bits of BLAKE2b-128( H(parent) || u32le(lalr_state) || u32le(goto_symbol) )`; `H(root) = 0`. O(1) per push. A cross-implementation test-vector file (stack sequence → expected hashes) is checked in; both the Python path and `grid_core` must pass it. `config_hash` is **audit-only** - never used for mask/cache equality - so 2⁻⁶⁴ collision probability is the accepted policy.
+- `reserve_sum` - cumulative token-denominated min-completion cost: `R(node) = R(parent) + cost(pending construct)` from E4a; the stack-top value is the termination reserve.
 
 ### E9. GridState (the Guide-protocol state object)
 Frozen dataclass: `stack: StackNode`, `lexer: LexerRun`, `n_generated: int`, `prev_token: Optional[int]`, `status: Status` (memoized cache, see below).
 
-**Status is a total pure function** `derive_status(stack, lexer, eos_consumed)` where `eos_consumed ⇔ prev_token == eos_token_id`. The stored field is a memoization of that function; `IllegalTransition` checks compare **derived** values. All statuses are O(1)-derivable — which is why FORCED is *not* a status (it needs mask cardinality, i.e. a trie walk; "forced" is an instruction-level outcome of `get_next_instruction`, §4.5) and reserve exhaustion is *not* a status (budget is session state, not grammar state; it is a processor/adapter-level trigger, §6 step 3).
+**Status is a total pure function** `derive_status(stack, lexer, eos_consumed)` where `eos_consumed ⇔ prev_token == eos_token_id`. The stored field is a memoization of that function; `IllegalTransition` checks compare **derived** values. All statuses are O(1)-derivable - which is why FORCED is *not* a status (it needs mask cardinality, i.e. a trie walk; "forced" is an instruction-level outcome of `get_next_instruction`, §4.5) and reserve exhaustion is *not* a status (budget is session state, not grammar state; it is a processor/adapter-level trigger, §6 step 3).
 
 | Status | Meaning | Legal next (trigger: one `get_next_state` call) |
 |---|---|---|
 | ⊳ACTIVE | viable, output ∉ L, EOS illegal | ACTIVE, ACCEPTING, GRAMMAR_END |
 | ACCEPTING | output ∈ L (per the mid-lexeme-aware EOS rule, §6 step 2) *and* other continuations legal | ACTIVE, ACCEPTING, GRAMMAR_END, **COMPLETE** |
 | GRAMMAR_END | only EOS legal by grammar | **COMPLETE** |
-| **COMPLETE** | EOS consumed; final | — |
-| **DEAD_END** | mask empty — must be unreachable; raises `DeadEndError` (end-to-end soundness check asserts zero occurrences) | — |
+| **COMPLETE** | EOS consumed; final | - |
+| **DEAD_END** | mask empty - must be unreachable; raises `DeadEndError` (end-to-end soundness check asserts zero occurrences) | - |
 
 Self-loops are real (`ACCEPTING→ACCEPTING`: `LIMIT 1` → `LIMIT 10`; `ACTIVE→ACTIVE`: most steps). `ACTIVE→COMPLETE` is impossible (step 11 asserts EOS legality first). Pinned mapping: `is_final_state(s)` ⇔ `can_terminate_state(s)` ⇔ status ∈ {ACCEPTING, GRAMMAR_END, COMPLETE}; `must_terminate_state(s)` ⇔ status ∈ {GRAMMAR_END, COMPLETE}.
 
 ### E10. MaskCacheEntry
 Immutable, versioned. Fields: `entry_id`, `key`, `payload`, `origin: SEEDED|COMPUTED`, `grammar_version`.
 
-**Deterministic encoding (cross-implementation, for audit-trail replay):** payload sizes compared as `4·|accept|` vs `4·(V−|accept|)` vs `⌈V/8⌉` bytes; ties broken accept-list < reject-list < bitset; token ids sorted ascending; `entry_id = BLAKE2b-128(canonical key bytes || encoding tag || canonical payload)`. Racing writers of one key therefore produce the same `entry_id` — publish is idempotent by construction. Cross-implementation test vectors checked in.
+**Deterministic encoding (cross-implementation, for audit-trail replay):** payload sizes compared as `4·|accept|` vs `4·(V−|accept|)` vs `⌈V/8⌉` bytes; ties broken accept-list < reject-list < bitset; token ids sorted ascending; `entry_id = BLAKE2b-128(canonical key bytes || encoding tag || canonical payload)`. Racing writers of one key therefore produce the same `entry_id` - publish is idempotent by construction. Cross-implementation test vectors checked in.
 
 States: ⊳(SEEDED | COMPUTED) → PUBLISHED (immutable forever) → INVALIDATED. **Rollover trigger:** `GrammarRegistry`, on registering a superseding CompiledGrammar/PolicyBundle, swaps the T2 namespace pointer and enqueues the old namespace for archival (replay against a missing archive raises `StaleArtifactError`). Entries are never deleted in place.
 
 ### E11. MaskCache
 Two tiers with distinct keys and an explicit flow.
 
-**The context-dependent split (soundness precondition for caching).** A token whose bytes cross a terminal boundary *and continue* (`'),'`, `' FROM('`, `'1;'`) has viability depending on the allowed-terminal set *after* shifting the first terminal — i.e. on the parser stack, which no (lexer, A)-keyed entry can capture. Therefore the walk kernel returns two outputs (§2): the **context-independent mask** (tokens fully resolvable within the current lexeme, or ending exactly at one terminal boundary with that terminal ∈ A) — cacheable — and the **context-dependent token list** (boundary-crossing continuations) — checked per step against the live stack via `check_context_dependent`, **never cached**. Without this split, OBL-KEY1 is violated by construction. The mask-exactness and cache-soundness corpora include multi-terminal tokens explicitly; the guard-rail-cost telemetry reports the residue-list size per state (companion §8.1's nesting-sweep risk).
+**The context-dependent split (soundness precondition for caching).** A token whose bytes cross a terminal boundary *and continue* (`'),'`, `' FROM('`, `'1;'`) has viability depending on the allowed-terminal set *after* shifting the first terminal - i.e. on the parser stack, which no (lexer, A)-keyed entry can capture. Therefore the walk kernel returns two outputs (§2): the **context-independent mask** (tokens fully resolvable within the current lexeme, or ending exactly at one terminal boundary with that terminal ∈ A) - cacheable - and the **context-dependent token list** (boundary-crossing continuations) - checked per step against the live stack via `check_context_dependent`, **never cached**. Without this split, OBL-KEY1 is violated by construction. The mask-exactness and cache-soundness corpora include multi-terminal tokens explicitly; the guard-rail-cost telemetry reports the residue-list size per state (companion §8.1's nesting-sweep risk).
 
 - **T1** (per-CompiledGrammar, private): key `(lexer_product_state, remainder, allowed_terminal_signature [, schema_fingerprint at identifier positions])`. `lexer_product_state` is the hypothesis-set/product-DFA state, not a single DFA id.
-- **T2** (shared across the grammar family): key `(L1 dialect fingerprint, tokenizer_fingerprint, lexer_product_state under the canonical L1 terminal numbering, remainder — normalized to the scanner form (p, q, v) where the lexicon-visibility guard proves the walk cannot observe pre-accept prefix bytes (the genN key) — allowed_terminal_signature over that numbering, schema_fingerprint)`. **Scoping correction (2026-07-10, found by a 50-seed shared-registry fuzz):** when any lexicon exists, walk-time CD filtering embeds schema words into entry content, so the schema fingerprint scopes ALL entries of a lexicon-bearing producer, not only identifier positions — unscoped cross-schema sharing can serve one schema's continuations to another and is unsound (the legacy unscoped behavior survives only behind the GRID_GENN_KEYS=0 kill switch, byte-for-byte, for replay of old logs). Cross-ROLE sharing within one schema remains: role projections share the L1 terminal numbering (assigned at L1 freeze; projections subset productions, never renumber), so any two roles reaching the same normalized configuration share entries. The tokenizer fingerprint is in the key because masks are token-id-space-specific (E5: one trie per tokenizer).
+- **T2** (shared across the grammar family): key `(L1 dialect fingerprint, tokenizer_fingerprint, lexer_product_state under the canonical L1 terminal numbering, remainder - normalized to the scanner form (p, q, v) where the lexicon-visibility guard proves the walk cannot observe pre-accept prefix bytes (the genN key) - allowed_terminal_signature over that numbering, schema_fingerprint)`. **Scoping correction (2026-07-10, found by a 50-seed shared-registry fuzz):** when any lexicon exists, walk-time CD filtering embeds schema words into entry content, so the schema fingerprint scopes ALL entries of a lexicon-bearing producer, not only identifier positions - unscoped cross-schema sharing can serve one schema's continuations to another and is unsound (the legacy unscoped behavior survives only behind the GRID_GENN_KEYS=0 kill switch, byte-for-byte, for replay of old logs). Cross-ROLE sharing within one schema remains: role projections share the L1 terminal numbering (assigned at L1 freeze; projections subset productions, never renumber), so any two roles reaching the same normalized configuration share entries. The tokenizer fingerprint is in the key because masks are token-id-space-specific (E5: one trie per tokenizer).
 - **Flow:** miss → compute → publish to T1 synchronously, T2 asynchronously; T2 hit → copy into T1. **Bounds:** T1 = per-grammar LRU with a configured entry cap; T2 = bounded map; namespace rollover is the bulk-eviction mechanism.
 - Identifier-position keys are a **distinct key type** from generic-IDENT keys (cannot collide by construction); consulting a generic-IDENT entry at an identifier position raises `IdentifierMaskBypassError` in all builds.
 
-**Soundness obligation (OBL-KEY1):** two configurations sharing a key must produce byte-identical *context-independent* masks — the key must refine the Myhill–Nerode classes of the (lexer product-DFA × allowed-terminal set × identifier-lexicon) product; the context-dependent residue is exempt because it is never cached. Verified by the cache-soundness check (cache-on ≡ cache-off, including cross-role T2 hits), not assumed.
+**Soundness obligation (OBL-KEY1):** two configurations sharing a key must produce byte-identical *context-independent* masks - the key must refine the Myhill–Nerode classes of the (lexer product-DFA × allowed-terminal set × identifier-lexicon) product; the context-dependent residue is exempt because it is never cached. Verified by the cache-soundness check (cache-on ≡ cache-off, including cross-role T2 hits), not assumed.
 
-### E12. Instruction — `Write`/`Generate` (§4.1). Tokens are `torch.LongTensor` (normative contract).
+### E12. Instruction - `Write`/`Generate` (§4.1). Tokens are `torch.LongTensor` (normative contract).
 
 ### E13. GridLogitsProcessor
 
@@ -355,13 +355,13 @@ Two tiers with distinct keys and an explicit flow.
 The adapter calls `processor.finish()` whenever the GenerationSession enters STOPPED for **any** reason (STOP_SEQUENCE and ERROR never produce COMPLETE states, so without `finish()` the single-use invariant would be silently unenforced for those stops). §9 test: reuse after a `stop_at` stop raises.
 
 ### E14. AuditLog / AuditRecord
-Record: `(step, config_hash, mask_entry_id: Optional[EntryId], chosen_token, blocked_count, instruction_kind: GENERATE|WRITE|EOS, prev_record_hash)` — hash-chained. `mask_entry_id = None ⇔ instruction_kind ∈ {WRITE, EOS}`. **Every step appends a record, including each token of a Write span and the EOS step** (§6 steps 11/15) — the EOS record is the chain tail; SEALED requires it for non-error stops (otherwise the audit-trail bit-identical replay would exclude the accepting decision). Log states: ⊳BUFFERED (lock-free ring append) → FLUSHED (async) → **SEALED** (chain head + artifact fingerprints + mode flags, e.g. processor-only downgrades, `stop_at` exclusions). Failure policy: `audit=strict` (flush failure aborts) vs `audit=best_effort` (default; `W-AUDIT01`).
+Record: `(step, config_hash, mask_entry_id: Optional[EntryId], chosen_token, blocked_count, instruction_kind: GENERATE|WRITE|EOS, prev_record_hash)` - hash-chained. `mask_entry_id = None ⇔ instruction_kind ∈ {WRITE, EOS}`. **Every step appends a record, including each token of a Write span and the EOS step** (§6 steps 11/15) - the EOS record is the chain tail; SEALED requires it for non-error stops (otherwise the audit-trail bit-identical replay would exclude the accepting decision). Log states: ⊳BUFFERED (lock-free ring append) → FLUSHED (async) → **SEALED** (chain head + artifact fingerprints + mode flags, e.g. processor-only downgrades, `stop_at` exclusions). Failure policy: `audit=strict` (flush failure aborts) vs `audit=best_effort` (default; `W-AUDIT01`).
 
 ### E15. GenerationSession (adapter-level)
-⊳INIT → PROMPT_ENCODED → STREAMING → **STOPPED(reason)**, `reason ∈ {EOS_ACCEPT, MAX_TOKENS_WITH_JUMP_COMPLETE, STOP_SEQUENCE (cfg mode only), ERROR(exc)}`. On any STOPPED: `processor.finish()`. Invariant **INV-OUT1**: every non-ERROR, non-STOP_SEQUENCE stop parses under the same CompiledGrammar (debug: always checked; prod: sampled). `MAX_TOKENS_WITH_JUMP_COMPLETE`: when `budget_remaining ≤ reserve_sum`, the shortest legal completion is jump-forwarded (GRID-owned loop) — the event and residual truncation rate are reported metrics, never silent. In processor-only mode this downgrade is recorded in the audit seal (§4.5).
+⊳INIT → PROMPT_ENCODED → STREAMING → **STOPPED(reason)**, `reason ∈ {EOS_ACCEPT, MAX_TOKENS_WITH_JUMP_COMPLETE, STOP_SEQUENCE (cfg mode only), ERROR(exc)}`. On any STOPPED: `processor.finish()`. Invariant **INV-OUT1**: every non-ERROR, non-STOP_SEQUENCE stop parses under the same CompiledGrammar (debug: always checked; prod: sampled). `MAX_TOKENS_WITH_JUMP_COMPLETE`: when `budget_remaining ≤ reserve_sum`, the shortest legal completion is jump-forwarded (GRID-owned loop) - the event and residual truncation rate are reported metrics, never silent. In processor-only mode this downgrade is recorded in the audit seal (§4.5).
 
 ### E16. PolicyBundle / SchemaSnapshot
-⊳LOADED → COMPILED (role shapes hashed, lexicons declared) → ACTIVE → **SUPERSEDED** (in-flight streams pin old versions via E4 refcounts). Fingerprints feed E4/E4a identities — no in-place mutation anywhere in the system.
+⊳LOADED → COMPILED (role shapes hashed, lexicons declared) → ACTIVE → **SUPERSEDED** (in-flight streams pin old versions via E4 refcounts). Fingerprints feed E4/E4a identities - no in-place mutation anywhere in the system.
 
 ### E17. RegistrySlot (GrammarRegistry single-flight)
 One slot per requested fingerprint (E3 lexicons, E4 grammars, E4a reserves, E5 tries).
@@ -386,7 +386,7 @@ process_logits(input_ids, logits):
   apply instr: Generate(mask) → masked_fill_(-inf outside mask); Write → §4.5 mode rules
 ```
 
-**Guide level** — `get_next_instruction(state)`:
+**Guide level** - `get_next_instruction(state)`:
 ```
   1  A ← allowed_terminals(state.stack)
         # NORMATIVE (LALR default-reductions make raw rows over-approximate):
@@ -400,7 +400,7 @@ process_logits(input_ids, logits):
         #    hypothesis) AND, after virtually emitting+shifting that pending terminal on a
         #   scratch stack, ACCEPT is reachable via the reduce chain of $end.
         # (After '...FROM t', 't' is a complete IDENT awaiting maximal-munch finalization:
-        #  the stack alone would wrongly say EOS is illegal — this rule is what makes
+        #  the stack alone would wrongly say EOS is illegal - this rule is what makes
         #  ACCEPTING/can_terminate_state correct. Cases in the viable-prefix
         #  and mask-exactness corpora.)
   3  if budget_remaining ≤ state.stack.reserve_sum:               # session-level trigger (§4.4)
@@ -422,7 +422,7 @@ process_logits(input_ids, logits):
  10  return Generate(tensor(sorted(mask)))
 ```
 
-**Guide level** — `get_next_state(state, token_id)`:
+**Guide level** - `get_next_state(state, token_id)`:
 ```
  11  if token_id == eos_id:
         assert can_terminate_state(state)                         # E9: only ACCEPTING/GRAMMAR_END
@@ -442,9 +442,9 @@ process_logits(input_ids, logits):
 
 Cost budget per step (companion §5): steps 1–2 ≈ 0.3–1 µs typical (worst case O(|row|×depth)); 4–7 hit ≈ 1–3 µs, miss ≈ 20–50 µs @128k, plus residue check O(|cd_list|×depth); 13–14 amortized O(1), worst case O(nesting depth); 15 ≈ 0.1–0.3 µs. Nothing in the loop reads anything proportional to *n* (this is why §4.3's incremental state key exists).
 
-**Batch scheduling contract (serving):** masks are computed on CPU overlapped with the GPU forward pass. If a request's mask is not ready at sampling time (worst-case cold miss ≈ full trie walk, ~4 ms), that request is **skipped for the current scheduling round and rejoins the next step** — co-batched requests are never stalled, and an approximate mask is never substituted (no over-approximating deadline fallback exists in v1, by design; §12). The adversarial cold-miss arm of the batched-serving benchmark verifies this contract.
+**Batch scheduling contract (serving):** masks are computed on CPU overlapped with the GPU forward pass. If a request's mask is not ready at sampling time (worst-case cold miss ≈ full trie walk, ~4 ms), that request is **skipped for the current scheduling round and rejoins the next step** - co-batched requests are never stalled, and an approximate mask is never substituted (no over-approximating deadline fallback exists in v1, by design; §12). The adversarial cold-miss arm of the batched-serving benchmark verifies this contract.
 
-*Realization (vLLM 0.24 V1): the overlap half is `grid/serving/prefetch.py` — `GridGrammarSession.accept_tokens` schedules the successor state's mask on a worker pool ONLY when that mask is not already T1-warm (`GridGuide.is_mask_warm`); the warm steady state never touches the pool (unconditional scheduling serialized every step behind the single worker's queue — LESSONS 6.5). The cold walk runs with the GIL released (kernel v4 `walk_raw` detach), overlapping the scheduler's remaining CPU work for the step, and `fill_bitmask` waits only for the un-hidden residual (measured, reported in prefetcher stats). The warm fill itself is kernel v5 `fill_bits`: the whole bitmask row (pre-packed per-entry ci bit words ++ live CD-pass bits ++ EOS) written into vLLM's row buffer in one FFI call — µs-scale, no id materialization. Request copies share the template's `MaskProducer` (one kernel, one entry-registration space, one T1 cache; per-request state lives in `GridState`/sessions). vLLM 0.24 exposes no per-step defer hook for a RUNNING request, so the literal "skip this round, rejoin next" is delegated to vLLM's own async grammar-executor admission gating (WAITING requests are held without stalling the batch) while GRID keeps the mask warm by the time the scheduler asks; for a mid-stream cold miss the batch therefore waits the un-hidden residual of that walk — the adversarial cold-miss arm of the batched-serving benchmark measures exactly this residual. The single-flight half is `grid/serving/singleflight.py` (E17): one build per fingerprint, N waiters share the result or the same exception, FAILED negatively cached with a TTL.*
+*Realization (vLLM 0.24 V1): the overlap half is `grid/serving/prefetch.py` - `GridGrammarSession.accept_tokens` schedules the successor state's mask on a worker pool ONLY when that mask is not already T1-warm (`GridGuide.is_mask_warm`); the warm steady state never touches the pool (unconditional scheduling serialized every step behind the single worker's queue - LESSONS 6.5). The cold walk runs with the GIL released (kernel v4 `walk_raw` detach), overlapping the scheduler's remaining CPU work for the step, and `fill_bitmask` waits only for the un-hidden residual (measured, reported in prefetcher stats). The warm fill itself is kernel v5 `fill_bits`: the whole bitmask row (pre-packed per-entry ci bit words ++ live CD-pass bits ++ EOS) written into vLLM's row buffer in one FFI call - µs-scale, no id materialization. Request copies share the template's `MaskProducer` (one kernel, one entry-registration space, one T1 cache; per-request state lives in `GridState`/sessions). vLLM 0.24 exposes no per-step defer hook for a RUNNING request, so the literal "skip this round, rejoin next" is delegated to vLLM's own async grammar-executor admission gating (WAITING requests are held without stalling the batch) while GRID keeps the mask warm by the time the scheduler asks; for a mid-stream cold miss the batch therefore waits the un-hidden residual of that walk - the adversarial cold-miss arm of the batched-serving benchmark measures exactly this residual. The single-flight half is `grid/serving/singleflight.py` (E17): one build per fingerprint, N waiters share the result or the same exception, FAILED negatively cached with a TTL.*
 
 ## 7. Error taxonomy
 
@@ -456,8 +456,8 @@ Cost budget per step (companion §5): steps 1–2 ≈ 0.3–1 µs typical (worst
 | `LexiconBuildError` | E3 MATERIALIZING → INVALID | policy/schema author fixes (bad identifier set, encoding) |
 | `TrieBuildError` | E5 BUILDING → FAILED | tokenizer-adapter defect; file, don't catch |
 | `LexerHypothesisOverflow` | INV-LEX1 breach at runtime | compile-side bug (H_max wrong); file, don't catch |
-| `DeadEndError` | empty mask at step 8 | **bug by theorem** — abort generation, dump state; end-to-end soundness check = 0 occurrences |
-| `IdentifierMaskBypassError` | generic-IDENT cache entry consulted at an identifier position (E11 key-type guard, **all** builds) | always a bug — abort; the policy/RBAC-enforcement suite injects the condition and asserts it fires |
+| `DeadEndError` | empty mask at step 8 | **bug by theorem** - abort generation, dump state; end-to-end soundness check = 0 occurrences |
+| `IdentifierMaskBypassError` | generic-IDENT cache entry consulted at an identifier position (E11 key-type guard, **all** builds) | always a bug - abort; the policy/RBAC-enforcement suite injects the condition and asserts it fires |
 | `ProcessorReuseError` | E13 FINISHED reuse (incl. after stop_at/ERROR stops via `finish()`) | construct a new generator |
 | `AuditFlushError` | E14 strict mode | abort (strict) / warn `W-AUDIT01` (best-effort) |
 | `IllegalTransition(entity, from, to)` | any §5 machine (checked against the YAML statecharts) | always a bug; never catch in library code |
@@ -470,7 +470,7 @@ Design rule: **generation-time exceptions are bugs** (DeadEnd, IllegalTransition
 
 ## 8. Concurrency and immutability model
 
-- **Immutable + shared:** FROZEN grammars, READY CompiledGrammar/ReserveTable/TokenTrie, PUBLISHED cache entries, StackNodes, **LexerRun values** (E7 — advance returns a new instance; the only mutation anywhere is constructing the next value).
+- **Immutable + shared:** FROZEN grammars, READY CompiledGrammar/ReserveTable/TokenTrie, PUBLISHED cache entries, StackNodes, **LexerRun values** (E7 - advance returns a new instance; the only mutation anywhere is constructing the next value).
 - **Per-stream mutable:** the GridState *chain* (each state itself frozen), AuditLog buffer, the processor's `_guide_states` dict and key cursors.
 - **Single-flight:** all artifact builds via E17 RegistrySlots.
 - **Cache races:** content-hash idempotent publish (E10); no CAS needed; readers never block on writers.
@@ -480,7 +480,7 @@ Design rule: **generation-time exceptions are bugs** (DeadEnd, IllegalTransition
 
 ```
 tests/
-  protocols/         # interface conformance: self-contained conformance tests —
+  protocols/         # interface conformance: self-contained conformance tests -
                      # expected protocol
                      # signatures stated in the tests themselves; array-type
                      # normalization; tensor contract (.tokens.to(device) works on
@@ -504,13 +504,13 @@ tests/
   policy/            # RBAC projection, adversarial + property suites, SemanticChecker
 ```
 
-Techniques: **property-based** (hypothesis) for reduction/masks/keys/encodings; **differential** against `_reference/` and lark (advisory: sqlglot parse, optional dockerized Postgres `EXPLAIN`); **fuzzing** random token walks under the mask (must never wedge); **statechart tests generated from `grid/_statecharts/*.yaml`** — the machine-readable transition tables are the source of truth (§5): explicit-trigger machines get one allowed-transition test per row plus IllegalTransition probes for unlisted pairs; derived-status machines (E9) get observer-style tests (run generations, assert every observed transition is allowed).
+Techniques: **property-based** (hypothesis) for reduction/masks/keys/encodings; **differential** against `_reference/` and lark (advisory: sqlglot parse, optional dockerized Postgres `EXPLAIN`); **fuzzing** random token walks under the mask (must never wedge); **statechart tests generated from `grid/_statecharts/*.yaml`** - the machine-readable transition tables are the source of truth (§5): explicit-trigger machines get one allowed-transition test per row plus IllegalTransition probes for unlisted pairs; derived-status machines (E9) get observer-style tests (run generations, assert every observed transition is allowed).
 
-## 10. Verification — properties and their evidence
+## 10. Verification - properties and their evidence
 
-Each property below is checked by a CI job. "Oracle" = `grid/_reference/` unless stated. The performance properties (flat per-token guard-rail cost, batched-serving overhead, cross-engine latency) run on a **declared cloud runner** — a named provider instance type + image (e.g. Lambda 1×H100 PCIe, Lambda Stack 24.04), recorded in every report's host label — with committed seed lists; the absolute per-step budget is recorded once from ITL measured on the same declared hardware (e.g. 1×H100, Qwen2.5-7B). *(Amended 2026-07: bare-metal pinning — isolated cores, performance governor — dropped from the plan; cross-engine ratios proved host-invariant while absolute constants carry the host label.)*
+Each property below is checked by a CI job. "Oracle" = `grid/_reference/` unless stated. The performance properties (flat per-token guard-rail cost, batched-serving overhead, cross-engine latency) run on a **declared cloud runner** - a named provider instance type + image (e.g. Lambda 1×H100 PCIe, Lambda Stack 24.04), recorded in every report's host label - with committed seed lists; the absolute per-step budget is recorded once from ITL measured on the same declared hardware (e.g. 1×H100, Qwen2.5-7B). *(Amended 2026-07: bare-metal pinning - isolated cores, performance governor - dropped from the plan; cross-engine ratios proved host-invariant while absolute constants carry the host label.)*
 
-Build order: the pipeline is built bottom-up — protocols, then the grammar/lexer/trie/mask layers, then the cache and audit log and end-to-end `generate()`, then the `grid_core` Rust kernels, then the RBAC/SemanticChecker suite and the vLLM serving backend — each layer resting on the correctness of the one below.
+Build order: the pipeline is built bottom-up - protocols, then the grammar/lexer/trie/mask layers, then the cache and audit log and end-to-end `generate()`, then the `grid_core` Rust kernels, then the RBAC/SemanticChecker suite and the vLLM serving backend - each layer resting on the correctness of the one below.
 
 | Property | Verified over | Evidence |
 |---|---|---|
@@ -520,15 +520,15 @@ Build order: the pipeline is built bottom-up — protocols, then the grammar/lex
 | **Mask exactness** (walk + split) | fast path vs oracle | fast-path (ci_mask ∪ residue) ≡ oracle trial-parse mask, bit-exact, over ≥10⁵ configs from **grammar-guided random walks under the reference mask** with counter-asserted quotas: ≥20% identifier positions (allowed *and* forbidden, multi-byte), ≥10% remainders mid-UTF-8-codepoint, ≥20% mid-lexeme, ≥5% ambiguous hypothesis sets, **≥10% multi-terminal boundary-crossing tokens, whitespace/comment-spanning tokens included**; committed four-tokenizer matrix (§9); byte-fallback ⇒ zero empty masks at viable states |
 | **Cache soundness** (E10/E11, OBL-KEY1) | cache-on vs cache-off | cache-on ≡ cache-off over randomized replays **including cross-role T2 hits** (two role projections, one dialect) and context-dependent residues; namespace rollover: zero stale hits; racing publish: single entry_id; encoding/config-hash cross-impl vectors match |
 | **End-to-end soundness / completeness / termination** | seeded + forced-walk generations | 10k seeded generations, pinned model+tokenizer (byte-fallback BPE ≥100k vocab, e.g. Qwen2.5-0.5B-Instruct) **plus forced-random-walk arm** (uniform over mask, EOS suppressed until length ≥ L, budgets forcing reserve stops): 100% outputs parse under own CompiledGrammar (**binding**; sqlglot/EXPLAIN advisory with triaged log), EOS only at ACCEPT, `DeadEndError` = 0, every jump-complete stop parses and ends at ACCEPT, **no reserve-stopped generation exceeds max_tokens**; coverage counters: nesting ≥ D, ≥ k reserve stops, ≥ k multi-byte-identifier events; reserve tightness: sampled `reserve_sum` == oracle shortest-completion token count |
-| **Policy / RBAC enforcement** (E2/E3/SemanticChecker) | mask property + adversarial-prompt arm | (a) model-independent mask property test: fuzzed walks to identifier positions — no token sequence completes a forbidden identifier at a lexeme boundary (incl. forbidden-is-prefix-of-allowed: `users` vs `users_public`) — violations **exactly 0**; (b) adversarial prompt suite (secondary); (c) `IdentifierMaskBypassError` injection test fires; (d) column-violation fixtures: SemanticChecker flags 100% |
-| **Flat per-token guard-rail cost** — latency independent of output position (companion §6.1) | the guard-rail-cost microharness | on the **guard-rail-cost microharness** (recorded/synthetic token-stream replay, no model): 95% CI of mask-latency-vs-position slope has half-width ≤ ε and upper bound ≤ ε (ε = 0.1 µs/1k tokens) at n=16k under the nesting sweep, N ≥ 20 seeded runs; p50 cache-hit < 10 µs; p99 miss < absolute step budget; warm-cache hit rate ≥ 90% reported per nesting depth; **context-dependent residue size reported per nesting depth**; total guard cost linear fit R² > 0.99; cross-role T2 hit factor > 0 |
-| **Batched-serving overhead** — serving under batch load (batch/overlap) | full serving harness | batch 1/8/32 heterogeneous grammars, per-step p99 within budget; TPOT overhead vs unconstrained @batch 32; TTFT: cold role+schema specialize, warm (companion §6.2); **adversarial cold-miss arm** (cache cleared, maximal identifier position, injected into batch-32; measured by the RATIFIED metric v2, 2026-07-09 — the defer makes the batch legitimately non-lockstep, so lockstep math cannot measure it): co-batched TPOT degradation computed per-request over the warm co-batched requests from engine-step timestamps, `mean_i[(t_last(i) − t_first(i))/(T_i − 1)]` vs the all-warm baseline; **engine-step wall** timed (every step timed, not inferred); the fresh request itself is reported separately (its TTFT and effective-TPOT vs warm — a never-seen schema trades its own first-token latency for zero co-tenant interference, the design intent — see §12 limitation note); legacy lockstep v1 printed alongside for comparison; concurrent cold start: single-flight (1 build, N waiters, same error on FAILED) |
+| **Policy / RBAC enforcement** (E2/E3/SemanticChecker) | mask property + adversarial-prompt arm | (a) model-independent mask property test: fuzzed walks to identifier positions - no token sequence completes a forbidden identifier at a lexeme boundary (incl. forbidden-is-prefix-of-allowed: `users` vs `users_public`) - violations **exactly 0**; (b) adversarial prompt suite (secondary); (c) `IdentifierMaskBypassError` injection test fires; (d) column-violation fixtures: SemanticChecker flags 100% |
+| **Flat per-token guard-rail cost** - latency independent of output position (companion §6.1) | the guard-rail-cost microharness | on the **guard-rail-cost microharness** (recorded/synthetic token-stream replay, no model): 95% CI of mask-latency-vs-position slope has half-width ≤ ε and upper bound ≤ ε (ε = 0.1 µs/1k tokens) at n=16k under the nesting sweep, N ≥ 20 seeded runs; p50 cache-hit < 10 µs; p99 miss < absolute step budget; warm-cache hit rate ≥ 90% reported per nesting depth; **context-dependent residue size reported per nesting depth**; total guard cost linear fit R² > 0.99; cross-role T2 hit factor > 0 |
+| **Batched-serving overhead** - serving under batch load (batch/overlap) | full serving harness | batch 1/8/32 heterogeneous grammars, per-step p99 within budget; TPOT overhead vs unconstrained @batch 32; TTFT: cold role+schema specialize, warm (companion §6.2); **adversarial cold-miss arm** (cache cleared, maximal identifier position, injected into batch-32; measured by the RATIFIED metric v2, 2026-07-09 - the defer makes the batch legitimately non-lockstep, so lockstep math cannot measure it): co-batched TPOT degradation computed per-request over the warm co-batched requests from engine-step timestamps, `mean_i[(t_last(i) − t_first(i))/(T_i − 1)]` vs the all-warm baseline; **engine-step wall** timed (every step timed, not inferred); the fresh request itself is reported separately (its TTFT and effective-TPOT vs warm - a never-seen schema trades its own first-token latency for zero co-tenant interference, the design intent - see §12 limitation note); legacy lockstep v1 printed alongside for comparison; concurrent cold start: single-flight (1 build, N waiters, same error on FAILED) |
 | **Cross-engine latency comparison** (bench harness) | comparison arms on shared datasets | XGrammar + XGrammar-2, llguidance, outlines-current, SynCode, GBNF + unconstrained arm execute on Spider-subset & JSONSchemaBench sample; report auto-generated with the explicit metric list: syntax-validity %, EX delta vs unconstrained, mask-latency percentiles, TTFT, TPOT, throughput @batch, truncation rate, cache telemetry; ablation arms: cache-off, write-back-off, audit-off, jump-forward-off; fairness protocol (companion §6) satisfied. **Tracked reference point:** GRID vs XGrammar p50 mask latency |
 | **Audit-trail replay and tamper detection** (E14) | replayed generations spanning rollover | replay **every step of ≥1,000 generations spanning ≥1 namespace rollover**: bit-identical masks (EOS and Write records included); tamper property test (random record, random field, ≥10³ trials): 100% detection. A lighter chain-integrity + basic replay smoke check runs earliest, before end-to-end generation lands |
 
 ## 11. Dependencies and pinning
 
-- Runtime: `torch`, `numpy`; `lark` (grammar authoring/validation and test oracles only — the runtime parser is GRID's own LALR engine).
+- Runtime: `torch`, `numpy`; `lark` (grammar authoring/validation and test oracles only - the runtime parser is GRID's own LALR engine).
 - Dev/test: `pytest`, `hypothesis`, `pytest-benchmark`, `sqlglot` (advisory oracle); `jax`/`mlx` optional (guarded imports in the array-type tests).
 - **Interfaces:** the tool-family protocol shapes are defined normatively in `grid/protocols.py` and conformance-tested by self-contained tests under `tests/protocols/`. No external constrained-decoding package is a dependency of GRID at any time; external engines appear only inside `bench/` comparison harnesses.
 - `grid_core`: Rust ≥1.75, pyo3, maturin.
@@ -538,7 +538,7 @@ Build order: the pipeline is built bottom-up — protocols, then the grammar/lex
 | Item | Decision / verification coverage |
 |---|---|
 | Nesting-depth context-dependent growth (companion §8.1) | context-dependent split (E11) makes it a **correctness non-issue**; residual *cost* risk covered by the guard-rail-cost check's per-depth residue-size and hit-rate reporting; fallback (widen keys / more runtime checks) budgeted for the Rust-kernel work |
-| Leo/Earley subtleties (companion §8.2) | avoided in v1 — LALR(1) only; Earley fallback deferred until a non-LALR dialect construct forces it |
+| Leo/Earley subtleties (companion §8.2) | avoided in v1 - LALR(1) only; Earley fallback deferred until a non-LALR dialect construct forces it |
 | Lexer hypothesis bound (companion §8.3) | H_max computed at compile from the L1/L2 terminal-DFA product; L3 adds ≤ +1 (lemma + unit test); runtime assert backstop; mask-exactness fuzz |
 | Batch tail (companion §8.4) | no approximate fallback in v1; §6 skip-a-round contract; adversarial cold-miss arm of the batched-serving benchmark |
 | LALR spurious reduces / default reductions | normative virtual-stack simulate() for A and eos_ok (§6 steps 1–2); end-to-end EOS-only-at-ACCEPT check |
