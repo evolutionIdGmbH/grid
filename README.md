@@ -1,5 +1,10 @@
 # GRID - Grammar-Railed Decoding
 
+[![CI](https://github.com/evolutionIdGmbH/grid/actions/workflows/ci.yml/badge.svg)](https://github.com/evolutionIdGmbH/grid/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/grid-guardrail)](https://pypi.org/project/grid-guardrail/)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21486746.svg)](https://doi.org/10.5281/zenodo.21486746)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+
 Constrained decoding for LLMs with **provable guarantees and no silent
 errors**: every constraint is either *enforced* by the token mask, or
 *named* in the output. Nothing is quietly dropped.

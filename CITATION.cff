@@ -5,6 +5,7 @@ authors:
   - family-names: Arjmandi
     given-names: Mohsen
 license: Apache-2.0
+doi: 10.5281/zenodo.21486746
 repository-code: "https://github.com/evolutionIdGmbH/grid"
 preferred-citation:
   type: article
