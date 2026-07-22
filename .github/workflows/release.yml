@@ -1,0 +1,64 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  kernel-wheels:
+    name: grid_core wheels (${{ matrix.platform.name }})
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      matrix:
+        platform:
+          - { name: linux-x86_64,  runner: ubuntu-latest,  target: x86_64 }
+          - { name: linux-aarch64, runner: ubuntu-latest,  target: aarch64 }
+          - { name: macos-arm64,   runner: macos-14,       target: aarch64 }
+          - { name: macos-x86_64,  runner: macos-13,       target: x86_64 }
+          - { name: windows-x64,   runner: windows-latest, target: x64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: grid_core
+          target: ${{ matrix.platform.target }}
+          args: --release --out dist
+          manylinux: auto
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.platform.name }}
+          path: grid_core/dist
+
+  python-package:
+    name: grid-guardrail sdist+wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pipx run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-package
+          path: dist
+
+  publish:
+    name: publish to PyPI (trusted publishing)
+    needs: [kernel-wheels, python-package]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write      # OIDC: no tokens anywhere
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          skip-existing: true
