@@ -17,7 +17,7 @@ unreachable *by construction*), a hash-chained replayable audit trail, and
 checker-guided repair for the provably mask-unenforceable residue.
 
 ```bash
-pip install grid-guardrail
+pip install "grid-guardrail[kernel]"   # kernel extra: Rust mask kernels (5 platforms)
 ```
 
 ## JSON Schema in one call

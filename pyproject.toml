@@ -37,6 +37,7 @@ dev = [
     "ruff",
 ]
 transformers = ["transformers"]
+kernel = ["grid_core"]  # Rust kernels: 5-platform abi3 wheels on PyPI
 
 [tool.setuptools.packages.find]
 include = ["grid", "grid.*"]
