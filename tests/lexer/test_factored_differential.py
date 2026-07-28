@@ -1,0 +1,313 @@
+"""Factored-scanner differential (0.3.x #4, GRID_PERF_FACTORED_SCANNER).
+
+Two gates, both against build_scanner's eager union subset construction:
+
+1. EXACT equality for the under-budget regime: the bounded materializer must
+   reproduce the eager ScannerDFA field-for-field, state NUMBERING included
+   (the product/subset bijection over the untrimmed components plus identical
+   byte-class partition and discovery order make this an equality, not an
+   isomorphism).
+
+2. Per-prefix observable equality for the lazy facade (budget=0): after every
+   byte of every probe word, (dead?, priority winner, accepts_all, live) must
+   match — state ids are instance-local, the sets are not. Plus
+   scan/finalize EmissionEvent-stream equality (numbering-free by
+   construction), scan_with_last_accept observables, and shortest_lexemes.
+"""
+
+import random
+
+import pytest
+
+from grid.errors import GrammarInvalid
+from grid.grammar import spec
+from grid.grammar.spec import Terminal
+from grid.jsonschema import compile_json_schema
+from grid.lalr.reserve import shortest_lexemes
+from grid.lexer.dfa import DEAD, build_scanner
+from grid.lexer.factored import LazyProductDFA, build_factored_scanner
+from grid.lexer.run import LexerRun, ScanReject, scan
+
+# ---------------------------------------------------------------- corpora
+
+WINDOW_PATTERNS = [
+    "a{3}", "a{2,4}", "a{2,}", "xa{0,2}", "[0-9]{2,3}x", "(ab){2}",
+    "a{1,2}b{1,2}", "[a-z]{1,16}x", '"[a-zA-Z0-9]{0,32}"', "[a-f]{4,64}",
+]
+
+# the untrimmed-component hazard cases: empty byte classes make NFA states
+# reachable but co-inaccessible, so the union DFA holds ZOMBIE states
+# (non-DEAD, live == {}) that a trimmed product would kill one byte early
+ZOMBIE_PATTERNS = [
+    ("Z", "a|[^\\x00-\\xff]b"),
+    ("Z", "z[^\\x00-\\xff]y"),           # empty language: zombie from byte 1
+    ("Z", "x([^\\x00-\\xff]y)?q"),
+]
+
+JSON_SCHEMAS = [
+    {"type": "object",
+     "properties": {"name": {"type": "string", "pattern": "^[a-z]{2,8}$"},
+                    "n": {"type": "integer"}},
+     "required": ["name"]},
+    {"enum": ["red", "green", "blue", "a longer literal", 1, 2.5, True, None]},
+    {"type": "string", "format": "date-time"},
+    {"type": "object",
+     "properties": {"a": {"type": "string", "minLength": 2, "maxLength": 6},
+                    "b": {"type": "array", "items": {"type": "number"}}}},
+]
+
+JSON_PROBES = [
+    b'{"name": "abc", "n": 42}', b'{"name": "a"}', b'{"name": ', b'{"n": -3.5e+7}',
+    b'"red"', b'"gree', b'"2025-01-31T23:59:59Z"', b'"2025-13-99"', b'null', b'tru',
+    b'{"a": "xy", "b": [1, 2.5]}', b'{"a": "x"}', b'[1,', b'"h\xc3\xa9llo"',
+    '"héllo wörld"'.encode(), b'"\xf0\x9f\x8d\x8e"', b'"ab\xc3', b'  {  ', b'0.1e',
+]
+
+
+def _rx_terms(*patterns: str) -> tuple[dict[str, Terminal], tuple[str, ...]]:
+    terms = {
+        f"T{i}": Terminal(name=f"T{i}", pattern=p, is_literal=False,
+                          ignored=False, decl_index=i)
+        for i, p in enumerate(patterns)
+    }
+    return terms, tuple(terms)
+
+
+def _pair(terminals, order):
+    eager = build_scanner(terminals, order, factored=False)
+    lazy = build_factored_scanner(terminals, order, budget=0)
+    assert isinstance(lazy, LazyProductDFA)
+    return eager, lazy
+
+
+def _words(eager, seed: int, max_len: int = 6, cap: int = 350) -> list[bytes]:
+    """Probe corpus: BFS-enumerated live paths of the eager DFA (byte order,
+    so window boundaries m-1/m/n/n+1 all appear), plus seeded mutations and
+    dead-end probes."""
+    words: list[bytes] = []
+    frontier: list[tuple[int, bytes]] = [(eager.start, b"")]
+    for _ in range(max_len):
+        nxt: list[tuple[int, bytes]] = []
+        for st, path in frontier:
+            row = eager.trans[st]
+            taken: set[int] = set()
+            for byte in range(256):
+                ns = row[byte]
+                if ns == DEAD or ns in taken:
+                    continue
+                taken.add(ns)
+                w = path + bytes([byte])
+                words.append(w)
+                nxt.append((ns, w))
+                if len(words) >= cap:
+                    break
+            if len(words) >= cap:
+                break
+        frontier = nxt
+        if len(words) >= cap:
+            break
+    rng = random.Random(seed)
+    for w in list(words[: cap // 2]):
+        if not w:
+            continue
+        m = bytearray(w)
+        m[rng.randrange(len(m))] = rng.randrange(256)
+        words.append(bytes(m))
+        words.append(w + bytes([rng.randrange(256)]))
+    words.extend([b"", b"\x00", b"\xff" * 3, "é9".encode()])
+    return words
+
+
+def compare_prefixes(eager, fact, word: bytes) -> None:
+    es, fs = eager.start, fact.start
+    for i, b in enumerate(word):
+        es = eager.trans[es][b]
+        fs = fact.trans[fs][b]
+        assert (es == DEAD) == (fs == DEAD), (word, i, es, fs)
+        if es == DEAD:
+            return
+        assert eager.accept[es] == fact.accept[fs], (word, i)
+        assert eager.accepts_all[es] == fact.accepts_all[fs], (word, i)
+        assert eager.live[es] == fact.live[fs], (word, i)
+
+
+def compare_swla(eager, fact, word: bytes) -> None:
+    eq, el, ep = eager.scan_with_last_accept(word)
+    fq, fl, fp = fact.scan_with_last_accept(word)
+    assert el == fl, word
+    assert (eq == DEAD) == (fq == DEAD), word
+    assert (ep == -1) == (fp == -1), word
+    if eq != DEAD:
+        assert eager.accepts_all[eq] == fact.accepts_all[fq], word
+        assert eager.live[eq] == fact.live[fq], word
+    if ep != -1:
+        assert eager.accepts_all[ep] == fact.accepts_all[fp], word
+
+
+def compare_streams(eager, fact, buf: bytes) -> None:
+    """scan + finalize equality: EmissionEvent = (candidates frozenset, length)
+    is numbering-independent; ScanReject offsets match because the state
+    graphs are isomorphic."""
+    try:
+        ev_e, rem_e = scan(eager, buf)
+        got_e: tuple = (ev_e, rem_e, LexerRun(remainder=rem_e).finalize(eager))
+    except ScanReject as exc:
+        got_e = ("reject", str(exc))
+    try:
+        ev_f, rem_f = scan(fact, buf)
+        got_f: tuple = (ev_f, rem_f, LexerRun(remainder=rem_f).finalize(fact))
+    except ScanReject as exc:
+        got_f = ("reject", str(exc))
+    assert got_e == got_f, buf
+
+
+def _full_differential(terminals, order, seed: int) -> None:
+    eager, lazy = _pair(terminals, order)
+    assert eager.h_max == lazy.h_max
+    assert eager.accepts_all[0] == lazy.accepts_all[0]
+    assert eager.live[0] == lazy.live[0]
+    for w in _words(eager, seed):
+        compare_prefixes(eager, lazy, w)
+        compare_swla(eager, lazy, w)
+        compare_streams(eager, lazy, w)
+    assert shortest_lexemes(eager, len(order)) == shortest_lexemes(lazy, len(order))
+    # under-budget materialization: EXACT reproduction of the eager artifact
+    # (budget pinned: the CI lazy leg exports GRID_PERF_FACTORED_BUDGET=0)
+    mat = build_factored_scanner(terminals, order, budget=10**9)
+    if isinstance(mat, LazyProductDFA):  # pragma: no cover
+        pytest.fail("materialization aborted under an unbounded budget")
+    assert mat == eager
+    assert mat.h_max == eager.h_max  # h_max is compare=False on the dataclass
+
+
+# ---------------------------------------------------------------- grammars
+
+
+def test_toy_grammar(toy_grammar):
+    _full_differential(toy_grammar.terminals, toy_grammar.terminal_order, seed=1)
+
+
+def test_sql_grammar(sql_grammar):
+    _full_differential(sql_grammar.terminals, sql_grammar.terminal_order, seed=2)
+
+
+def test_wide_grammar(wide_source):
+    g = spec.load(wide_source)
+    _full_differential(g.terminals, g.terminal_order, seed=3)
+
+
+def test_window_terminals():
+    for i, pat in enumerate(WINDOW_PATTERNS):
+        terms, order = _rx_terms(pat)
+        _full_differential(terms, order, seed=10 + i)
+
+
+def test_window_product():
+    terms, order = _rx_terms("[a-z]{1,16}x", "[a-y]{2,8}", "z{0,4}q")
+    _full_differential(terms, order, seed=29)
+
+
+def test_zombie_states():
+    """Empty-class patterns: the union DFA keeps co-inaccessible subsets as
+    live states (non-DEAD, live == {}); the untrimmed product must reproduce
+    them byte-for-byte, forced emissions included."""
+    for i, (name, pat) in enumerate(ZOMBIE_PATTERNS):
+        terms = {
+            name: Terminal(name=name, pattern=pat, is_literal=False,
+                           ignored=False, decl_index=0),
+            "W": Terminal(name="W", pattern="[a-z]", is_literal=False,
+                          ignored=False, decl_index=1),
+        }
+        _full_differential(terms, ("Z", "W"), seed=40 + i)
+    # the pure-zombie prefix: eager scan_state(b"z...") is a live-empty state
+    terms, order = _rx_terms("z[^\\x00-\\xff]y")
+    eager, lazy = _pair(terms, order)
+    st = eager.scan_state(b"z")
+    assert st != DEAD and eager.live[st] == frozenset()
+    fst = lazy.scan_state(b"z")
+    assert fst != DEAD and lazy.live[fst] == frozenset()
+
+
+def test_priority_ties():
+    # literal beats named at equal length; declaration order breaks named ties
+    terms = {
+        "RX": Terminal(name="RX", pattern="a[b]", is_literal=False,
+                       ignored=False, decl_index=0),
+        "LIT": Terminal(name="LIT", pattern="ab", is_literal=True,
+                        ignored=False, decl_index=1),
+        "RX2": Terminal(name="RX2", pattern="ab|cd", is_literal=False,
+                        ignored=False, decl_index=2),
+    }
+    order = ("RX", "LIT", "RX2")
+    eager, lazy = _pair(terms, order)
+    for w in [b"ab", b"cd", b"a", b"abx"]:
+        compare_prefixes(eager, lazy, w)
+    st = lazy.scan_state(b"ab")
+    assert lazy.accepts_all[st] == frozenset({0, 1, 2})
+    assert lazy.accept[st] == 1  # the literal wins
+    assert build_factored_scanner(terms, order, budget=10**9) == eager
+
+
+def test_empty_match_rejected_same_message():
+    for pats in [("a*",), ("a*", "b?"), ("x", "a*")]:
+        terms, order = _rx_terms(*pats)
+        with pytest.raises(GrammarInvalid) as e_eager:
+            build_scanner(terms, order, factored=False)
+        with pytest.raises(GrammarInvalid) as e_fact:
+            build_factored_scanner(terms, order)
+        assert str(e_eager.value) == str(e_fact.value)
+
+
+def test_bad_regex_same_first_error():
+    terms, order = _rx_terms("a{4,2}", "b{9999999}")
+    with pytest.raises(GrammarInvalid) as e_eager:
+        build_scanner(terms, order, factored=False)
+    with pytest.raises(GrammarInvalid) as e_fact:
+        build_factored_scanner(terms, order)
+    assert str(e_eager.value) == str(e_fact.value)
+
+
+def test_jsonschema_corpus():
+    for i, schema in enumerate(JSON_SCHEMAS):
+        src, _rec = compile_json_schema(schema)
+        g = spec.load(src)
+        eager, lazy = _pair(g.terminals, g.terminal_order)
+        for w in _words(eager, seed=60 + i, max_len=5, cap=250) + JSON_PROBES:
+            compare_prefixes(eager, lazy, w)
+            compare_swla(eager, lazy, w)
+            compare_streams(eager, lazy, w)
+        assert (shortest_lexemes(eager, len(g.terminal_order))
+                == shortest_lexemes(lazy, len(g.terminal_order)))
+        mat = build_factored_scanner(g.terminals, g.terminal_order, budget=10**9)
+        assert mat == eager
+        assert mat.h_max == eager.h_max
+
+
+# ---------------------------------------------------------------- regimes
+
+
+def test_flag_dispatch(monkeypatch, sql_grammar):
+    eager = build_scanner(sql_grammar.terminals, sql_grammar.terminal_order, factored=False)
+    monkeypatch.setenv("GRID_PERF_FACTORED_SCANNER", "1")
+    monkeypatch.setenv("GRID_PERF_FACTORED_BUDGET", "1000000")
+    mat = build_scanner(sql_grammar.terminals, sql_grammar.terminal_order)
+    assert mat == eager
+    monkeypatch.setenv("GRID_PERF_FACTORED_BUDGET", "3")
+    lazy = build_scanner(sql_grammar.terminals, sql_grammar.terminal_order)
+    assert isinstance(lazy, LazyProductDFA)
+    monkeypatch.setenv("GRID_PERF_FACTORED_SCANNER", "0")
+    assert build_scanner(sql_grammar.terminals, sql_grammar.terminal_order) == eager
+
+
+def test_materialize_after_demand_walks(sql_grammar):
+    """Budget breach then late materialization on the SAME instance: demand
+    walks reorder state discovery, so numbering may differ from eager — the
+    per-prefix observables must not."""
+    eager, lazy = _pair(sql_grammar.terminals, sql_grammar.terminal_order)
+    for w in [b"select * from users;", b"insert into orders", b"where x = 1"]:
+        lazy.scan_with_last_accept(w)
+    dense = lazy.materialize(10**9)
+    assert dense is not None
+    for w in _words(eager, seed=77, max_len=5, cap=200):
+        compare_prefixes(eager, dense, w)
+        compare_swla(eager, dense, w)

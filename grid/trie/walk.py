@@ -96,6 +96,9 @@ def _unmask(mask: int) -> frozenset[int]:
 
 def _rust_walker(trie: TokenTrie, dfa: ScannerDFA, ignored: frozenset[int],
                  priority: dict[int, tuple[int, int]], lexicons: Lexicons | None):
+    # lazy factored DFAs (GRID_PERF_FACTORED_SCANNER over-budget regime) have
+    # no dense trans/accept arrays — every kernel entry must gate on this
+    assert not getattr(dfa, "lazy", False), "lazy factored DFA reached the kernel walker"
     key = (id(trie), id(dfa), id(lexicons))
     hit = _WALKERS.get(key)
     if hit is not None:
@@ -123,10 +126,12 @@ def _rust_walker(trie: TokenTrie, dfa: ScannerDFA, ignored: frozenset[int],
 
 def make_verdict_kernel(tables, dfa: ScannerDFA, lexicons: Lexicons | None):
     """grid_core.RustVerdicts for (tables, dfa, lexicons), or None when the kernel
-    is unavailable/disabled or the grammar exceeds the 512-terminal bitmask bound
-    (same gate as the walk kernel). SS2 kernel #2 + the LALR simulate behind it."""
+    is unavailable/disabled, the grammar exceeds the 512-terminal bitmask bound
+    (same gate as the walk kernel), or the DFA is a lazy factored facade (no
+    dense arrays to upload). SS2 kernel #2 + the LALR simulate behind it."""
     if (not _USE_RUST or not hasattr(_grid_core, "RustVerdicts")
-            or tables.n_terminals > MAX_KERNEL_TERMINALS):
+            or tables.n_terminals > MAX_KERNEL_TERMINALS
+            or getattr(dfa, "lazy", False)):
         return None
     import numpy as np
 
@@ -272,8 +277,10 @@ def walk(
 
     Dispatches to the grid_core Rust kernel when available (bit-identical by
     tests/trie/test_rust_parity.py); falls back to the Python implementation for
-    grammars with more than 512 terminals or when GRID_NO_RUST=1."""
-    if _USE_RUST and len(priority) <= MAX_KERNEL_TERMINALS:
+    grammars with more than 512 terminals, when GRID_NO_RUST=1, or when the DFA
+    is a lazy factored facade (which materializes product states only along the
+    trie paths this walk actually takes)."""
+    if _USE_RUST and len(priority) <= MAX_KERNEL_TERMINALS and not getattr(dfa, "lazy", False):
         import numpy as np
 
         walker = _rust_walker(trie, dfa, ignored, priority, lexicons)

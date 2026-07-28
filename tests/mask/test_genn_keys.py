@@ -26,6 +26,19 @@ from grid.models.vllm_processor import _GuideRegistry
 
 ROOT = pathlib.Path(__file__).parent.parent.parent
 
+
+@pytest.fixture(autouse=True, scope="module")
+def _eager_scanner():
+    """genN normalization is the object under test, and it requires a dense
+    scanner (lazy factored DFAs bypass genN by design: demand-order state ids
+    are instance-local). Pin the eager regime so the CI lazy leg
+    (GRID_PERF_FACTORED_SCANNER=1, budget 0) doesn't hollow out this module;
+    the lazy raw-key gate is asserted in test_factored_walk_parity.py."""
+    mp = pytest.MonkeyPatch()
+    mp.delenv("GRID_PERF_FACTORED_SCANNER", raising=False)
+    yield
+    mp.undo()
+
 # the verified '1e'/'1E' counterexample grammar: [eE]-exponent numbers make the
 # post-accept suffix bytes v the ONLY separator of the two remainders
 EXPONENT_GRAMMAR = """%start s
