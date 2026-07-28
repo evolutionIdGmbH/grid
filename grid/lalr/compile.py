@@ -47,33 +47,11 @@ class LALRTables:
         return self.terminal_names.index(name)
 
 
-def compile_tables(proj: RoleProjection, identifier_terminals: frozenset[str] = frozenset()) -> LALRTables:
-    g = proj.base
-    if proj.state != "CACHED":
-        raise ValueError("compile_tables requires a CACHED (built) RoleProjection")
-
-    term_names = list(g.terminal_order) + ["$end"]
-    tid = {n: i for i, n in enumerate(term_names)}
-    end_id = tid["$end"]
-
-    nts = sorted({p.lhs for p in proj.productions})
-    nt_names = nts + ["$accept"]
-    ntid = {n: len(term_names) + i for i, n in enumerate(nt_names)}
-
-    def sym_id(s: str) -> int:
-        return tid[s] if (s.isupper() or s.startswith("LIT_")) else ntid[s]
-
-    prods: list[tuple[int, tuple[int, ...]]] = [(ntid["$accept"], (ntid[g.start],))]
-    prod_names: list[str] = [f"$accept -> {g.start}"]
-    for p in proj.productions:
-        prods.append((ntid[p.lhs], tuple(sym_id(s) for s in p.rhs)))
-        prod_names.append(f"{p.lhs} -> {' '.join(p.rhs) or 'eps'}")
-
-    n_term = len(term_names)
-    is_terminal = lambda s: s < n_term  # noqa: E731
-
-    # FIRST sets and nullability over symbol ids
-    first: dict[int, set[int]] = {s: ({s} if is_terminal(s) else set()) for s in range(n_term + len(nt_names))}
+def _first_nullable(
+    prods: list[tuple[int, tuple[int, ...]]], n_symbols: int, n_term: int
+) -> tuple[dict[int, set[int]], set[int]]:
+    """FIRST sets and nullability over symbol ids."""
+    first: dict[int, set[int]] = {s: ({s} if s < n_term else set()) for s in range(n_symbols)}
     nullable: set[int] = set()
     changed = True
     while changed:
@@ -89,6 +67,23 @@ def compile_tables(proj: RoleProjection, identifier_terminals: frozenset[str] = 
                     break
             if len(first[lhs]) != before:
                 changed = True
+    return first, nullable
+
+
+def _build_lr1_merged(
+    prods: list[tuple[int, tuple[int, ...]]],
+    prods_by_lhs: dict[int, list[int]],
+    first: dict[int, set[int]],
+    nullable: set[int],
+    n_term: int,
+    end_id: int,
+) -> tuple[list[dict[int, int]], list[set[tuple[int, int, int]]], int]:
+    """Canonical LR(1) item sets merged by core -> (trans, items, start_state).
+
+    LALR state ids are assigned by first occurrence of each core in the LR(1)
+    BFS order; items are the merged (prod, dot, lookahead) sets per state.
+    """
+    is_terminal = lambda s: s < n_term  # noqa: E731
 
     def first_seq(seq: tuple[int, ...], la: int) -> set[int]:
         out: set[int] = set()
@@ -98,10 +93,6 @@ def compile_tables(proj: RoleProjection, identifier_terminals: frozenset[str] = 
                 return out
         out.add(la)
         return out
-
-    prods_by_lhs: dict[int, list[int]] = {}
-    for i, (lhs, _rhs) in enumerate(prods):
-        prods_by_lhs.setdefault(lhs, []).append(i)
 
     def closure(items: frozenset[tuple[int, int, int]]) -> frozenset[tuple[int, int, int]]:
         out = set(items)
@@ -163,6 +154,53 @@ def compile_tables(proj: RoleProjection, identifier_terminals: frozenset[str] = 
             assert prev is None or prev == merged_of[dst], "core merge produced inconsistent goto"
             merged_trans[m][sym] = merged_of[dst]
 
+    return merged_trans, merged_items, merged_of[0]
+
+
+def compile_tables(proj: RoleProjection, identifier_terminals: frozenset[str] = frozenset()) -> LALRTables:
+    g = proj.base
+    if proj.state != "CACHED":
+        raise ValueError("compile_tables requires a CACHED (built) RoleProjection")
+
+    term_names = list(g.terminal_order) + ["$end"]
+    tid = {n: i for i, n in enumerate(term_names)}
+    end_id = tid["$end"]
+
+    nts = sorted({p.lhs for p in proj.productions})
+    nt_names = nts + ["$accept"]
+    ntid = {n: len(term_names) + i for i, n in enumerate(nt_names)}
+
+    def sym_id(s: str) -> int:
+        return tid[s] if (s.isupper() or s.startswith("LIT_")) else ntid[s]
+
+    prods: list[tuple[int, tuple[int, ...]]] = [(ntid["$accept"], (ntid[g.start],))]
+    prod_names: list[str] = [f"$accept -> {g.start}"]
+    for p in proj.productions:
+        prods.append((ntid[p.lhs], tuple(sym_id(s) for s in p.rhs)))
+        prod_names.append(f"{p.lhs} -> {' '.join(p.rhs) or 'eps'}")
+
+    n_term = len(term_names)
+    is_terminal = lambda s: s < n_term  # noqa: E731
+
+    first, nullable = _first_nullable(prods, n_term + len(nt_names), n_term)
+
+    prods_by_lhs: dict[int, list[int]] = {}
+    for i, (lhs, _rhs) in enumerate(prods):
+        prods_by_lhs.setdefault(lhs, []).append(i)
+
+    trans, merged_items, start_state = _build_lr1_merged(
+        prods, prods_by_lhs, first, nullable, n_term, end_id
+    )
+    n_states = len(trans)
+    state_closures = [
+        frozenset((p, d) for (p, d, _la) in merged_items[m]) for m in range(n_states)
+    ]
+
+    def reduces(m: int):
+        for (p, d, la) in merged_items[m]:
+            if d == len(prods[p][1]):
+                yield p, la
+
     action: list[dict[int, tuple[int, int]]] = [{} for _ in range(n_states)]
     goto_tbl: list[dict[int, int]] = [{} for _ in range(n_states)]
     conflicts: list[tuple[int, str, str, str]] = []
@@ -184,17 +222,16 @@ def compile_tables(proj: RoleProjection, identifier_terminals: frozenset[str] = 
         action[st][t] = act
 
     for m in range(n_states):
-        for sym, dst in merged_trans[m].items():
+        for sym, dst in trans[m].items():
             if is_terminal(sym):
                 set_action(m, sym, (SHIFT, dst))
             else:
                 goto_tbl[m][sym] = dst
-        for (p, d, la) in merged_items[m]:
-            if d == len(prods[p][1]):
-                if p == 0:
-                    set_action(m, end_id, (ACCEPT, 0))
-                else:
-                    set_action(m, la, (REDUCE, p))
+        for p, la in reduces(m):
+            if p == 0:
+                set_action(m, end_id, (ACCEPT, 0))
+            else:
+                set_action(m, la, (REDUCE, p))
 
     if conflicts:
         raise LALRConflictError(sorted(set(conflicts)))
@@ -211,8 +248,8 @@ def compile_tables(proj: RoleProjection, identifier_terminals: frozenset[str] = 
         prod_names=tuple(prod_names),
         action=tuple(action),
         goto=tuple(goto_tbl),
-        state_items=tuple(frozenset((p, d) for (p, d, _la) in merged_items[m]) for m in range(n_states)),
-        start_state=merged_of[0],
+        state_items=tuple(state_closures),
+        start_state=start_state,
         fingerprint=f"{g.fingerprint}:{proj.role_shape_hash}",
         ignored_terminal_ids=ignored_ids,
         literal_terminal_ids=literal_ids,
