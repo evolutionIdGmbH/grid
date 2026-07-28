@@ -262,6 +262,24 @@ class _NFABuilder:
 DEAD = -1
 
 
+def _live_fixpoint(trans: list[list[int]], accepts_all: list[frozenset[int]]) -> list[frozenset[int]]:
+    """live[s] = union of accepts_all over states reachable from s (incl. s itself),
+    computed by one reverse-topological fixpoint over the DFA graph."""
+    n = len(trans)
+    succ: list[frozenset[int]] = [frozenset(t for t in row if t != DEAD) for row in trans]
+    live_sets: list[set[int]] = [set(acc) for acc in accepts_all]
+    changed = True
+    while changed:
+        changed = False
+        for s in range(n):
+            before = len(live_sets[s])
+            for nx in succ[s]:
+                live_sets[s] |= live_sets[nx]
+            if len(live_sets[s]) != before:
+                changed = True
+    return [frozenset(s) for s in live_sets]
+
+
 @dataclass(frozen=True)
 class ScannerDFA:
     """Combined byte DFA over all terminals of one grammar (immutable, shared).
@@ -437,22 +455,7 @@ def build_scanner(terminals: dict[str, Terminal], terminal_order: tuple[str, ...
 
     accepts = [min(acc, key=lambda t: prio[t]) if acc else -1 for acc in accepts_all]
 
-    # live[s] = union of accepts_all over states reachable from s (incl. s itself),
-    # computed by one reverse-topological fixpoint over the DFA graph.
-    n = len(order)
-    succ: list[frozenset[int]] = [frozenset(t for t in row if t != DEAD) for row in trans]
-    live_sets: list[set[int]] = [set(acc) for acc in accepts_all]
-    changed = True
-    while changed:
-        changed = False
-        for s in range(n):
-            before = len(live_sets[s])
-            for nx in succ[s]:
-                live_sets[s] |= live_sets[nx]
-            if len(live_sets[s]) != before:
-                changed = True
-
-    lives = [frozenset(s) for s in live_sets]
+    lives = _live_fixpoint(trans, accepts_all)
     h_max = max((len(s) for s in lives), default=0)
     return ScannerDFA(
         start=0,
