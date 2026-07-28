@@ -35,6 +35,21 @@ WINDOW_PATTERNS = [
     "a{1,2}b{1,2}", "[a-z]{1,16}x", '"[a-zA-Z0-9]{0,32}"', "[a-f]{4,64}",
 ]
 
+# m-1/m/n/n+1 boundary probes: deeper than the BFS word-corpus length cap
+WINDOW_PROBES: dict[str, list[bytes]] = {
+    "a{3}": [b"aa", b"aaa", b"aaaa"],
+    "a{2,4}": [b"a", b"aa", b"aaaa", b"aaaaa"],
+    "a{2,}": [b"a", b"aa", b"a" * 40],
+    "xa{0,2}": [b"x", b"xa", b"xaa", b"xaaa"],
+    "[0-9]{2,3}x": [b"1x", b"12x", b"123x", b"1234x"],
+    "(ab){2}": [b"ab", b"abab", b"ababab"],
+    "a{1,2}b{1,2}": [b"ab", b"aabb", b"aaabb"],
+    "[a-z]{1,16}x": [b"a" * 15 + b"x", b"a" * 16 + b"x", b"a" * 17 + b"x", b"z" * 16],
+    '"[a-zA-Z0-9]{0,32}"': [b'""', b'"' + b"Q" * 31 + b'"', b'"' + b"Q" * 32 + b'"',
+                            b'"' + b"Q" * 33 + b'"'],
+    "[a-f]{4,64}": [b"a" * 3, b"a" * 4, b"f" * 63, b"f" * 64, b"f" * 65],
+}
+
 # the untrimmed-component hazard cases: empty byte classes make NFA states
 # reachable but co-inaccessible, so the union DFA holds ZOMBIE states
 # (non-DEAD, live == {}) that a trimmed product would kill one byte early
@@ -200,6 +215,11 @@ def test_window_terminals():
     for i, pat in enumerate(WINDOW_PATTERNS):
         terms, order = _rx_terms(pat)
         _full_differential(terms, order, seed=10 + i)
+        eager, lazy = _pair(terms, order)
+        for w in WINDOW_PROBES[pat]:
+            compare_prefixes(eager, lazy, w)
+            compare_swla(eager, lazy, w)
+            compare_streams(eager, lazy, w)
 
 
 def test_window_product():
