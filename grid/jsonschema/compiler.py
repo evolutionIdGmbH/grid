@@ -1419,16 +1419,24 @@ class SchemaCompiler:
 
 
 def compile_schema(schema: Any, strict: bool = False,
-                   *, hashcons: frozenset[str] | None = None
+                   *, hashcons: frozenset[str] | None = None,
+                   unify_string_values: bool = False
                    ) -> tuple[str, set[str]]:
     """-> (.grid source, recorded-unenforced set). Raises Unsupported.
 
-    hashcons: enabled GRID_PERF_HASHCONS components (None = read the env)."""
+    hashcons: enabled GRID_PERF_HASHCONS components (None = read the env).
+    unify_string_values: LALR-conflict retry knob, default OFF so schemas
+    that compile today never run the new path. Callers that build tables
+    compile normally first; if compile_tables raises LALRConflictError,
+    retry ONCE with this enabled — normalize then unifies overlapping
+    per-branch string values into one shared rule (widening, recorded as
+    branch-string-values-unified; strict mode declares Unsupported)."""
     if hashcons is None:
         hashcons = _hashcons_components()
     shared: dict[int, Any] | None = {} if "norm" in hashcons else None
     try:
-        normalized = normalize(schema, hashcons=hashcons, _shared_out=shared)
+        normalized = normalize(schema, hashcons=hashcons, _shared_out=shared,
+                               unify_string_values=unify_string_values)
     except RecursionError:
         if not hashcons:
             raise

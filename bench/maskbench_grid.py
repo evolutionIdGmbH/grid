@@ -73,9 +73,10 @@ class GridEngine:
     def compile_grammar(self, schema: dict) -> None:
         from json_schema_to_grid import compile_schema as _compile
 
-        def compile_schema(s):
-            return _compile(s, strict=self.strict)
+        def compile_schema(s, **kw):
+            return _compile(s, strict=self.strict, **kw)
 
+        from grid.errors import LALRConflictError
         from grid.grammar import spec
         from grid.grammar.projection import RoleProjection
         from grid.guide import GridGuide
@@ -85,7 +86,18 @@ class GridEngine:
         src, ignored = compile_schema(schema)
         grammar = spec.load(src)
         proj = RoleProjection.full(grammar).build()
-        tables = compile_tables(proj)
+        try:
+            tables = compile_tables(proj)
+        except LALRConflictError:
+            # conflict retry (once): re-normalize with branch string-value
+            # unification — overlapping per-branch string values collapse to
+            # one shared rule (widening, recorded/declared by mode). Schemas
+            # whose first build succeeds never reach this path; residual
+            # conflicts propagate as the honest compile error.
+            src, ignored = compile_schema(schema, unify_string_values=True)
+            grammar = spec.load(src)
+            proj = RoleProjection.full(grammar).build()
+            tables = compile_tables(proj)
         dfa = build_scanner(grammar.terminals, grammar.terminal_order)
         self.guide = GridGuide(tables=tables, dfa=dfa, trie=self.trie, adapter=self.adapter)
         self.extra = {
