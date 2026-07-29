@@ -4,6 +4,38 @@ Versions in the 0.2.x line are **correctness-only** (the coverage epoch,
 DESIGN-JSON-COVERAGE.md): error metrics are the headline; timings are
 recorded, not optimized (kernel frozen at v7). Speed work is the 0.3.x epoch.
 
+## Unreleased
+
+0.3.x flag disposition (E3): the epoch's measured winners become the
+shipped defaults, gated on the v0.3.0 full-corpus run
+(bench/RESULTS-jsonschemabench-v0.3.0rc2.md; outcome movement vs v0.2.5
+fully adjudicated there).
+
+- Defaults flipped ON, each with an env kill switch restoring the legacy
+  path: `GRID_PERF_FACTORED_SCANNER` (`=0` restores the eager union
+  builder, kept as the exactness oracle), `GRID_PERF_LALR_DP` (`=0`
+  restores canonical `lr1_merge`, kept as the construction-independent
+  oracle), `GRID_PERF_HASHCONS` (unset now means `norm,dedupe` — the exact
+  measured configuration; `=0` disables, comma lists still select
+  components). Value grammars are unchanged; only unset defaults moved.
+- Deleted: `GRID_PERF_NFA_LIVE` and the legacy live-set implementations it
+  selected — `_live_fixpoint` + verify branch (dfa.py), `_graph_co_acc` /
+  `_live_mode` + verify branch (factored.py) — sanctioned by the 11.3k
+  zero-divergence verify pass on v0.3.0rc1. Live sets now have exactly one
+  implementation (NFA terminal-reach); the factored component memo key
+  drops its mode dimension `(pattern, is_literal, live_mode)` ->
+  `(pattern, is_literal)`. Independent gates kept: forward-BFS oracle in
+  tests/lexer/test_live_sets.py + the eager-vs-factored byte-identical
+  differential.
+- `GRID_PERF_ARTIFACT_STORE` stays default-off by design: BAKEOFF F2
+  measured +5-7ms cold schema_compile per fast build; default-on is
+  deferred to a serving-epoch warm-hit measurement.
+- Default-visible outcome changes (all adjudicated in the rc2 results):
+  5 former 120s-caps now compile, the 4-schema frontend family declares
+  Unsupported in 0.03-0.5s, wp_105 compiles via the LALR-conflict retry;
+  residual known tails: substring-union scanner family x5, helm-testsuite,
+  o27148 (retry pushes it over the limit).
+
 ## 0.3.0 - 2026-07-30
 
 The performance epoch: compile-time (TTFM) tail work, selected by measured

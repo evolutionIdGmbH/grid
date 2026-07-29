@@ -116,3 +116,26 @@ Footnote: records with running != null and no timeout_s/rc marker are
 incomplete, not fast; profile_phases.py now marks crashed children (rc),
 requeues unmarked partials on resume, and reports incomplete records
 explicitly.
+
+## Postscript: flag disposition (E3, post-v0.3.0, wave A)
+
+Executed against the rc2 full-corpus run (tmp/mb-grid-v030rc2, 11,306
+schemas, GRID_PERF_HASHCONS=norm,dedupe GRID_PERF_LALR_DP=1
+GRID_PERF_FACTORED_SCANNER=1; adjudicated in
+bench/RESULTS-jsonschemabench-v0.3.0rc2.md). This section records outcomes;
+the tables above are history and stand as written.
+
+| flag | verdict executed |
+|---|---|
+| NFA_LIVE | DELETED (flag + `_live_fixpoint` + `_graph_co_acc`/`_live_mode` + verify branches); sanction: the 11.3k zero-divergence verify pass on rc1. Surviving gates: test-local forward-BFS oracle (test_live_sets.py), eager-vs-factored byte-identical differential. Component memo key loses its mode dimension. |
+| FACTORED_SCANNER | default ON; `=0` kill switch kept — the eager union builder remains the factored path's exactness oracle |
+| LALR_DP | default ON; `=0` kill switch kept — lr1_merge remains the construction-independent oracle (helm residual work wants the A/B) |
+| HASHCONS | default `norm,dedupe` (the measured configuration, pinned by name — a future component needs its own default decision); `=0`/comma-list grammar kept |
+| ARTIFACT_STORE | stays default-off per F2 (+5-7ms cold schema_compile per fast build); revisit with a warm-hit measurement in the serving epoch |
+| FACTORED_BUDGET | unchanged: documented tuning knob (20k), not a flag |
+
+Serving smoke at the new defaults (replaying valid corpus instances
+byte-token-wise to COMPLETE): dense regime OK; naturally-over-budget
+schema (Github_medium o33033) served 1091 tokens through the
+LazyProductDFA facade with the kernel- and genN-exclusion gates asserted
+live, forced-lazy == natural trajectories.
