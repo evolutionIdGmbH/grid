@@ -2,9 +2,11 @@
 
 GRID_PERF_FACTORED_SCANNER=1 replaces build_scanner's eager union subset
 construction. One small byte DFA is built per terminal — memoized process-wide
-by (pattern source, is_literal), the identity the schema compiler already
-dedupes terminals on — and the scanner state becomes a sparse tuple of
-(terminal id, component state) pairs, materialized on demand.
+by (pattern source, is_literal, live mode): the first two are the identity the
+schema compiler already dedupes terminals on; live mode is in the key so a
+mode flip mid-process never serves the other path's build — and the scanner
+state becomes a sparse tuple of (terminal id, component state) pairs,
+materialized on demand.
 
 Components are NOT trimmed: a component state that can no longer reach its
 accept stays in the tuple until its subset dies. The sub-NFAs of the combined
@@ -26,11 +28,14 @@ while =0 falls back to a reverse BFS over the component DFA graph and
 Over GRID_PERF_FACTORED_BUDGET product states the LazyProductDFA facade is
 returned instead: it serves the ScannerDFA protocol with transitions
 materialized on demand — token-length-bounded along trie paths, so blowup
-states are never built. Lazy DFAs are gated off the Rust kernel
-(trie/walk.py), off genN cache keys (mask/producer.py: demand-order state ids
-are instance-local, and T2 is shared across template instances), and off the
-full-enumeration reserve BFS (lalr/reserve.py dispatches to
-``shortest_lexemes_factored``).
+states are never built. The budget bounds only the PRODUCT: each per-terminal
+component is still built by eager subset construction, so a single
+pathological terminal (the substring-union family — see BAKEOFF.md residual
+tail) can dominate scanner build time before the budget is ever consulted.
+Lazy DFAs are gated off the Rust kernel (trie/walk.py), off genN cache keys
+(mask/producer.py: demand-order state ids are instance-local, and T2 is
+shared across template instances), and off the full-enumeration reserve BFS
+(lalr/reserve.py dispatches to ``shortest_lexemes_factored``).
 """
 
 from __future__ import annotations
