@@ -40,10 +40,10 @@ shared across template instances), and off the full-enumeration reserve BFS
 
 from __future__ import annotations
 
-import os
 import threading
 from dataclasses import dataclass
 
+from grid import perf_flags
 from grid.errors import GrammarInvalid
 from grid.grammar.spec import Terminal
 from grid.lexer.dfa import (
@@ -88,10 +88,7 @@ def _live_mode() -> str:
     (dfa._terminal_reach, the GRID_PERF_NFA_LIVE default path). All three are
     provably equal (per-component Rabin-Scott, empty byte classes skipped),
     so cached components are interchangeable across modes."""
-    raw = os.environ.get("GRID_PERF_NFA_LIVE", "1")
-    if raw == "0":
-        return "0"
-    return "verify" if raw == "verify" else "nfa"
+    return perf_flags.nfa_live_mode()
 
 
 def _graph_co_acc(trans: list[list[int]], accepting: list[bool]) -> list[bool]:
@@ -429,7 +426,7 @@ def build_factored_scanner(
         raise GrammarInvalid(f"terminals match the empty string (scanner would loop): {bad}")
     prio = {tid: terminals[name].priority for tid, name in enumerate(terminal_order)}
     if budget is None:
-        budget = int(os.environ.get("GRID_PERF_FACTORED_BUDGET", str(_DEFAULT_BUDGET)))
+        budget = perf_flags.factored_budget(_DEFAULT_BUDGET)
     product = LazyProductDFA(comps, prio)
     dense = product.materialize(budget)
     return dense if dense is not None else product

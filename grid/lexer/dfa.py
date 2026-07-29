@@ -20,10 +20,10 @@ in identifiers enters through byte classes (e.g. [\\x80-\\xff]).
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from grid import perf_flags
 from grid.errors import GrammarInvalid
 from grid.grammar.spec import Terminal
 
@@ -402,12 +402,12 @@ def build_scanner(
     co-accessibility from the same NFA terminal-reach (see factored.py). The
     default path below is byte-identical with both flags off."""
     if factored is None:
-        factored = os.environ.get("GRID_PERF_FACTORED_SCANNER", "0") == "1"
+        factored = perf_flags.factored_scanner_enabled()
     if factored:
         from grid.lexer.factored import build_factored_scanner
 
         return build_factored_scanner(terminals, terminal_order)
-    mode = os.environ.get("GRID_PERF_NFA_LIVE", "1")
+    mode = perf_flags.nfa_live_mode()
     b = _NFABuilder()
     root = b.new()
     accept_terminal: dict[int, int] = {}  # NFA accept state -> terminal id
