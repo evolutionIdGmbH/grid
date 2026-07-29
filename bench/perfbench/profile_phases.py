@@ -105,8 +105,15 @@ def child(schema_file: str, out_file: str) -> None:
 
 
 def schema_path(schema_id: str) -> str:
-    split, name = schema_id.split("---", 1)
-    return os.path.join(DATA_DIR, split, name + ".json")
+    if "---" in schema_id:
+        split, name = schema_id.split("---", 1)
+        p = os.path.join(DATA_DIR, split, name + ".json")
+        if os.path.exists(p):
+            return p
+    # remaining ids (BFCL_*, JME_*, ...) are maskbench-layout files named by
+    # their full id (same fallback as diff_hashcons/diff_scanner_digest)
+    return os.path.join(DATA_DIR, "..", "maskbench", "data",
+                        schema_id + ".json")
 
 
 def parent(groups: list[str], jobs: int, out_dir: str) -> None:
