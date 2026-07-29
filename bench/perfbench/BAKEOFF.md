@@ -58,3 +58,25 @@ TTFM p99: 4.37s -> sub-second everywhere except ~6 known schemas
 remains at p99+). Median: unchanged (by design this epoch). The 6 residual
 schemas and the spec_load/direct-emission median work define the follow-on
 wave (CANDIDATES.md ids 1, 10, 13, 16, 19, 20).
+
+## Combined run (integration/0.3.x @ a06b672: HASHCONS + LALR_DP + FACTORED, NFA default)
+
+The 16 baseline caps: **5 compiled** (o79409 1.4s, o83133 5.8s, o83132 88.9s,
+strmprivacy BatchJob 11.9s / DataConnector 13.5s), **5 terminate
+deterministically** (frontend family: 4 declared-Unsupported in
+schema_compile at ~0s; wp_105 reaches LALR in 0.07s then LALRConflictError
+on identical-RHS twin rules - a fixable dedupe gap, tracked), **6 still
+time out** (substring-union scanner family x5 + helm LALR).
+
+Tail (>5s baseline, both complete, n=24): **1016s -> 48s (21.3x)**.
+Fast schemas (<1s baseline, n=18): ON/OFF median 1.12, p90 1.48.
+
+Interaction findings vs the per-candidate legs (review-wave inputs):
+1. o83132/o83133 regress under COMBINED vs FACTORED-alone (0.0s -> 88.9s /
+   5.8s): hashcons flag-on changes emitted grammar text, which appears to
+   defeat the factored fast path on these schemas. Root-cause in review.
+2. Fast-schema median overhead 1.12 vs ~0.94-0.99 for each candidate alone:
+   composition overhead (digesting? dispatch? machine noise at n=18) is
+   nominally over the 10% p50 bound - needs attribution before v0.3.0.
+3. wp_105 twin-rule reduce-reduce (r279_v/r2048_v identical RHS) - dedupe
+   should merge; likely turns wp_105 into a full compile.
