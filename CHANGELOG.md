@@ -36,6 +36,20 @@ fully adjudicated there).
   residual known tails: substring-union scanner family x5, helm-testsuite,
   o27148 (retry pushes it over the limit).
 
+Scanner-build dedup (E2, structural, zero behavior change): the
+subset-construction core that build_scanner and factored._build_component
+ran as duplicated code now lives once in grid/lexer/subset.py (eps-closure
+memoization, byte-class refinement, per-class edge index, FIFO subset loop);
+the regex parser and NFA layers split into grid/lexer/rx.py + nfa.py, with
+dfa.py kept as the stable import facade (ScannerDFA, build_scanner, and the
+historically-imported privates re-exported — importers unchanged). Gated by
+the new bench/perfbench/diff_scanner_digest.py byte-identity harness:
+241-unit corpus (stratified_200 + ttfm_capped + in-repo floor), digests of
+both flag arms plus every per-terminal component bit-equal pre/post,
+GrammarInvalid message text included. factored.py gains the type-only
+ScannerComponent Protocol — the seam a COUNTING_WINDOWS component type
+plugs into beside TerminalDFA without touching the product.
+
 ## 0.3.0 - 2026-07-30
 
 The performance epoch: compile-time (TTFM) tail work, selected by measured
