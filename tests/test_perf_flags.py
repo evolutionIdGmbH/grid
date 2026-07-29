@@ -2,11 +2,12 @@
 
 Three gates:
 
-- Grammar oracle: for every flag, the reader must agree with the verbatim
-  pre-migration inline expression (copied here as the oracle) on every raw
-  value in the grammar, including the nasty ones ("" enables ARTIFACT_STORE
-  via != "0" but leaves FACTORED_SCANNER off via == "1"; "true"/"2" are OFF
-  for == "1" flags; NFA_LIVE unset defaults ON).
+- Grammar oracle: for every flag, the reader must agree with the inline
+  expression copied here as the oracle (value grammars are the verbatim
+  pre-migration ones; unset defaults reflect the E3 flag disposition) on
+  every raw value in the grammar, including the nasty ones ("" enables
+  ARTIFACT_STORE via != "0" but disables FACTORED_SCANNER via == "1";
+  "true"/"2" are OFF for == "1" flags; NFA_LIVE unset defaults ON).
 - Call-time read: two calls with an env flip between them see different
   values — kills any future lru_cache / module-level snapshot.
 - Leaf import: ``import grid.perf_flags`` pulls no other grid submodule
@@ -75,11 +76,17 @@ def test_artifact_store_empty_string_enables(monkeypatch):
 @pytest.mark.parametrize("raw", RAW_VALUES)
 def test_factored_scanner_oracle(monkeypatch, raw):
     _setenv(monkeypatch, "GRID_PERF_FACTORED_SCANNER", raw)
-    # verbatim: grid/lexer/dfa.py build_scanner pre-migration
-    oracle = os.environ.get("GRID_PERF_FACTORED_SCANNER", "0") == "1"
+    # == "1" value grammar unchanged; unset default flipped to ON (E3
+    # disposition, sanctioned by the v0.3.0 full-corpus run)
+    oracle = os.environ.get("GRID_PERF_FACTORED_SCANNER", "1") == "1"
     assert perf_flags.factored_scanner_enabled() == oracle
-    if raw in ("", "true", "2", "00"):
+    if raw in ("", "true", "2", "00", "0"):
         assert perf_flags.factored_scanner_enabled() is False
+
+
+def test_factored_scanner_default_is_on(monkeypatch):
+    monkeypatch.delenv("GRID_PERF_FACTORED_SCANNER", raising=False)
+    assert perf_flags.factored_scanner_enabled() is True
 
 
 @pytest.mark.parametrize("raw", RAW_VALUES)

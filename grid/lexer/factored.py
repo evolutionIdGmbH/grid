@@ -1,7 +1,9 @@
 """Factored scanner: per-terminal DFAs + lazy product combination (0.3.x #4).
 
-GRID_PERF_FACTORED_SCANNER=1 replaces build_scanner's eager union subset
-construction. One small byte DFA is built per terminal — memoized process-wide
+This path is the default behind dfa.build_scanner since the v0.3.0
+full-corpus run; GRID_PERF_FACTORED_SCANNER=0 restores the eager union
+subset construction (retained as the exactness oracle — see materialize).
+One small byte DFA is built per terminal — memoized process-wide
 by (pattern source, is_literal, live mode): the first two are the identity the
 schema compiler already dedupes terminals on; live mode is in the key so a
 mode flip mid-process never serves the other path's build — and the scanner
@@ -411,7 +413,8 @@ def build_factored_scanner(
     terminal_order: tuple[str, ...],
     budget: int | None = None,
 ) -> ScannerDFA | LazyProductDFA:
-    """The GRID_PERF_FACTORED_SCANNER=1 path behind dfa.build_scanner."""
+    """The default (GRID_PERF_FACTORED_SCANNER, "0" = legacy eager) path
+    behind dfa.build_scanner."""
     # components in terminal_order: the first GrammarInvalid from a bad regex
     # is raised for the same terminal as the eager path
     live_mode = _live_mode()

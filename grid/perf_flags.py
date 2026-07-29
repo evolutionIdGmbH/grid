@@ -15,7 +15,10 @@ Flag table:
                                                             off; any other
                                                             value, incl. "",
                                                             enables)
-    GRID_PERF_FACTORED_SCANNER  factored_scanner_enabled()  == "1"
+    GRID_PERF_FACTORED_SCANNER  factored_scanner_enabled()  == "1" (default
+                                                            on: unset = "1";
+                                                            "0" = legacy
+                                                            eager builder)
     GRID_PERF_NFA_LIVE          nfa_live_mode()             "0" | "verify" |
                                                             "nfa" (default;
                                                             all other values
@@ -57,9 +60,12 @@ def artifact_store_enabled() -> bool:
 
 
 def factored_scanner_enabled() -> bool:
-    """GRID_PERF_FACTORED_SCANNER=1: per-terminal-DFA product scanner path
-    (grid/lexer/factored.py) behind dfa.build_scanner. Only "1" enables."""
-    return os.environ.get("GRID_PERF_FACTORED_SCANNER", "0") == "1"
+    """GRID_PERF_FACTORED_SCANNER: per-terminal-DFA product scanner path
+    (grid/lexer/factored.py) behind dfa.build_scanner. Default ON since the
+    v0.3.0 full-corpus run (tmp/mb-grid-v030rc2); only "1" (now the unset
+    default) enables — "0" or any other value is the kill switch restoring
+    the eager union builder."""
+    return os.environ.get("GRID_PERF_FACTORED_SCANNER", "1") == "1"
 
 
 def nfa_live_mode() -> str:

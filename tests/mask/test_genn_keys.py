@@ -31,11 +31,12 @@ ROOT = pathlib.Path(__file__).parent.parent.parent
 def _eager_scanner():
     """genN normalization is the object under test, and it requires a dense
     scanner (lazy factored DFAs bypass genN by design: demand-order state ids
-    are instance-local). Pin the eager regime so the CI lazy leg
-    (GRID_PERF_FACTORED_SCANNER=1, budget 0) doesn't hollow out this module;
-    the lazy raw-key gate is asserted in test_factored_walk_parity.py."""
+    are instance-local). Pin the eager regime (FACTORED_SCANNER is default-on
+    now, so unset would mean factored) so the CI lazy leg (budget 0) doesn't
+    hollow out this module; the lazy raw-key gate is asserted in
+    test_factored_walk_parity.py."""
     mp = pytest.MonkeyPatch()
-    mp.delenv("GRID_PERF_FACTORED_SCANNER", raising=False)
+    mp.setenv("GRID_PERF_FACTORED_SCANNER", "0")
     yield
     mp.undo()
 

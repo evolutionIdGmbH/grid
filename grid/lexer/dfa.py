@@ -394,13 +394,16 @@ def build_scanner(
 ) -> "ScannerDFA | LazyProductDFA":
     """Combined NFA over all terminals -> subset-construction byte DFA.
 
-    ``factored`` (None = read GRID_PERF_FACTORED_SCANNER) selects the 0.3.x
-    per-terminal-DFA product path (grid/lexer/factored.py), which may return a
-    ScannerDFA-protocol lazy facade instead of an eager ScannerDFA when the
-    product exceeds its state budget. Both paths honor GRID_PERF_NFA_LIVE for
-    live-set computation: the factored path derives each component's
-    co-accessibility from the same NFA terminal-reach (see factored.py). The
-    default path below is byte-identical with both flags off."""
+    ``factored`` (None = read GRID_PERF_FACTORED_SCANNER, default ON since
+    the v0.3.0 full-corpus run) selects the per-terminal-DFA product path
+    (grid/lexer/factored.py), which may return a ScannerDFA-protocol lazy
+    facade instead of an eager ScannerDFA when the product exceeds its state
+    budget. GRID_PERF_FACTORED_SCANNER=0 restores the eager union builder
+    below — kept as the factored path's exactness oracle (LazyProductDFA.
+    materialize reproduces it exactly, numbering included). Both paths honor
+    GRID_PERF_NFA_LIVE for live-set computation: the factored path derives
+    each component's co-accessibility from the same NFA terminal-reach (see
+    factored.py)."""
     if factored is None:
         factored = perf_flags.factored_scanner_enabled()
     if factored:

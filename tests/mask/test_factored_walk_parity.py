@@ -118,7 +118,7 @@ def test_guide_end_to_end_lockstep(request, monkeypatch, source_fixture, tokens_
     source = request.getfixturevalue(f"{source_fixture}_source")
     tokenizer = request.getfixturevalue(f"{source_fixture}_tokenizer")
 
-    monkeypatch.delenv("GRID_PERF_FACTORED_SCANNER", raising=False)
+    monkeypatch.setenv("GRID_PERF_FACTORED_SCANNER", "0")  # default is on now
     g_off = build_guide(source, MockTokenizer(extra_tokens=tokenizer.extra_tokens))
     monkeypatch.setenv("GRID_PERF_FACTORED_SCANNER", "1")
     monkeypatch.setenv("GRID_PERF_FACTORED_BUDGET", "0")
