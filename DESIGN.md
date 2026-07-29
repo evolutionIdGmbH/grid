@@ -74,6 +74,8 @@ Two implementations of the same semantics, bound by differential tests:
 ```
 grid/
   protocols.py          # tool-family protocol shapes (normative definitions)
+  perf_flags.py         # GRID_PERF_* env-flag table: one call-time reader per flag
+                        # (single source of truth; grammars tested in tests/test_perf_flags.py)
   guide.py              # GridGuide, GridState  (Guide protocol implementation)
   processors.py         # GridLogitsProcessor   (tool-family logits-processor shape)
   generate/
