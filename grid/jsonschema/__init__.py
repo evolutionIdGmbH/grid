@@ -8,6 +8,8 @@ enforced by the grammar (default mode records them; strict=True raises
 Unsupported instead — the llguidance-style declared-non-support convention).
 """
 
+import os
+
 from grid.jsonschema.compiler import Unsupported, compile_schema
 
 __all__ = ["compile_json_schema", "Unsupported"]
@@ -15,6 +17,16 @@ __all__ = ["compile_json_schema", "Unsupported"]
 
 def compile_json_schema(schema, strict: bool = False):
     """Compile a JSON Schema into .grid grammar source."""
+    # Env pre-check BEFORE the serving import: grid.serving pulls the
+    # journal/prefetch/projection/statecharts/yaml chain (~3-7ms per
+    # process), which flag-off fast builds must not pay — this uniform
+    # per-process cost was the entire fast-schema p50 1.12 regression in
+    # the combined bake-off. Matches artifact_store's != "0" grammar
+    # exactly: it only short-circuits when the flag is unset or "0", in
+    # which case enabled() is False anyway.
+    if os.environ.get("GRID_PERF_ARTIFACT_STORE", "0") == "0":
+        return compile_schema(schema, strict=strict)
+
     from grid.serving import artifact_store
 
     if not artifact_store.enabled():
