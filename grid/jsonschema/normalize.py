@@ -31,8 +31,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from typing import Any
+
+from grid import perf_flags
 
 try:
     import jsonschema as _js
@@ -90,22 +91,11 @@ _UNIFY_STRING_VALUES = False
 
 # ---------------------------------------------------- structural hash-consing
 
-# 'rulefor' (structural rule_for memo) is planned but NOT implemented; the
-# parser must not advertise components that silently no-op
-_HASHCONS_COMPONENTS = frozenset({"norm", "dedupe"})
-
-
-def _hashcons_components(value: str | None = None) -> frozenset[str]:
-    """GRID_PERF_HASHCONS -> enabled component set ('' / '0' = none,
-    '1' / 'all' = every component, else a comma list; unknown names ignored)."""
-    if value is None:
-        value = os.environ.get("GRID_PERF_HASHCONS", "")
-    value = value.strip()
-    if value in ("", "0"):
-        return frozenset()
-    if value in ("1", "all"):
-        return _HASHCONS_COMPONENTS
-    return frozenset(p.strip() for p in value.split(",")) & _HASHCONS_COMPONENTS
+# GRID_PERF_HASHCONS parsing lives in grid/perf_flags.py; these back-compat
+# aliases keep grid/jsonschema/compiler.py and the hashcons differential test
+# importing from here unchanged.
+_HASHCONS_COMPONENTS = perf_flags.HASHCONS_COMPONENTS
+_hashcons_components = perf_flags.hashcons_components
 
 
 class _HashconsMemo:
@@ -869,8 +859,7 @@ def normalize(schema: Any, root: Any = None,
     _UNIFY_STRING_VALUES = unify_string_values
     try:
         result = _norm(schema, root, depth=0)
-        if memo is not None and \
-                os.environ.get("GRID_PERF_HASHCONS_DEBUG", "0") == "1":
+        if memo is not None and perf_flags.hashcons_debug_enabled():
             _debug_verify(memo)
         if memo is not None and _shared_out is not None:
             _shared_out.update(memo.shared)
