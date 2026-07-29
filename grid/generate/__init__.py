@@ -9,12 +9,11 @@ from grid.generate.api import GridSequenceGeneratorAdapter
 from grid.grammar import spec
 from grid.grammar.projection import RoleProjection
 from grid.guide import GridGuide
-from grid.lalr.compile import compile_tables
 from grid.lalr.reserve import ReserveTable
-from grid.lexer.dfa import build_scanner
 from grid.models.mock import MockModel
 from grid.processors import GridLogitsProcessor
 from grid.samplers import multinomial
+from grid.serving.artifact_store import load_or_build_scanner, load_or_compile_tables
 from grid.trie.build import build_trie
 
 
@@ -31,8 +30,8 @@ def build_guide(
     trie -> reserve -> guide."""
     grammar = spec.load(grammar_source)
     proj = projection if projection is not None else RoleProjection.full(grammar).build()
-    tables = compile_tables(proj, identifier_terminals if lexicons is not None else frozenset())
-    dfa = build_scanner(grammar.terminals, grammar.terminal_order)
+    tables = load_or_compile_tables(proj, identifier_terminals if lexicons is not None else frozenset())
+    dfa = load_or_build_scanner(grammar)
     trie = build_trie(adapter)
     reserve = ReserveTable(tables=tables, dfa=dfa, adapter=adapter, lexicons=lexicons)
     return GridGuide(
@@ -63,9 +62,9 @@ def _sql_impl(model, grammar_source: str, policy=None, schema=None, sampler=None
               audit: bool = True):
     grammar = spec.load(grammar_source)
     proj = policy.projection(grammar) if policy is not None else RoleProjection.full(grammar).build()
-    tables = compile_tables(proj, frozenset({"TABLE_NAME", "COLUMN_NAME"}))
+    tables = load_or_compile_tables(proj, frozenset({"TABLE_NAME", "COLUMN_NAME"}))
     lexicons = schema.lexicons(tables, policy) if schema is not None else None
-    dfa = build_scanner(grammar.terminals, grammar.terminal_order)
+    dfa = load_or_build_scanner(grammar)
     trie = build_trie(model.tokenizer)
     reserve = ReserveTable(tables=tables, dfa=dfa, adapter=model.tokenizer, lexicons=lexicons)
     guide = GridGuide(
