@@ -43,7 +43,14 @@ PHASES = ("schema_compile", "spec_load", "projection", "lalr", "scanner")
 
 
 def child(schema_file: str, out_file: str) -> None:
-    rec: dict = {"file": schema_file, "phases": {}, "stats": {}}
+    # flags snapshot: every leg is self-describing (the F1/F2 investigations
+    # were blocked because leg env was unrecoverable from the records)
+    rec: dict = {
+        "file": schema_file,
+        "flags": {k: v for k, v in os.environ.items() if k.startswith("GRID_PERF_")},
+        "phases": {},
+        "stats": {},
+    }
 
     def flush() -> None:
         with open(out_file, "w") as f:
@@ -57,33 +64,41 @@ def child(schema_file: str, out_file: str) -> None:
         rec["phases"][name] = round((time.monotonic() - t0) * 1e6)
         return val
 
-    with open(schema_file) as f:
-        schema = json.load(f)
-    if isinstance(schema, dict) and "schema" in schema and "tests" in schema:
-        schema = schema["schema"]  # wrapped maskbench layout
+    try:
+        with open(schema_file) as f:
+            schema = json.load(f)
+        if isinstance(schema, dict) and "schema" in schema and "tests" in schema:
+            schema = schema["schema"]  # wrapped maskbench layout
 
-    from grid.grammar import spec
-    from grid.grammar.projection import RoleProjection
-    from grid.jsonschema import compile_json_schema
-    from grid.lalr.compile import compile_tables
-    from grid.lexer.dfa import build_scanner
+        from grid.grammar import spec
+        from grid.grammar.projection import RoleProjection
+        from grid.jsonschema import compile_json_schema
+        from grid.lalr.compile import compile_tables
+        from grid.lexer.dfa import build_scanner
 
-    src, recorded = phase("schema_compile", lambda: compile_json_schema(schema))
-    rec["stats"]["src_bytes"] = len(src)
-    rec["stats"]["recorded"] = len(recorded)
-    grammar = phase("spec_load", lambda: spec.load(src))
-    rec["stats"]["terminals"] = len(grammar.terminals)
-    proj = phase("projection", lambda: RoleProjection.full(grammar).build())
-    tables = phase("lalr", lambda: compile_tables(proj))
-    rec["stats"]["lalr_states"] = len(getattr(tables, "action", ()) or ())
-    dfa = phase("scanner", lambda: build_scanner(grammar.terminals, grammar.terminal_order))
-    if getattr(dfa, "lazy", False):
-        # GRID_PERF_FACTORED_SCANNER over-budget regime: LazyProductDFA has no
-        # dense trans; report the product states materialized so far
-        rec["stats"]["dfa_states"] = len(dfa._states)
-        rec["stats"]["dfa_lazy"] = True
-    else:
-        rec["stats"]["dfa_states"] = len(dfa.trans)
+        src, recorded = phase("schema_compile", lambda: compile_json_schema(schema))
+        rec["stats"]["src_bytes"] = len(src)
+        rec["stats"]["recorded"] = len(recorded)
+        grammar = phase("spec_load", lambda: spec.load(src))
+        rec["stats"]["terminals"] = len(grammar.terminals)
+        proj = phase("projection", lambda: RoleProjection.full(grammar).build())
+        tables = phase("lalr", lambda: compile_tables(proj))
+        rec["stats"]["lalr_states"] = len(getattr(tables, "action", ()) or ())
+        dfa = phase("scanner", lambda: build_scanner(grammar.terminals, grammar.terminal_order))
+        if getattr(dfa, "lazy", False):
+            # GRID_PERF_FACTORED_SCANNER over-budget regime: LazyProductDFA has no
+            # dense trans; report the product states materialized so far
+            rec["stats"]["dfa_states"] = len(dfa._states)
+            rec["stats"]["dfa_lazy"] = True
+        else:
+            rec["stats"]["dfa_states"] = len(dfa.trans)
+    except Exception as e:
+        # declared outcomes (Unsupported, LALRConflictError, ...) become a
+        # first-class record category instead of an anonymous nonzero exit
+        rec["error"] = type(e).__name__
+        rec["error_msg"] = str(e)[:200]
+        flush()
+        raise
     rec["running"] = None
     rec["rss_mb"] = round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1 << 20))
     flush()
@@ -123,8 +138,17 @@ def parent(groups: list[str], jobs: int, out_dir: str) -> None:
         while queue and len(running) < jobs:
             sid, timeout_s = queue.pop()
             if os.path.exists(out_path(sid)):  # resume support
-                done += 1
-                continue
+                try:
+                    with open(out_path(sid)) as f:
+                        prev = json.load(f)
+                except Exception:
+                    prev = {"running": "?"}  # unreadable = treat as partial
+                if prev.get("running") is None or "timeout_s" in prev or "rc" in prev:
+                    done += 1
+                    continue
+                # unmarked partial from an interrupted parent: requeue, never
+                # fossilize (partials read as ~0.0s legs in summaries)
+                os.remove(out_path(sid))
             p = subprocess.Popen(
                 [sys.executable, __file__, "--child", schema_path(sid), out_path(sid)],
                 stdout=subprocess.DEVNULL,
@@ -136,6 +160,17 @@ def parent(groups: list[str], jobs: int, out_dir: str) -> None:
         for p, sid, t0, timeout_s in running:
             if p.poll() is not None:
                 done += 1
+                if p.returncode != 0:
+                    # annotate exactly like the timeout branch: a crashed or
+                    # killed child must never be mistakable for a completed one
+                    try:
+                        with open(out_path(sid)) as f:
+                            rec = json.load(f)
+                    except Exception:
+                        rec = {"phases": {}}
+                    rec["rc"] = p.returncode
+                    with open(out_path(sid), "w") as f:
+                        f.write(json.dumps(rec, indent=1))
                 print(f"[{done}/{len(work)}] {sid} rc={p.returncode}", flush=True)
             elif time.monotonic() - t0 > timeout_s:
                 p.kill()
@@ -163,19 +198,28 @@ def summarize(out_dir: str) -> None:
 
     totals = dict.fromkeys(PHASES, 0)
     timeouts: dict[str, int] = {}
+    incomplete: dict[str, int] = {}
     n_done = 0
     for f in g.glob(os.path.join(out_dir, "*.phases.json")):
         with open(f) as fh:
             rec = json.load(fh)
-        for k, v in rec.get("phases", {}).items():
-            totals[k] += v
-        if "timeout_s" in rec:
+        if rec.get("running") is None:
+            n_done += 1
+        elif "timeout_s" in rec or "rc" in rec:
             ph = rec.get("running") or "?"
             timeouts[ph] = timeouts.get(ph, 0) + 1
-        elif rec.get("running") is None:
-            n_done += 1
+        else:
+            # unmarked partial (interrupted parent): its phase sums are not
+            # attributions — exclude from totals entirely
+            ph = rec.get("running") or "?"
+            incomplete[ph] = incomplete.get(ph, 0) + 1
+            continue
+        for k, v in rec.get("phases", {}).items():
+            totals[k] += v
     tot = sum(totals.values()) or 1
-    print(f"\ncompleted: {n_done}; timeouts by in-flight phase: {timeouts}")
+    print(f"\ncompleted: {n_done}; timeouts/crashed by in-flight phase: {timeouts}")
+    if incomplete:
+        print(f"incomplete (unmarked, will re-run on resume) by in-flight phase: {incomplete}")
     for ph in PHASES:
         print(f"  {ph:15s} {totals[ph] / 1e6:9.1f}s  {100 * totals[ph] / tot:5.1f}%")
 
