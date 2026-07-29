@@ -32,7 +32,7 @@ _ESCAPES = {"n": ord("\n"), "t": ord("\t"), "r": ord("\r"), "0": 0}
 _MAX_REPEAT = 8192      # {m,n} bound cap: expansion is linear in n
 
 
-def _expand_repeat(node: _Node, m: int, n: int | None, pattern: str) -> _Node:
+def _expand_repeat(node: _Node, m: int, n: int | None) -> _Node:
     """{m,n} -> m copies + (n-m) optionals ({m,} -> m copies + a star tail).
     Expansion happens at parse time; the NFA builder is unchanged and shared
     subtrees are safe (construction walks per visit)."""
@@ -92,7 +92,7 @@ def _parse_regex(pattern: str) -> _Node:
                 if rep is None:
                     break               # literal '{' consumed by parse_atom later
                 m, n = rep
-                node = _expand_repeat(node, m, n, pattern)
+                node = _expand_repeat(node, m, n)
             else:
                 break
         return node
@@ -461,9 +461,7 @@ def build_scanner(
         blocks = nxt_blocks
     blocks.sort(key=min)  # deterministic class order (stable across processes)
     class_of = [0] * 256
-    class_rep: list[int] = []
     for ci_, blk in enumerate(blocks):
-        class_rep.append(min(blk))
         for c in blk:
             class_of[c] = ci_
     n_classes = len(blocks)
