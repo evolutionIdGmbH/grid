@@ -3,12 +3,10 @@
 This path is the default behind dfa.build_scanner since the v0.3.0
 full-corpus run; GRID_PERF_FACTORED_SCANNER=0 restores the eager union
 subset construction (retained as the exactness oracle — see materialize).
-One small byte DFA is built per terminal — memoized process-wide
-by (pattern source, is_literal, live mode): the first two are the identity the
-schema compiler already dedupes terminals on; live mode is in the key so a
-mode flip mid-process never serves the other path's build — and the scanner
-state becomes a sparse tuple of (terminal id, component state) pairs,
-materialized on demand.
+One small byte DFA is built per terminal — memoized process-wide by
+(pattern source, is_literal), the identity the schema compiler already
+dedupes terminals on — and the scanner state becomes a sparse tuple of
+(terminal id, component state) pairs, materialized on demand.
 
 Components are NOT trimmed: a component state that can no longer reach its
 accept stays in the tuple until its subset dies. The sub-NFAs of the combined
@@ -20,12 +18,12 @@ partition: the joint refinement of the per-component partitions; identical
 FIFO/min-byte-class discovery order). Per-state knowledge is local:
 ``accepts_all`` = the accepting components, ``live`` = the components whose
 state can still reach accept (a per-component co-accessibility bit — equal to
-the union-DFA live set by the same disjointness), so the global live fixpoint
-never runs on this path. The co-accessibility bit itself honors
-GRID_PERF_NFA_LIVE: on (default) it comes from dfa._terminal_reach over the
-component NFA — the same NFA-derived live computation build_scanner uses —
-while =0 falls back to a reverse BFS over the component DFA graph and
-=verify cross-checks the two (see _build_component).
+the union-DFA live set by the same disjointness), so no global live pass
+ever runs on this path. The co-accessibility bit comes from
+dfa._terminal_reach over the component NFA — the same NFA-derived live
+computation build_scanner uses (the legacy DFA-graph alternatives and their
+env flag were deleted after the 11.3k zero-divergence verify pass on
+v0.3.0rc1, see CHANGELOG).
 
 Over GRID_PERF_FACTORED_BUDGET product states the LazyProductDFA facade is
 returned instead: it serves the ScannerDFA protocol with transitions
@@ -80,42 +78,10 @@ class TerminalDFA:
     matches_empty: bool
 
 
-_COMPONENTS: dict[tuple[str, bool, str], TerminalDFA] = {}
+_COMPONENTS: dict[tuple[str, bool], TerminalDFA] = {}
 
 
-def _live_mode() -> str:
-    """GRID_PERF_NFA_LIVE -> component co-accessibility computation:
-    '0' = DFA-graph reverse BFS (the legacy live-set idiom, per component),
-    'verify' = both + cross-check, anything else = NFA terminal-reach
-    (dfa._terminal_reach, the GRID_PERF_NFA_LIVE default path). All three are
-    provably equal (per-component Rabin-Scott, empty byte classes skipped),
-    so cached components are interchangeable across modes."""
-    return perf_flags.nfa_live_mode()
-
-
-def _graph_co_acc(trans: list[list[int]], accepting: list[bool]) -> list[bool]:
-    """Legacy (GRID_PERF_NFA_LIVE=0) co-accessibility: reverse reachability
-    from the accepting states over the component DFA graph."""
-    n = len(trans)
-    preds: list[list[int]] = [[] for _ in range(n)]
-    for s, row in enumerate(trans):
-        for d in row:
-            if d != DEAD:
-                preds[d].append(s)
-    co_acc = [False] * n
-    stack = [s for s in range(n) if accepting[s]]
-    for s in stack:
-        co_acc[s] = True
-    while stack:
-        s = stack.pop()
-        for p in preds[s]:
-            if not co_acc[p]:
-                co_acc[p] = True
-                stack.append(p)
-    return co_acc
-
-
-def _build_component(pattern: str, is_literal: bool, live_mode: str) -> TerminalDFA:
+def _build_component(pattern: str, is_literal: bool) -> TerminalDFA:
     node = _literal_node(pattern) if is_literal else _parse_regex(pattern)
     b = _NFABuilder()
     s0, acc = b.build(node)
@@ -205,24 +171,14 @@ def _build_component(pattern: str, is_literal: bool, live_mode: str) -> Terminal
         accepting.append(acc in cur)
 
     # co-accessibility: the same NFA-derived live computation as
-    # dfa.build_scanner when GRID_PERF_NFA_LIVE is on — reach[q] != 0 iff NFA
-    # state q can reach the accept via eps/non-empty byte edges, and a subset
-    # state is co-accessible iff any member is (Rabin-Scott, per component).
-    # GRID_PERF_NFA_LIVE=0 keeps the DFA-graph reverse BFS; 'verify' runs both.
-    co_acc: list[bool]
-    if live_mode != "0":
-        reach = _terminal_reach(b, {acc: 0})
-        co_acc = [any(reach[q] for q in subset) for subset in order]
-        if live_mode == "verify":
-            legacy = _graph_co_acc(trans, accepting)
-            if co_acc != legacy:
-                bad = [s for s in range(len(order)) if co_acc[s] != legacy[s]]
-                raise AssertionError(
-                    f"GRID_PERF_NFA_LIVE=verify: factored component co_acc for "
-                    f"pattern {pattern!r} diverges from the DFA-graph BFS at "
-                    f"states {bad}")
-    else:
-        co_acc = _graph_co_acc(trans, accepting)
+    # dfa.build_scanner — reach[q] != 0 iff NFA state q can reach the accept
+    # via eps/non-empty byte edges, and a subset state is co-accessible iff
+    # any member is (Rabin-Scott, per component). Provably equal to a reverse
+    # BFS over the component DFA graph (11.3k zero-divergence verify pass,
+    # v0.3.0rc1); test_live_sets.py pins it with an independent forward-BFS
+    # oracle.
+    reach = _terminal_reach(b, {acc: 0})
+    co_acc = [any(reach[q] for q in subset) for subset in order]
 
     return TerminalDFA(
         trans=tuple(tuple(r) for r in trans),
@@ -233,17 +189,14 @@ def _build_component(pattern: str, is_literal: bool, live_mode: str) -> Terminal
     )
 
 
-def _component(pattern: str, is_literal: bool, live_mode: str) -> TerminalDFA:
-    # live_mode in the key so 'verify' actually verifies on a cold entry and
-    # a mode flip mid-process (tests) never serves the other path's build; the
-    # values themselves are equal across modes, so hits stay interchangeable
-    key = (pattern, is_literal, live_mode)
+def _component(pattern: str, is_literal: bool) -> TerminalDFA:
+    key = (pattern, is_literal)
     got = _COMPONENTS.get(key)
     if got is None:
         if len(_COMPONENTS) >= _COMPONENT_CAP:
             _COMPONENTS.clear()
         # setdefault: a concurrent duplicate build is benign, duplicate values are equal
-        got = _COMPONENTS.setdefault(key, _build_component(pattern, is_literal, live_mode))
+        got = _COMPONENTS.setdefault(key, _build_component(pattern, is_literal))
     return got
 
 
@@ -417,9 +370,8 @@ def build_factored_scanner(
     behind dfa.build_scanner."""
     # components in terminal_order: the first GrammarInvalid from a bad regex
     # is raised for the same terminal as the eager path
-    live_mode = _live_mode()
     comps = [
-        _component(terminals[name].pattern, terminals[name].is_literal, live_mode)
+        _component(terminals[name].pattern, terminals[name].is_literal)
         for name in terminal_order
     ]
     empty = frozenset(tid for tid, c in enumerate(comps) if c.matches_empty)

@@ -19,10 +19,6 @@ Flag table:
                                                             on: unset = "1";
                                                             "0" = legacy
                                                             eager builder)
-    GRID_PERF_NFA_LIVE          nfa_live_mode()             "0" | "verify" |
-                                                            "nfa" (default;
-                                                            all other values
-                                                            mean "nfa")
     GRID_PERF_FACTORED_BUDGET   factored_budget(default)    int(); ValueError
                                                             on garbage
     GRID_PERF_LALR_DP           lalr_algorithm()            "dp" if == "1"
@@ -71,20 +67,6 @@ def factored_scanner_enabled() -> bool:
     default) enables — "0" or any other value is the kill switch restoring
     the eager union builder."""
     return os.environ.get("GRID_PERF_FACTORED_SCANNER", "1") == "1"
-
-
-def nfa_live_mode() -> str:
-    """GRID_PERF_NFA_LIVE -> live-set / co-accessibility computation:
-    "0" = legacy DFA-graph pass (fixpoint in dfa.py, reverse BFS per
-    component in factored.py), "verify" = both + cross-check, "nfa" = NFA
-    terminal-reach (dfa._terminal_reach), the default. Every raw value
-    other than "0"/"verify" normalizes to "nfa"; consumers must branch only
-    on the ``!= "0"`` / ``== "verify"`` predicates, which are invariant
-    under that normalization."""
-    raw = os.environ.get("GRID_PERF_NFA_LIVE", "1")
-    if raw == "0":
-        return "0"
-    return "verify" if raw == "verify" else "nfa"
 
 
 def factored_budget(default: int) -> int:

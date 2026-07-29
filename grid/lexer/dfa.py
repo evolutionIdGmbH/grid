@@ -10,8 +10,10 @@ Scanner DFA state knowledge:
 - ``live[state]``: the set of terminals still reachable from this state — the
   lexer hypothesis set (E7). INV-LEX1's H_max is the max |live| over states,
   computed at build time from NFA terminal-reachability accumulated per subset
-  state (GRID_PERF_NFA_LIVE: "0" = legacy DFA-graph fixpoint, "verify" = both,
-  cross-checked; L3 identifier categories add at most +1 hypothesis by
+  state (_terminal_reach; the legacy DFA-graph fixpoint and its env flag were
+  deleted after the 11.3k zero-divergence verify pass on v0.3.0rc1, see
+  CHANGELOG — tests/lexer/test_live_sets.py keeps an independent forward-BFS
+  oracle; L3 identifier categories add at most +1 hypothesis by
   construction).
 
 All automata operate on BYTES: patterns are encoded latin-1; multi-byte UTF-8
@@ -271,27 +273,6 @@ class _NFABuilder:
 DEAD = -1
 
 
-def _live_fixpoint(trans: list[list[int]], accepts_all: list[frozenset[int]]) -> list[frozenset[int]]:
-    """live[s] = union of accepts_all over states reachable from s (incl. s itself),
-    by a while-changed fixpoint over the DFA graph. States iterate in forward
-    discovery order while liveness flows backward from accept states, so deep
-    window DFAs need O(depth) full passes — kept as the GRID_PERF_NFA_LIVE=0
-    rollback path and the =verify oracle until the epoch's full-corpus run."""
-    n = len(trans)
-    succ: list[frozenset[int]] = [frozenset(t for t in row if t != DEAD) for row in trans]
-    live_sets: list[set[int]] = [set(acc) for acc in accepts_all]
-    changed = True
-    while changed:
-        changed = False
-        for s in range(n):
-            before = len(live_sets[s])
-            for nx in succ[s]:
-                live_sets[s] |= live_sets[nx]
-            if len(live_sets[s]) != before:
-                changed = True
-    return [frozenset(s) for s in live_sets]
-
-
 def _terminal_reach(b: _NFABuilder, accept_terminal: dict[int, int]) -> list[int]:
     """term_reach[q] = bitmask of terminals whose accept state is reachable from
     NFA state q via eps/byte edges (>= 0 bytes). One reverse DFS per accept
@@ -400,9 +381,9 @@ def build_scanner(
     facade instead of an eager ScannerDFA when the product exceeds its state
     budget. GRID_PERF_FACTORED_SCANNER=0 restores the eager union builder
     below — kept as the factored path's exactness oracle (LazyProductDFA.
-    materialize reproduces it exactly, numbering included). Both paths honor
-    GRID_PERF_NFA_LIVE for live-set computation: the factored path derives
-    each component's co-accessibility from the same NFA terminal-reach (see
+    materialize reproduces it exactly, numbering included). Live sets on
+    both paths come from the one NFA terminal-reach computation
+    (_terminal_reach; per component on the factored path — see
     factored.py)."""
     if factored is None:
         factored = perf_flags.factored_scanner_enabled()
@@ -410,7 +391,6 @@ def build_scanner(
         from grid.lexer.factored import build_factored_scanner
 
         return build_factored_scanner(terminals, terminal_order)
-    mode = perf_flags.nfa_live_mode()
     b = _NFABuilder()
     root = b.new()
     accept_terminal: dict[int, int] = {}  # NFA accept state -> terminal id
@@ -424,7 +404,7 @@ def build_scanner(
         b.add_eps(root, s)
         accept_terminal[a] = tid
 
-    term_reach = _terminal_reach(b, accept_terminal) if mode != "0" else None
+    term_reach = _terminal_reach(b, accept_terminal)
 
     # eps-closure distributes over union: precompute the per-state closure once
     # (graph reachability over eps edges), then closure(S) = union of eps_star[s].
@@ -501,14 +481,13 @@ def build_scanner(
     while i < len(order):
         cur = order[i]
         i += 1
-        if term_reach is not None:
-            # live(S) = OR of term_reach over S: the subset state after a word is
-            # exactly the NFA states reachable via it (Rabin-Scott), so terminal-
-            # accept reachability distributes over the union.
-            mask = 0
-            for st in cur:
-                mask |= term_reach[st]
-            live_masks.append(mask)
+        # live(S) = OR of term_reach over S: the subset state after a word is
+        # exactly the NFA states reachable via it (Rabin-Scott), so terminal-
+        # accept reachability distributes over the union.
+        mask = 0
+        for st in cur:
+            mask |= term_reach[st]
+        live_masks.append(mask)
         by_class: dict[int, set[int]] = {}
         for st in cur:
             per = edge_by_class.get(st)
@@ -535,31 +514,20 @@ def build_scanner(
 
     accepts = [min(acc, key=lambda t: prio[t]) if acc else -1 for acc in accepts_all]
 
-    lives: list[frozenset[int]]
-    if term_reach is None:
-        lives = _live_fixpoint(trans, accepts_all)
-    else:
-        # equal masks share one frozenset (deep window chains repeat one live set)
-        by_mask: dict[int, frozenset[int]] = {}
-        lives = []
-        for m in live_masks:
-            got = by_mask.get(m)
-            if got is None:
-                tids: list[int] = []
-                r = m
-                while r:
-                    low = r & -r
-                    tids.append(low.bit_length() - 1)
-                    r ^= low
-                got = by_mask[m] = frozenset(tids)
-            lives.append(got)
-        if mode == "verify":
-            for s, old in enumerate(_live_fixpoint(trans, accepts_all)):
-                if lives[s] != old:
-                    diff = ", ".join(sorted(terminal_order[t] for t in lives[s] ^ old))
-                    raise AssertionError(
-                        f"GRID_PERF_NFA_LIVE=verify: live[{s}] diverges from the "
-                        f"fixpoint (symmetric difference: {diff})")
+    # equal masks share one frozenset (deep window chains repeat one live set)
+    by_mask: dict[int, frozenset[int]] = {}
+    lives: list[frozenset[int]] = []
+    for m in live_masks:
+        got = by_mask.get(m)
+        if got is None:
+            tids: list[int] = []
+            r = m
+            while r:
+                low = r & -r
+                tids.append(low.bit_length() - 1)
+                r ^= low
+            got = by_mask[m] = frozenset(tids)
+        lives.append(got)
     h_max = max((len(s) for s in lives), default=0)
     return ScannerDFA(
         start=0,

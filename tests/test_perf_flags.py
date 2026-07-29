@@ -7,7 +7,7 @@ Three gates:
   pre-migration ones; unset defaults reflect the E3 flag disposition) on
   every raw value in the grammar, including the nasty ones ("" enables
   ARTIFACT_STORE via != "0" but disables FACTORED_SCANNER via == "1";
-  "true"/"2" are OFF for == "1" flags; NFA_LIVE unset defaults ON).
+  "true"/"2" are OFF for == "1" flags).
 - Call-time read: two calls with an env flip between them see different
   values — kills any future lru_cache / module-level snapshot.
 - Leaf import: ``import grid.perf_flags`` pulls no other grid submodule
@@ -87,34 +87,6 @@ def test_factored_scanner_oracle(monkeypatch, raw):
 def test_factored_scanner_default_is_on(monkeypatch):
     monkeypatch.delenv("GRID_PERF_FACTORED_SCANNER", raising=False)
     assert perf_flags.factored_scanner_enabled() is True
-
-
-@pytest.mark.parametrize("raw", RAW_VALUES)
-def test_nfa_live_mode_predicate_pair(monkeypatch, raw):
-    """dfa.py consumes the raw string only through the two predicates
-    (mode != "0", mode == "verify"); both must be invariant under the
-    normalization to {"0", "verify", "nfa"}."""
-    _setenv(monkeypatch, "GRID_PERF_NFA_LIVE", raw)
-    raw_mode = os.environ.get("GRID_PERF_NFA_LIVE", "1")  # verbatim dfa.py read
-    mode = perf_flags.nfa_live_mode()
-    assert mode in ("0", "verify", "nfa")
-    assert (mode != "0") == (raw_mode != "0")
-    assert (mode == "verify") == (raw_mode == "verify")
-
-
-@pytest.mark.parametrize("raw", RAW_VALUES)
-def test_nfa_live_mode_matches_legacy_live_mode(monkeypatch, raw):
-    """Verbatim oracle: factored.py _live_mode() pre-migration body."""
-    _setenv(monkeypatch, "GRID_PERF_NFA_LIVE", raw)
-    legacy = os.environ.get("GRID_PERF_NFA_LIVE", "1")
-    if legacy != "0":
-        legacy = "verify" if legacy == "verify" else "nfa"
-    assert perf_flags.nfa_live_mode() == legacy
-
-
-def test_nfa_live_mode_default_is_on(monkeypatch):
-    monkeypatch.delenv("GRID_PERF_NFA_LIVE", raising=False)
-    assert perf_flags.nfa_live_mode() == "nfa"
 
 
 @pytest.mark.parametrize("raw", [None, "0", "3", "1000000", "-1", "20000"])
@@ -216,11 +188,6 @@ def test_every_reader_is_call_time(monkeypatch):
     assert perf_flags.factored_scanner_enabled() is False
     monkeypatch.setenv("GRID_PERF_FACTORED_SCANNER", "1")
     assert perf_flags.factored_scanner_enabled() is True
-
-    monkeypatch.setenv("GRID_PERF_NFA_LIVE", "0")
-    assert perf_flags.nfa_live_mode() == "0"
-    monkeypatch.setenv("GRID_PERF_NFA_LIVE", "verify")
-    assert perf_flags.nfa_live_mode() == "verify"
 
     monkeypatch.setenv("GRID_PERF_FACTORED_BUDGET", "3")
     assert perf_flags.factored_budget(20_000) == 3
