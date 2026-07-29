@@ -39,12 +39,17 @@ Whitespace: %ignore /[ \\t\\n\\r]+/ — the JSON-spec definition.
 
 from __future__ import annotations
 
+import heapq
 import json
 import math
 from typing import Any
 
 from grid.jsonschema import rx
-from grid.jsonschema.normalize import FALSE_SCHEMA, normalize
+from grid.jsonschema.normalize import (
+    FALSE_SCHEMA,
+    _hashcons_components,
+    normalize,
+)
 
 MAX_PROPERTIES = 256
 MAX_NAMED_TERMINALS = 2000
@@ -133,9 +138,18 @@ def _const_schema(v) -> dict:
 
 
 class SchemaCompiler:
-    def __init__(self, root_schema: Any, strict: bool = False) -> None:
+    def __init__(self, root_schema: Any, strict: bool = False,
+                 hashcons: frozenset[str] = frozenset(),
+                 shared_nodes: dict[int, Any] | None = None) -> None:
         self.root = root_schema
         self.strict = strict
+        self.hashcons = hashcons
+        # normalize-memo-shared nodes: tree positions where legacy built a
+        # distinct object and re-spent rule budget; rule_for charges the
+        # recorded construction delta on their id-memo hits so the
+        # MAX_RULES outcome bucket stays exactly legacy
+        self._shared_nodes = shared_nodes or {}
+        self._n_delta: dict[int, int] = {}
         self.rules: dict[str, list[str]] = {}
         self.rule_order: list[str] = []
         self.memo: dict[int, str] = {}          # id(schema node) -> rule name
@@ -239,6 +253,13 @@ class SchemaCompiler:
 
         got = self.memo.get(id(schema))
         if got is not None:
+            delta = self._n_delta.get(id(schema))
+            if delta:
+                # virtual-_n: legacy walked a fresh twin here and consumed
+                # this many rules before _dedupe_rules merged them away
+                self._n += delta
+                if self._n > MAX_RULES:
+                    raise Unsupported("rule budget exceeded (size cap)")
             return got
 
         if "$ref" in schema:
@@ -252,7 +273,11 @@ class SchemaCompiler:
         name = self._rule("v")
         self.memo[id(schema)] = name  # pre-register: recursive schemas terminate
         self._keepalive.append(schema)
+        n0 = self._n
         self.rules[name] = self._alternatives(schema)
+        if id(schema) in self._shared_nodes:
+            # +1: a legacy twin allocates its own "v" rule too
+            self._n_delta[id(schema)] = self._n - n0 + 1
         return name
 
     _RECORDABLE_UNSUPPORTED = {
@@ -879,8 +904,13 @@ class SchemaCompiler:
                     if not hit:
                         continue
                     # declared key matching a pattern: both schemas apply
+                    # (hashcons forwarded: env-driven and kwarg-driven runs
+                    # must exercise the same code, and nested-run shared
+                    # nodes must reach the virtual-_n charge)
                     try:
-                        props[k] = _n2(merge2(props[k], pp[pat], self.root))
+                        props[k] = _n2(merge2(props[k], pp[pat], self.root),
+                                       hashcons=self.hashcons,
+                                       _shared_out=self._shared_nodes)
                     except Unmergeable:
                         self._record("pp-overlap-merge-unenforced")
                     overlap.setdefault(pat, []).append(k)
@@ -1172,6 +1202,9 @@ class SchemaCompiler:
                     alias[name] = canon
                     changed = True
 
+        return self._dedupe_rebuild(resolve, start)
+
+    def _dedupe_rebuild(self, resolve, start: str) -> str:
         new_rules: dict[str, list[str]] = {}
         new_order: list[str] = []
         for name in self.rule_order:
@@ -1191,6 +1224,79 @@ class SchemaCompiler:
         self.rules = new_rules
         self.rule_order = new_order
         return resolve(start)
+
+    def _dedupe_rules_worklist(self, start: str) -> str:
+        """Same fixpoint as _dedupe_rules via worklist congruence closure.
+
+        Equivalence: the merge step is inflationary and monotone (aliasing
+        can only make more signatures collide), so merging until no two
+        representatives share a signature reaches the unique least closure
+        regardless of processing order — the same fixpoint as the legacy
+        whole-set rescan. Aliasing always points rule_order-later ->
+        earlier, so each class resolves to its rule_order-minimal member,
+        exactly as legacy; the rebuild is shared, so output text matches
+        byte-for-byte."""
+        alias: dict[str, str] = {}
+
+        def resolve(n: str) -> str:
+            r = n
+            while r in alias:
+                r = alias[r]
+            while n != r:               # path compression
+                alias[n], n = r, alias[n]
+            return r
+
+        order = {name: i for i, name in enumerate(self.rule_order)}
+        toks: dict[str, list[tuple[str, ...]]] = {
+            name: [tuple(alt.split()) for alt in self.rules[name]]
+            for name in self.rule_order if name in self.rules
+        }
+        # reverse dependencies on representatives (unioned on merge): whose
+        # signatures contain this rule
+        rdeps: dict[str, set[str]] = {name: set() for name in toks}
+        for name, alts in toks.items():
+            for alt in alts:
+                for t in alt:
+                    if t in rdeps and t != name:
+                        rdeps[t].add(name)
+
+        seen: dict[tuple, str] = {}
+        heap = [order[name] for name in toks]
+        heapq.heapify(heap)
+        queued = set(toks)
+        while heap:
+            name = self.rule_order[heapq.heappop(heap)]
+            queued.discard(name)
+            if name in alias:
+                continue
+            sig = tuple(
+                tuple("@SELF" if resolve(t) == name else resolve(t)
+                      for t in alt)
+                for alt in toks[name])
+            got = seen.get(sig)
+            if got is None:
+                seen[sig] = name
+                continue
+            # stale entries are unreachable: a signature changes only when
+            # a token in it gets aliased, and resolve() never emits aliased
+            # names again — so a current sig always finds a current entry
+            got = resolve(got)
+            if got == name:
+                continue
+            winner, loser = (got, name) if order[got] < order[name] \
+                else (name, got)
+            alias[loser] = winner
+            seen[sig] = winner
+            # only the loser's dependents can change signature; the winner
+            # inherits them for later merges
+            for dep in rdeps[loser]:
+                d = resolve(dep)
+                if d not in queued:
+                    queued.add(d)
+                    heapq.heappush(heap, order[d])
+            rdeps[winner] |= rdeps.pop(loser)
+
+        return self._dedupe_rebuild(resolve, start)
 
     # ---------------------------------------------------------------- emit
 
@@ -1261,7 +1367,8 @@ class SchemaCompiler:
                     for alt in alts
                 ]
             self.degraded = set()
-        start = self._dedupe_rules(start)
+        start = self._dedupe_rules_worklist(start) \
+            if "dedupe" in self.hashcons else self._dedupe_rules(start)
 
         # reachability prune: rewrites (enum filtering, degradation, branch
         # drops) can orphan rules/terminals; the spec loader rejects
@@ -1311,9 +1418,25 @@ class SchemaCompiler:
         return "\n".join(lines) + "\n"
 
 
-def compile_schema(schema: Any, strict: bool = False) -> tuple[str, set[str]]:
-    """-> (.grid source, recorded-unenforced set). Raises Unsupported."""
-    normalized = normalize(schema)
+def compile_schema(schema: Any, strict: bool = False,
+                   *, hashcons: frozenset[str] | None = None
+                   ) -> tuple[str, set[str]]:
+    """-> (.grid source, recorded-unenforced set). Raises Unsupported.
+
+    hashcons: enabled GRID_PERF_HASHCONS components (None = read the env)."""
+    if hashcons is None:
+        hashcons = _hashcons_components()
+    shared: dict[int, Any] | None = {} if "norm" in hashcons else None
+    try:
+        normalized = normalize(schema, hashcons=hashcons, _shared_out=shared)
+    except RecursionError:
+        if not hashcons:
+            raise
+        # the memo reaches, in seconds, unboundedly deep merge chains that
+        # the legacy path grinds toward for hours (fold_allof resets the
+        # merge2 depth cutoff; ref cycles through merged results evade the
+        # per-call seen sets) — declare instead of crashing
+        raise Unsupported("normalize recursion depth") from None
     root = normalized if isinstance(normalized, dict) else schema
     if isinstance(root, dict) and isinstance(schema, dict):
         # rewrites can restructure the root; keep resolution targets reachable
@@ -1321,6 +1444,7 @@ def compile_schema(schema: Any, strict: bool = False) -> tuple[str, set[str]]:
             if dk in schema and dk not in root:
                 root = dict(root)
                 root[dk] = schema[dk]
-    c = SchemaCompiler(root, strict=strict)
+    c = SchemaCompiler(root, strict=strict, hashcons=hashcons,
+                       shared_nodes=shared)
     src = c.compile()
     return src, c.ignored

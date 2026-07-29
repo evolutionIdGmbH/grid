@@ -26,7 +26,9 @@ Internal markers consumed by the compiler:
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 from typing import Any
 
 try:
@@ -73,6 +75,144 @@ FALSE_SCHEMA = {"not": {}}      # canonical unsatisfiable schema
 # the root $schema; single-threaded bench usage.
 _LEGACY_REF = False
 _LEGACY_MARKERS = ("draft-03", "draft-04", "draft-06", "draft-07")
+
+
+# ---------------------------------------------------- structural hash-consing
+
+# 'rulefor' (structural rule_for memo) is planned but NOT implemented; the
+# parser must not advertise components that silently no-op
+_HASHCONS_COMPONENTS = frozenset({"norm", "dedupe"})
+
+
+def _hashcons_components(value: str | None = None) -> frozenset[str]:
+    """GRID_PERF_HASHCONS -> enabled component set ('' / '0' = none,
+    '1' / 'all' = every component, else a comma list; unknown names ignored)."""
+    if value is None:
+        value = os.environ.get("GRID_PERF_HASHCONS", "")
+    value = value.strip()
+    if value in ("", "0"):
+        return frozenset()
+    if value in ("1", "all"):
+        return _HASHCONS_COMPONENTS
+    return frozenset(p.strip() for p in value.split(",")) & _HASHCONS_COMPONENTS
+
+
+class _HashconsMemo:
+    """Per-normalize()-run structural memo (installed/restored around each
+    run exactly like _LEGACY_REF: root and draft mode are fixed per run, so
+    entries never leak across $ref resolution scopes; single-threaded)."""
+
+    __slots__ = ("dig", "norm", "norm_deep", "merge", "merge_deep",
+                 "wm_norm", "wm_merge", "shared")
+
+    def __init__(self) -> None:
+        # id -> node for every result a memo hit served: these occupy tree
+        # positions where legacy built a DISTINCT object, so the compiler's
+        # id() memo must charge its virtual-_n rule-budget delta there
+        self.shared: dict[int, Any] = {}
+        # id(node) -> (node, digest): holding the node pins its id, so a
+        # recycled id can never alias a dead node's digest
+        self.dig: dict[int, tuple[Any, bytes]] = {}
+        # digest -> (result, rel): rel = deepest dict-_norm depth reached
+        # below the node, relative to it; the computation never touched the
+        # depth>64 cutoff, so it replays at any depth d with d+rel <= 64
+        self.norm: dict[bytes, tuple[Any, int]] = {}
+        # (digest, depth) -> (result, wm): the cutoff DID truncate this
+        # computation, making it depth-specific — reusable at the exact
+        # entry depth only (this keys the rewrite-chain blowup region)
+        self.norm_deep: dict[tuple[bytes, int], tuple[Any, int]] = {}
+        # (digest(a), digest(b)) -> (ok, result-or-message, rel): same
+        # watermark discipline against merge2's _depth>32 cutoff
+        self.merge: dict[tuple[bytes, bytes], tuple[bool, Any, int]] = {}
+        self.merge_deep: dict[tuple[bytes, bytes, int],
+                              tuple[bool, Any, int]] = {}
+        self.wm_norm = 0
+        self.wm_merge = 0
+
+
+# active memo for the current normalize() run; None = hash-consing off
+_MEMO: _HashconsMemo | None = None
+
+
+def _scalar_digest(v: Any) -> bytes:
+    # json text separates 1 / 1.0 / True / "1"; fixed-size output keeps
+    # container hashing injective without length prefixes
+    return hashlib.blake2b(
+        b"s" + json.dumps(v, ensure_ascii=False).encode("utf-8"),
+        digest_size=16).digest()
+
+
+def _digest_rec(node: Any, cache: dict[int, tuple[Any, bytes]]) -> bytes:
+    """Iterative post-order digest: no Python recursion (a memo hit deep in
+    an already-deep merge/normalize stack must not tip RecursionError), and
+    shared DAG children hash once, not once per expansion path."""
+    if not isinstance(node, (dict, list)):
+        return _scalar_digest(node)
+    entered: set[int] = set()
+    stack: list[tuple[Any, bool]] = [(node, False)]
+    while stack:
+        n, expanded = stack.pop()
+        if not isinstance(n, (dict, list)):
+            continue
+        ent = cache.get(id(n))
+        if ent is not None and ent[0] is n:
+            continue
+        if expanded:
+            if isinstance(n, dict):
+                # INSERTION order, not sorted: merge2/normalize outputs
+                # inherit input key order and the compiler walks properties
+                # in that order — order-insensitive keys would alias results
+                # legacy distinguishes
+                h = hashlib.blake2b(b"{", digest_size=16)
+                for k, v in n.items():
+                    h.update(_scalar_digest(k))
+                    if isinstance(v, (dict, list)):
+                        h.update(cache[id(v)][1])
+                    else:
+                        h.update(_scalar_digest(v))
+            else:
+                h = hashlib.blake2b(b"[", digest_size=16)
+                for v in n:
+                    if isinstance(v, (dict, list)):
+                        h.update(cache[id(v)][1])
+                    else:
+                        h.update(_scalar_digest(v))
+            cache[id(n)] = (n, h.digest())
+        else:
+            if id(n) in entered:
+                raise ValueError("cyclic object graph")
+            entered.add(id(n))
+            # LIFO: this subtree completes before any second occurrence of n
+            # further down the stack is popped, so each node expands once
+            stack.append((n, True))
+            kids = n.values() if isinstance(n, dict) else n
+            for v in kids:
+                if isinstance(v, (dict, list)):
+                    stack.append((v, False))
+    return cache[id(node)][1]
+
+
+def _digest(node: Any, memo: _HashconsMemo) -> bytes | None:
+    """Structural digest of a JSON tree; None = not digestable (non-JSON
+    value, non-string key, cyclic object graph) -> that node is not memoized."""
+    try:
+        return _digest_rec(node, memo.dig)
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        return None
+
+
+def _debug_verify(memo: _HashconsMemo) -> None:
+    """GRID_PERF_HASHCONS_DEBUG=1: re-digest every cached node at run end —
+    a mismatch means a consumer mutated a shared subtree in place."""
+    fresh: dict[int, tuple[Any, bytes]] = {}
+    for node, dig in list(memo.dig.values()):
+        try:
+            now = _digest_rec(node, fresh)
+        except (TypeError, ValueError, OverflowError, RecursionError):
+            now = None
+        assert now == dig, (
+            "hashcons: cached subtree mutated in place: "
+            f"{json.dumps(node, default=repr)[:200]}")
 
 
 def _is_true(s: Any) -> bool:
@@ -271,6 +411,63 @@ def _both(a: dict, b: dict, key: str):
 
 def merge2(a: Any, b: Any, root: Any, _depth: int = 0) -> dict:
     """Conjunction of two schemas as one schema (raises Unmergeable)."""
+    memo = _MEMO
+    if memo is None:
+        return _merge2_impl(a, b, root, _depth)
+    if memo.wm_merge < _depth:
+        memo.wm_merge = _depth
+    da = _digest(a, memo)
+    db = _digest(b, memo) if da is not None else None
+    if db is None:
+        return _merge2_impl(a, b, root, _depth)
+    key = (da, db)
+    hit = memo.merge.get(key)
+    if hit is not None:
+        ok, val, rel = hit
+        # reuse only where the replayed recursion provably stays under the
+        # depth cutoff; the hit still counts toward the caller's watermark
+        if _depth + rel <= 32:
+            if memo.wm_merge < _depth + rel:
+                memo.wm_merge = _depth + rel
+            if ok:
+                if isinstance(val, dict):
+                    memo.shared[id(val)] = val
+                return val
+            raise Unmergeable(val)
+    deep_hit = memo.merge_deep.get((da, db, _depth))
+    if deep_hit is not None:
+        ok, val, wm = deep_hit
+        if memo.wm_merge < wm:
+            memo.wm_merge = wm
+        if ok:
+            if isinstance(val, dict):
+                memo.shared[id(val)] = val
+            return val
+        raise Unmergeable(val)
+    outer = memo.wm_merge
+    memo.wm_merge = _depth
+    try:
+        result = _merge2_impl(a, b, root, _depth)
+        wm = memo.wm_merge
+        if wm <= 32:
+            memo.merge[key] = (True, result, wm - _depth)
+        else:
+            memo.merge_deep[(da, db, _depth)] = (True, result, wm)
+        return result
+    except Unmergeable as e:
+        # content-determined failure: cache and re-raise fresh instances
+        wm = memo.wm_merge
+        if wm <= 32:
+            memo.merge[key] = (False, str(e), wm - _depth)
+        else:
+            memo.merge_deep[(da, db, _depth)] = (False, str(e), wm)
+        raise
+    finally:
+        if outer > memo.wm_merge:
+            memo.wm_merge = outer
+
+
+def _merge2_impl(a: Any, b: Any, root: Any, _depth: int = 0) -> dict:
     if _depth > 32:
         raise Unmergeable("merge recursion depth (cyclic $ref web)")
     a, b = _as_dict(a), _as_dict(b)
@@ -545,22 +742,91 @@ def fold_allof(schema: dict, root: Any) -> dict:
 
 # ------------------------------------------------------------ normalize
 
-def normalize(schema: Any, root: Any = None) -> Any:
-    """Best-effort top-down rewrite; leaves unrewritable constructs intact."""
-    global _LEGACY_REF
+def normalize(schema: Any, root: Any = None,
+              *, hashcons: frozenset[str] | None = None,
+              _shared_out: dict[int, Any] | None = None) -> Any:
+    """Best-effort top-down rewrite; leaves unrewritable constructs intact.
+
+    hashcons: enabled GRID_PERF_HASHCONS components (None = read the env).
+    'norm' installs a fresh structural memo for this run — fresh per run
+    because results are keyed on content but resolved against THIS root.
+    _shared_out (compiler-private): filled with the memo-shared result
+    nodes, the sites of the compiler's virtual-_n rule-budget charge."""
+    global _LEGACY_REF, _MEMO
+    if hashcons is None:
+        hashcons = _hashcons_components()
     if root is None:
         root = schema
     prev = _LEGACY_REF
+    prev_memo = _MEMO
     if isinstance(schema, dict):
         uri = schema.get("$schema") or ""
         _LEGACY_REF = any(m in uri for m in _LEGACY_MARKERS)
+    memo = _HashconsMemo() if "norm" in hashcons else None
+    _MEMO = memo
     try:
-        return _norm(schema, root, depth=0)
+        result = _norm(schema, root, depth=0)
+        if memo is not None and \
+                os.environ.get("GRID_PERF_HASHCONS_DEBUG", "0") == "1":
+            _debug_verify(memo)
+        if memo is not None and _shared_out is not None:
+            _shared_out.update(memo.shared)
+        return result
     finally:
         _LEGACY_REF = prev
+        _MEMO = prev_memo
 
 
 def _norm(schema: Any, root: Any, depth: int) -> Any:
+    memo = _MEMO
+    if memo is None:
+        return _norm_impl(schema, root, depth)
+    if not isinstance(schema, dict):
+        # non-dicts return unchanged at EVERY depth: no cutoff sensitivity,
+        # so they never raise the watermark
+        return schema
+    if memo.wm_norm < depth:
+        memo.wm_norm = depth
+    if depth > 64:
+        return schema
+    dig = _digest(schema, memo)
+    if dig is None:
+        return _norm_impl(schema, root, depth)
+    hit = memo.norm.get(dig)
+    if hit is not None:
+        result, rel = hit
+        # reuse only where the replayed recursion provably stays under the
+        # depth>64 cutoff; a hit raises the watermark as the walk would have
+        if depth + rel <= 64:
+            if memo.wm_norm < depth + rel:
+                memo.wm_norm = depth + rel
+            if isinstance(result, dict):
+                memo.shared[id(result)] = result
+            return result
+    deep_hit = memo.norm_deep.get((dig, depth))
+    if deep_hit is not None:
+        result, wm = deep_hit
+        if memo.wm_norm < wm:
+            memo.wm_norm = wm
+        if isinstance(result, dict):
+            memo.shared[id(result)] = result
+        return result
+    outer = memo.wm_norm
+    memo.wm_norm = depth
+    try:
+        result = _norm_impl(schema, root, depth)
+        wm = memo.wm_norm
+        if wm <= 64:
+            memo.norm[dig] = (result, wm - depth)
+        else:
+            memo.norm_deep[(dig, depth)] = (result, wm)
+        return result
+    finally:
+        if outer > memo.wm_norm:
+            memo.wm_norm = outer
+
+
+def _norm_impl(schema: Any, root: Any, depth: int) -> Any:
     if depth > 64 or not isinstance(schema, dict):
         return schema
     s = dict(schema)
