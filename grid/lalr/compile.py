@@ -26,9 +26,9 @@ Tables retain per-state item cores (``state_items``) — the reserve computation
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 
+from grid import perf_flags
 from grid.errors import LALRConflictError
 from grid.grammar.projection import RoleProjection
 
@@ -358,7 +358,7 @@ def compile_tables(
     if proj.state != "CACHED":
         raise ValueError("compile_tables requires a CACHED (built) RoleProjection")
     if algorithm is None:
-        algorithm = "dp" if os.environ.get("GRID_PERF_LALR_DP", "0") == "1" else "lr1_merge"
+        algorithm = perf_flags.lalr_algorithm()
     if algorithm not in ("lr1_merge", "dp"):
         raise ValueError(f"unknown LALR algorithm: {algorithm!r}")
 
