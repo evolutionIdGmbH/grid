@@ -938,7 +938,7 @@ class SchemaCompiler:
             if extras:
                 if len(pats) > 1:
                     self._record("extras-with-multiple-patternProperties")
-                elif True:
+                else:
                     try:
                         comp = rx.pattern_complement_body(pats[0])
                         if comp is None:

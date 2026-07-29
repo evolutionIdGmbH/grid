@@ -521,14 +521,11 @@ def _merge2_impl(a: Any, b: Any, root: Any, _depth: int = 0) -> dict:
             if key in s:
                 base = {k: v for k, v in s.items() if k != key}
                 branches = s[key]
-                if len(branches) * 1 > MAX_BRANCH_PRODUCT:
+                if len(branches) > MAX_BRANCH_PRODUCT:
                     raise Unmergeable("branch product too large")
                 merged_branches = []
                 for br in branches:
-                    try:
-                        m = merge2(merge2(br, base, root, _depth + 1), other, root, _depth + 1)
-                    except Unmergeable:
-                        raise
+                    m = merge2(merge2(br, base, root, _depth + 1), other, root, _depth + 1)
                     if not _is_false(m):
                         merged_branches.append(m)
                 if not merged_branches:
