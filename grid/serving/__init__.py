@@ -6,10 +6,14 @@
   the GPU forward window; fill-time waits are the bounded residual.
 - journal: per-dialect record of cold-walked key shapes (W4) feeding the
   admission warmup in compile_grammar (W5) — keys only, never mask content.
+- artifact_store: versioned on-disk compile-artifact store
+  (GRID_PERF_ARTIFACT_STORE) — warm deployments reload compiled schema
+  source / ScannerDFA / LALRTables instead of rebuilding.
 """
 
+from grid.serving import artifact_store
 from grid.serving.journal import ContextJournal
 from grid.serving.prefetch import MaskPrefetcher
 from grid.serving.singleflight import SingleFlight
 
-__all__ = ["ContextJournal", "MaskPrefetcher", "SingleFlight"]
+__all__ = ["ContextJournal", "MaskPrefetcher", "SingleFlight", "artifact_store"]

@@ -35,3 +35,11 @@ jobs:
         run: ruff check grid tests
       - name: Tests (gates G0-G4 slice + mini-G5/G6/G10a)
         run: pytest tests/ -q
+      - name: Tests (GRID_PERF_FACTORED_SCANNER=1 leg)
+        run: GRID_PERF_FACTORED_SCANNER=1 pytest tests/ -q
+      - name: Tests (factored lazy regime, pure-spec walk)
+        # budget 0 forces every scanner onto the LazyProductDFA facade; crossed
+        # with GRID_NO_RUST so kernel-only suites skip instead of asserting v7
+        run: >
+          GRID_PERF_FACTORED_SCANNER=1 GRID_PERF_FACTORED_BUDGET=0 GRID_NO_RUST=1
+          pytest tests/lexer tests/mask tests/trie tests/guide tests/generate tests/jsonschema_bridge -q

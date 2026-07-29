@@ -317,12 +317,18 @@ class MaskProducer:
         if ident_position:
             return ("ident", remainder, tuple(sorted(A)), self.schema_fingerprint)
         if self._genn_keys:
-            q, acc_len, p = self.dfa.scan_with_last_accept(remainder)
-            if q != DEAD:
-                vis = self.dfa.live[q] if p < 0 else self.dfa.live[q] | self.dfa.accepts_all[p]
-                if not (vis & self._LEX):
-                    return ("genN", p, q, remainder[acc_len:] if p >= 0 else b"",
-                            tuple(sorted(A)), self.schema_fingerprint)
+            # lazy factored DFAs number states in DEMAND order — instance-local
+            # ids. genN keys embed (p, q) and T2 is shared per-dialect across
+            # template instances (vllm_processor _t2_pools), so normalizing
+            # here would alias one instance's entries to another's states —
+            # the forbidden wrong-mask class. Raw schema-scoped key instead.
+            if not getattr(self.dfa, "lazy", False):
+                q, acc_len, p = self.dfa.scan_with_last_accept(remainder)
+                if q != DEAD:
+                    vis = self.dfa.live[q] if p < 0 else self.dfa.live[q] | self.dfa.accepts_all[p]
+                    if not (vis & self._LEX):
+                        return ("genN", p, q, remainder[acc_len:] if p >= 0 else b"",
+                                tuple(sorted(A)), self.schema_fingerprint)
             return ("generic", remainder, tuple(sorted(A)), self.schema_fingerprint)
         return ("generic", remainder, tuple(sorted(A)), None)
 

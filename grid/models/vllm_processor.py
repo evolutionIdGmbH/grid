@@ -104,10 +104,9 @@ class _GuideRegistry:
     def _build(self, grammar_src: str, schema, verbs=None) -> GridGuide:
         from grid.grammar import spec as gspec
         from grid.grammar.projection import RoleProjection
-        from grid.lalr.compile import compile_tables
-        from grid.lexer.dfa import build_scanner
         from grid.mask.cache import MaskCacheT2
         from grid.serving import ContextJournal
+        from grid.serving.artifact_store import load_or_build_scanner, load_or_compile_tables
 
         dialect = hashlib.blake2b(grammar_src.encode(), digest_size=12).hexdigest()
         t2 = self._t2_pools.setdefault(dialect, MaskCacheT2())
@@ -130,12 +129,12 @@ class _GuideRegistry:
             from grid.policy.schema import SchemaSnapshot
 
             snap = SchemaSnapshot.from_dict(schema)
-            tables = compile_tables(proj, frozenset({"TABLE_NAME", "COLUMN_NAME"}))
+            tables = load_or_compile_tables(proj, frozenset({"TABLE_NAME", "COLUMN_NAME"}))
             lexicons = snap.lexicons(tables)
             fingerprint = snap.fingerprint
         else:
-            tables = compile_tables(proj)
-        dfa = build_scanner(grammar.terminals, grammar.terminal_order)
+            tables = load_or_compile_tables(proj)
+        dfa = load_or_build_scanner(grammar)
         return GridGuide(
             tables=tables, dfa=dfa, trie=self.trie, adapter=self.adapter,
             lexicons=lexicons, schema_fingerprint=fingerprint,

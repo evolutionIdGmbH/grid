@@ -42,15 +42,14 @@ class GridEngine(Engine):
         from grid.grammar.projection import RoleProjection
         from grid.guide import GridGuide
         from grid.jsonschema import compile_json_schema
-        from grid.lalr.compile import compile_tables
-        from grid.lexer.dfa import build_scanner
+        from grid.serving.artifact_store import load_or_build_scanner, load_or_compile_tables
 
         self.recorded = []
         src, recorded = compile_json_schema(schema, strict=self.strict)
         grammar = spec.load(src)
         proj = RoleProjection.full(grammar).build()
-        tables = compile_tables(proj)
-        dfa = build_scanner(grammar.terminals, grammar.terminal_order)
+        tables = load_or_compile_tables(proj)
+        dfa = load_or_build_scanner(grammar)
         self.guide = GridGuide(tables=tables, dfa=dfa, trie=self.trie,
                                adapter=self.adapter)
         self.recorded = sorted(recorded)

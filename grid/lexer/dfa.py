@@ -9,8 +9,10 @@ Scanner DFA state knowledge:
   declaration order — Terminal.priority).
 - ``live[state]``: the set of terminals still reachable from this state — the
   lexer hypothesis set (E7). INV-LEX1's H_max is the max |live| over states,
-  computed here at build time (eager L1/L2 product; L3 identifier categories add
-  at most +1 hypothesis by construction).
+  computed at build time from NFA terminal-reachability accumulated per subset
+  state (GRID_PERF_NFA_LIVE: "0" = legacy DFA-graph fixpoint, "verify" = both,
+  cross-checked; L3 identifier categories add at most +1 hypothesis by
+  construction).
 
 All automata operate on BYTES: patterns are encoded latin-1; multi-byte UTF-8
 in identifiers enters through byte classes (e.g. [\\x80-\\xff]).
@@ -18,10 +20,17 @@ in identifiers enters through byte classes (e.g. [\\x80-\\xff]).
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from grid.errors import GrammarInvalid
 from grid.grammar.spec import Terminal
+
+if TYPE_CHECKING:
+    # guard is mandatory: factored.py imports this module's privates at
+    # runtime, so an unguarded import would cycle
+    from grid.lexer.factored import LazyProductDFA
 
 # ---------------------------------------------------------------- regex parser
 
@@ -29,7 +38,7 @@ _ESCAPES = {"n": ord("\n"), "t": ord("\t"), "r": ord("\r"), "0": 0}
 _MAX_REPEAT = 8192      # {m,n} bound cap: expansion is linear in n
 
 
-def _expand_repeat(node: _Node, m: int, n: int | None, pattern: str) -> _Node:
+def _expand_repeat(node: _Node, m: int, n: int | None) -> _Node:
     """{m,n} -> m copies + (n-m) optionals ({m,} -> m copies + a star tail).
     Expansion happens at parse time; the NFA builder is unchanged and shared
     subtrees are safe (construction walks per visit)."""
@@ -89,7 +98,7 @@ def _parse_regex(pattern: str) -> _Node:
                 if rep is None:
                     break               # literal '{' consumed by parse_atom later
                 m, n = rep
-                node = _expand_repeat(node, m, n, pattern)
+                node = _expand_repeat(node, m, n)
             else:
                 break
         return node
@@ -262,6 +271,56 @@ class _NFABuilder:
 DEAD = -1
 
 
+def _live_fixpoint(trans: list[list[int]], accepts_all: list[frozenset[int]]) -> list[frozenset[int]]:
+    """live[s] = union of accepts_all over states reachable from s (incl. s itself),
+    by a while-changed fixpoint over the DFA graph. States iterate in forward
+    discovery order while liveness flows backward from accept states, so deep
+    window DFAs need O(depth) full passes — kept as the GRID_PERF_NFA_LIVE=0
+    rollback path and the =verify oracle until the epoch's full-corpus run."""
+    n = len(trans)
+    succ: list[frozenset[int]] = [frozenset(t for t in row if t != DEAD) for row in trans]
+    live_sets: list[set[int]] = [set(acc) for acc in accepts_all]
+    changed = True
+    while changed:
+        changed = False
+        for s in range(n):
+            before = len(live_sets[s])
+            for nx in succ[s]:
+                live_sets[s] |= live_sets[nx]
+            if len(live_sets[s]) != before:
+                changed = True
+    return [frozenset(s) for s in live_sets]
+
+
+def _terminal_reach(b: _NFABuilder, accept_terminal: dict[int, int]) -> list[int]:
+    """term_reach[q] = bitmask of terminals whose accept state is reachable from
+    NFA state q via eps/byte edges (>= 0 bytes). One reverse DFS per accept
+    state; per-terminal sub-NFAs are disjoint (fresh states per build call), so
+    total work is O(NFA edges). Empty byte classes (e.g. [^\\x00-\\xff]) produce
+    edges the DFA can never take — following them in reverse would over-report
+    live terminals, so they are skipped."""
+    rev: list[list[int]] = [[] for _ in range(b.n)]
+    for src, dsts in b.eps.items():
+        for dst in dsts:
+            rev[dst].append(src)
+    for src, edges in b.edges.items():
+        for chars, dst in edges:
+            if not chars:
+                continue
+            rev[dst].append(src)
+    reach: list[int] = [0] * b.n
+    for acc, tid in accept_terminal.items():
+        bit = 1 << tid
+        stack = [acc]
+        while stack:
+            q = stack.pop()
+            if reach[q] & bit:
+                continue
+            reach[q] |= bit
+            stack.extend(rev[q])
+    return reach
+
+
 @dataclass(frozen=True)
 class ScannerDFA:
     """Combined byte DFA over all terminals of one grammar (immutable, shared).
@@ -317,23 +376,52 @@ class ScannerDFA:
         return st, length, p
 
 
-def build_scanner(terminals: dict[str, Terminal], terminal_order: tuple[str, ...]) -> ScannerDFA:
-    """Combined NFA over all terminals -> subset-construction byte DFA."""
+def _literal_node(pattern: str) -> _Node:
+    """Literal terminal text -> concatenation of single-byte char nodes."""
+    if len(pattern) > 1:
+        return _Node(
+            "cat",
+            kids=tuple(_Node("char", chars=frozenset({c})) for c in pattern.encode("latin-1")),
+        )
+    return _Node("char", chars=frozenset({ord(pattern)}))
+
+
+def build_scanner(
+    terminals: dict[str, Terminal],
+    terminal_order: tuple[str, ...],
+    *,
+    factored: bool | None = None,
+) -> "ScannerDFA | LazyProductDFA":
+    """Combined NFA over all terminals -> subset-construction byte DFA.
+
+    ``factored`` (None = read GRID_PERF_FACTORED_SCANNER) selects the 0.3.x
+    per-terminal-DFA product path (grid/lexer/factored.py), which may return a
+    ScannerDFA-protocol lazy facade instead of an eager ScannerDFA when the
+    product exceeds its state budget. Both paths honor GRID_PERF_NFA_LIVE for
+    live-set computation: the factored path derives each component's
+    co-accessibility from the same NFA terminal-reach (see factored.py). The
+    default path below is byte-identical with both flags off."""
+    if factored is None:
+        factored = os.environ.get("GRID_PERF_FACTORED_SCANNER", "0") == "1"
+    if factored:
+        from grid.lexer.factored import build_factored_scanner
+
+        return build_factored_scanner(terminals, terminal_order)
+    mode = os.environ.get("GRID_PERF_NFA_LIVE", "1")
     b = _NFABuilder()
     root = b.new()
     accept_terminal: dict[int, int] = {}  # NFA accept state -> terminal id
     for tid, name in enumerate(terminal_order):
         t = terminals[name]
         if t.is_literal:
-            node: _Node = _Node(
-                "cat",
-                kids=tuple(_Node("char", chars=frozenset({c})) for c in t.pattern.encode("latin-1")),
-            ) if len(t.pattern) > 1 else _Node("char", chars=frozenset({ord(t.pattern)}))
+            node: _Node = _literal_node(t.pattern)
         else:
             node = _parse_regex(t.pattern)
         s, a = b.build(node)
         b.add_eps(root, s)
         accept_terminal[a] = tid
+
+    term_reach = _terminal_reach(b, accept_terminal) if mode != "0" else None
 
     # eps-closure distributes over union: precompute the per-state closure once
     # (graph reachability over eps edges), then closure(S) = union of eps_star[s].
@@ -379,9 +467,7 @@ def build_scanner(terminals: dict[str, Terminal], terminal_order: tuple[str, ...
         blocks = nxt_blocks
     blocks.sort(key=min)  # deterministic class order (stable across processes)
     class_of = [0] * 256
-    class_rep: list[int] = []
     for ci_, blk in enumerate(blocks):
-        class_rep.append(min(blk))
         for c in blk:
             class_of[c] = ci_
     n_classes = len(blocks)
@@ -407,10 +493,19 @@ def build_scanner(terminals: dict[str, Terminal], terminal_order: tuple[str, ...
     order = [start_set]
     trans: list[list[int]] = []
     accepts_all: list[frozenset[int]] = []
+    live_masks: list[int] = []
     i = 0
     while i < len(order):
         cur = order[i]
         i += 1
+        if term_reach is not None:
+            # live(S) = OR of term_reach over S: the subset state after a word is
+            # exactly the NFA states reachable via it (Rabin-Scott), so terminal-
+            # accept reachability distributes over the union.
+            mask = 0
+            for st in cur:
+                mask |= term_reach[st]
+            live_masks.append(mask)
         by_class: dict[int, set[int]] = {}
         for st in cur:
             per = edge_by_class.get(st)
@@ -437,22 +532,31 @@ def build_scanner(terminals: dict[str, Terminal], terminal_order: tuple[str, ...
 
     accepts = [min(acc, key=lambda t: prio[t]) if acc else -1 for acc in accepts_all]
 
-    # live[s] = union of accepts_all over states reachable from s (incl. s itself),
-    # computed by one reverse-topological fixpoint over the DFA graph.
-    n = len(order)
-    succ: list[frozenset[int]] = [frozenset(t for t in row if t != DEAD) for row in trans]
-    live_sets: list[set[int]] = [set(acc) for acc in accepts_all]
-    changed = True
-    while changed:
-        changed = False
-        for s in range(n):
-            before = len(live_sets[s])
-            for nx in succ[s]:
-                live_sets[s] |= live_sets[nx]
-            if len(live_sets[s]) != before:
-                changed = True
-
-    lives = [frozenset(s) for s in live_sets]
+    lives: list[frozenset[int]]
+    if term_reach is None:
+        lives = _live_fixpoint(trans, accepts_all)
+    else:
+        # equal masks share one frozenset (deep window chains repeat one live set)
+        by_mask: dict[int, frozenset[int]] = {}
+        lives = []
+        for m in live_masks:
+            got = by_mask.get(m)
+            if got is None:
+                tids: list[int] = []
+                r = m
+                while r:
+                    low = r & -r
+                    tids.append(low.bit_length() - 1)
+                    r ^= low
+                got = by_mask[m] = frozenset(tids)
+            lives.append(got)
+        if mode == "verify":
+            for s, old in enumerate(_live_fixpoint(trans, accepts_all)):
+                if lives[s] != old:
+                    diff = ", ".join(sorted(terminal_order[t] for t in lives[s] ^ old))
+                    raise AssertionError(
+                        f"GRID_PERF_NFA_LIVE=verify: live[{s}] diverges from the "
+                        f"fixpoint (symmetric difference: {diff})")
     h_max = max((len(s) for s in lives), default=0)
     return ScannerDFA(
         start=0,

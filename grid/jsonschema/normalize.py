@@ -22,11 +22,16 @@ dropping or ignoring here would surface as silent invalidation errors.
 Internal markers consumed by the compiler:
 - ``x-grid-forbid-keys``: [names]   object must not contain these keys
 - ``x-grid-not-values``: [values]   value must not equal any of these
+- ``x-grid-cap-dropped``: True      a recursive additionalProperties
+                                    conjunct was dropped under merge; the
+                                    compiler records it as unenforced
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 from typing import Any
 
 try:
@@ -55,7 +60,7 @@ _ASSERTIONS = {
     "uniqueItems", "pattern", "format", "minLength", "maxLength",
     "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
     "x-grid-forbid-keys", "x-grid-not-values", "x-grid-not-patterns",
-    "x-grid-extra-patterns", "x-grid-branch-unified",
+    "x-grid-extra-patterns", "x-grid-branch-unified", "x-grid-cap-dropped",
 }
 # keyword classes used by the merge algebra
 _MIN_KEYS = {"minimum", "minLength", "minItems", "minProperties", "minContains"}
@@ -73,6 +78,162 @@ FALSE_SCHEMA = {"not": {}}      # canonical unsatisfiable schema
 # the root $schema; single-threaded bench usage.
 _LEGACY_REF = False
 _LEGACY_MARKERS = ("draft-03", "draft-04", "draft-06", "draft-07")
+
+# Conflict-retry mode (normalize(unify_string_values=True)): runs the
+# _unify_string_values pre-pass inside _harmonize_string_consts. Set and
+# restored per normalize() run exactly like _LEGACY_REF (single-threaded);
+# default off, so a normal compile is byte-identical to a build without
+# the retry path — only a caller that already saw an LALRConflictError
+# should re-normalize with this enabled.
+_UNIFY_STRING_VALUES = False
+
+
+# ---------------------------------------------------- structural hash-consing
+
+# 'rulefor' (structural rule_for memo) is planned but NOT implemented; the
+# parser must not advertise components that silently no-op
+_HASHCONS_COMPONENTS = frozenset({"norm", "dedupe"})
+
+
+def _hashcons_components(value: str | None = None) -> frozenset[str]:
+    """GRID_PERF_HASHCONS -> enabled component set ('' / '0' = none,
+    '1' / 'all' = every component, else a comma list; unknown names ignored)."""
+    if value is None:
+        value = os.environ.get("GRID_PERF_HASHCONS", "")
+    value = value.strip()
+    if value in ("", "0"):
+        return frozenset()
+    if value in ("1", "all"):
+        return _HASHCONS_COMPONENTS
+    return frozenset(p.strip() for p in value.split(",")) & _HASHCONS_COMPONENTS
+
+
+class _HashconsMemo:
+    """Per-normalize()-run structural memo (installed/restored around each
+    run exactly like _LEGACY_REF: root and draft mode are fixed per run, so
+    entries never leak across $ref resolution scopes; single-threaded).
+
+    Two tiers per family: depth-portable (digest -> (result, rel), replayable
+    at any depth d with d+rel <= cutoff) and depth-pinned ((digest, depth) ->
+    result, replayable at the exact entry depth only)."""
+
+    __slots__ = ("dig", "norm", "norm_deep", "merge", "merge_deep",
+                 "wm_norm", "wm_merge", "shared")
+
+    def __init__(self) -> None:
+        # id -> node for every result a memo hit served: these occupy tree
+        # positions where legacy built a DISTINCT object, so the compiler's
+        # id() memo must charge its virtual-_n rule-budget delta there
+        self.shared: dict[int, Any] = {}
+        # id(node) -> (node, digest): holding the node pins its id, so a
+        # recycled id can never alias a dead node's digest
+        self.dig: dict[int, tuple[Any, bytes]] = {}
+        # digest -> (result, rel): rel = deepest dict-_norm entry depth
+        # reached at or below the node, relative to it (rel = 0 means no
+        # dict children — the entry raise includes the node's own depth);
+        # the computation never touched the depth>64 cutoff, so it replays
+        # at any depth d with d+rel <= 64
+        self.norm: dict[bytes, tuple[Any, int]] = {}
+        # (digest, depth) -> (result, wm): the walk ENTERED the cutoff
+        # region (wm > 64), so the entry is depth-pinned — reusable at the
+        # exact entry depth only (this keys the rewrite-chain blowup
+        # region); conservative: a depth-65 dict needing no rewrite is
+        # stored depth-pinned although its result is depth-free
+        self.norm_deep: dict[tuple[bytes, int], tuple[Any, int]] = {}
+        # (digest(a), digest(b)) -> (ok, result-or-message, rel): same
+        # watermark discipline against merge2's _depth>32 cutoff
+        self.merge: dict[tuple[bytes, bytes], tuple[bool, Any, int]] = {}
+        self.merge_deep: dict[tuple[bytes, bytes, int],
+                              tuple[bool, Any, int]] = {}
+        # deepest _norm/merge2 entry depth reached in the current
+        # computation; charged/reset by the wrapper discipline below
+        self.wm_norm = 0
+        self.wm_merge = 0
+
+
+# active memo for the current normalize() run; None = hash-consing off
+_MEMO: _HashconsMemo | None = None
+
+
+def _scalar_digest(v: Any) -> bytes:
+    # json text separates 1 / 1.0 / True / "1"; fixed-size output keeps
+    # container hashing injective without length prefixes
+    return hashlib.blake2b(
+        b"s" + json.dumps(v, ensure_ascii=False).encode("utf-8"),
+        digest_size=16).digest()
+
+
+def _digest_rec(node: Any, cache: dict[int, tuple[Any, bytes]]) -> bytes:
+    """Iterative post-order digest: no Python recursion (a memo hit deep in
+    an already-deep merge/normalize stack must not tip RecursionError), and
+    shared DAG children hash once, not once per expansion path."""
+    if not isinstance(node, (dict, list)):
+        return _scalar_digest(node)
+    entered: set[int] = set()
+    stack: list[tuple[Any, bool]] = [(node, False)]
+    while stack:
+        n, expanded = stack.pop()
+        if not isinstance(n, (dict, list)):
+            continue
+        ent = cache.get(id(n))
+        if ent is not None and ent[0] is n:
+            continue
+        if expanded:
+            if isinstance(n, dict):
+                # INSERTION order, not sorted: merge2/normalize outputs
+                # inherit input key order and the compiler walks properties
+                # in that order — order-insensitive keys would alias results
+                # legacy distinguishes
+                h = hashlib.blake2b(b"{", digest_size=16)
+                for k, v in n.items():
+                    h.update(_scalar_digest(k))
+                    if isinstance(v, (dict, list)):
+                        h.update(cache[id(v)][1])
+                    else:
+                        h.update(_scalar_digest(v))
+            else:
+                h = hashlib.blake2b(b"[", digest_size=16)
+                for v in n:
+                    if isinstance(v, (dict, list)):
+                        h.update(cache[id(v)][1])
+                    else:
+                        h.update(_scalar_digest(v))
+            cache[id(n)] = (n, h.digest())
+        else:
+            if id(n) in entered:
+                raise ValueError("cyclic object graph")
+            entered.add(id(n))
+            # LIFO: this subtree completes before any second occurrence of n
+            # further down the stack is popped, so each node expands once
+            stack.append((n, True))
+            kids = n.values() if isinstance(n, dict) else n
+            for v in kids:
+                if isinstance(v, (dict, list)):
+                    stack.append((v, False))
+    return cache[id(node)][1]
+
+
+def _digest(node: Any, memo: _HashconsMemo) -> bytes | None:
+    """Structural digest of a JSON tree; None = not digestable (non-JSON
+    value, cyclic object graph) -> that node is not memoized."""
+    try:
+        return _digest_rec(node, memo.dig)
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        return None
+
+
+def _debug_verify(memo: _HashconsMemo) -> None:
+    """GRID_PERF_HASHCONS_DEBUG=1: re-digest every cached node at run end —
+    a mismatch means a consumer mutated a shared subtree in place."""
+    fresh: dict[int, tuple[Any, bytes]] = {}
+    for node, dig in list(memo.dig.values()):
+        try:
+            now = _digest_rec(node, fresh)
+        except (TypeError, ValueError, OverflowError, RecursionError):
+            now = None
+        assert now == dig, (
+            "hashcons: cached subtree mutated in place: "
+            f"{json.dumps(node, default=repr)[:200]}")
 
 
 def _is_true(s: Any) -> bool:
@@ -121,6 +282,68 @@ def _inline_refs(schema: Any, root: Any, seen: tuple = ()) -> Any:
     if isinstance(schema, list):
         return [_inline_refs(v, root, seen) for v in schema]
     return schema
+
+
+def _refs_in(node: Any) -> list[str]:
+    """Syntactic $refs in assertion positions (annotations — $defs,
+    definitions, titles — are resolution targets or metadata the merge
+    algebra never walks into)."""
+    acc: list[str] = []
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        if isinstance(n, dict):
+            r = n.get("$ref")
+            if isinstance(r, str):
+                acc.append(r)
+            for key, v in n.items():
+                if key == "$ref" or key in _ANNOTATIONS:
+                    continue
+                if isinstance(v, (dict, list)):
+                    stack.append(v)
+        elif isinstance(n, list):
+            stack.extend(x for x in n if isinstance(x, (dict, list)))
+    return acc
+
+
+def _ref_web_cyclic(schema: Any, root: Any) -> bool:
+    """True iff a $ref chain reachable from `schema` re-enters itself.
+
+    The exact conjunction against such a schema is a grammar-level fixpoint
+    (a product over the ref cycle) that no finite keyword fold can express —
+    merge2 would grind the cycle to its depth cutoff and fail the whole
+    merge. Content-local in (schema, root), so the answer is identical with
+    and without the hashcons memo. Unresolvable refs get no outgoing edge:
+    whether they fail the merge is the merge's own business."""
+    gray, black = 1, 2
+    color: dict[str, int] = {}
+    for r0 in _refs_in(schema):
+        if color.get(r0) == black:
+            continue
+        stack: list[tuple[str, bool]] = [(r0, False)]
+        while stack:
+            ref, expanded = stack.pop()
+            if expanded:
+                color[ref] = black
+                continue
+            c = color.get(ref)
+            if c == gray:
+                return True
+            if c == black:
+                continue
+            color[ref] = gray
+            stack.append((ref, True))
+            try:
+                target = _resolve_pointer(root, ref)
+            except (Unmergeable, ValueError, IndexError, KeyError, TypeError):
+                continue
+            for k in _refs_in(target):
+                ck = color.get(k)
+                if ck == gray:
+                    return True
+                if ck != black:
+                    stack.append((k, False))
+    return False
 
 
 def _as_dict(s: Any) -> dict:
@@ -271,6 +494,67 @@ def _both(a: dict, b: dict, key: str):
 
 def merge2(a: Any, b: Any, root: Any, _depth: int = 0) -> dict:
     """Conjunction of two schemas as one schema (raises Unmergeable)."""
+    # mirror of the _norm wrapper discipline below — any edit here must be
+    # mirrored there (six intentional differences: cutoff 32 vs 64, key
+    # arity, Unmergeable tri-state, entry guards, wm slot, dict-only shared
+    # registration)
+    memo = _MEMO
+    if memo is None:
+        return _merge2_impl(a, b, root, _depth)
+    if memo.wm_merge < _depth:
+        memo.wm_merge = _depth
+    da = _digest(a, memo)
+    db = _digest(b, memo) if da is not None else None
+    if db is None:
+        return _merge2_impl(a, b, root, _depth)
+    key = (da, db)
+    hit = memo.merge.get(key)
+    if hit is not None:
+        ok, val, rel = hit
+        # reuse only where the replayed recursion provably stays under the
+        # depth cutoff; the hit still counts toward the caller's watermark
+        if _depth + rel <= 32:
+            if memo.wm_merge < _depth + rel:
+                memo.wm_merge = _depth + rel
+            if ok:
+                if isinstance(val, dict):
+                    memo.shared[id(val)] = val
+                return val
+            raise Unmergeable(val)
+    deep_hit = memo.merge_deep.get((da, db, _depth))
+    if deep_hit is not None:
+        ok, val, wm = deep_hit
+        if memo.wm_merge < wm:
+            memo.wm_merge = wm
+        if ok:
+            if isinstance(val, dict):
+                memo.shared[id(val)] = val
+            return val
+        raise Unmergeable(val)
+    outer = memo.wm_merge
+    memo.wm_merge = _depth
+    try:
+        result = _merge2_impl(a, b, root, _depth)
+        wm = memo.wm_merge
+        if wm <= 32:
+            memo.merge[key] = (True, result, wm - _depth)
+        else:
+            memo.merge_deep[(da, db, _depth)] = (True, result, wm)
+        return result
+    except Unmergeable as e:
+        # content-determined failure: cache and re-raise fresh instances
+        wm = memo.wm_merge
+        if wm <= 32:
+            memo.merge[key] = (False, str(e), wm - _depth)
+        else:
+            memo.merge_deep[(da, db, _depth)] = (False, str(e), wm)
+        raise
+    finally:
+        if outer > memo.wm_merge:
+            memo.wm_merge = outer
+
+
+def _merge2_impl(a: Any, b: Any, root: Any, _depth: int = 0) -> dict:
     if _depth > 32:
         raise Unmergeable("merge recursion depth (cyclic $ref web)")
     a, b = _as_dict(a), _as_dict(b)
@@ -324,14 +608,11 @@ def merge2(a: Any, b: Any, root: Any, _depth: int = 0) -> dict:
             if key in s:
                 base = {k: v for k, v in s.items() if k != key}
                 branches = s[key]
-                if len(branches) * 1 > MAX_BRANCH_PRODUCT:
+                if len(branches) > MAX_BRANCH_PRODUCT:
                     raise Unmergeable("branch product too large")
                 merged_branches = []
                 for br in branches:
-                    try:
-                        m = merge2(merge2(br, base, root, _depth + 1), other, root, _depth + 1)
-                    except Unmergeable:
-                        raise
+                    m = merge2(merge2(br, base, root, _depth + 1), other, root, _depth + 1)
                     if not _is_false(m):
                         merged_branches.append(m)
                 if not merged_branches:
@@ -365,17 +646,25 @@ def merge2(a: Any, b: Any, root: Any, _depth: int = 0) -> dict:
         if k not in a:
             if k == "properties":
                 cap = _extras_schema(a)
-                if cap is not True:
-                    vb = {pk: merge2(pv, cap, root, _depth + 1)
-                          for pk, pv in vb.items()}
+                if cap is not True and vb:
+                    if _ref_web_cyclic(cap, root):
+                        # recursive conjunct: not finitely foldable — keep
+                        # the declared values, flag the drop for recording
+                        out["x-grid-cap-dropped"] = True
+                    else:
+                        vb = {pk: merge2(pv, cap, root, _depth + 1)
+                              for pk, pv in vb.items()}
             out[k] = vb
             continue
         if k not in b:
             if k == "properties":
                 cbp = _extras_schema(b)
-                if cbp is not True:
-                    va = {pk: merge2(pv, cbp, root, _depth + 1)
-                          for pk, pv in va.items()}
+                if cbp is not True and va:
+                    if _ref_web_cyclic(cbp, root):
+                        out["x-grid-cap-dropped"] = True
+                    else:
+                        va = {pk: merge2(pv, cbp, root, _depth + 1)
+                              for pk, pv in va.items()}
             out[k] = va
             continue
         if k == "type":
@@ -392,15 +681,21 @@ def merge2(a: Any, b: Any, root: Any, _depth: int = 0) -> dict:
             out[k] = inter if len(inter) > 1 else inter[0]
         elif k == "properties":
             merged = dict(va)
+            # b's bare keys must still honor a's additionalProperties
+            cap = _extras_schema(a) if any(pk not in va for pk in vb) else True
+            if cap is not True and _ref_web_cyclic(cap, root):
+                cap = True
+                out["x-grid-cap-dropped"] = True
             for pk, pv in vb.items():
                 if pk in merged:
                     merged[pk] = merge2(merged[pk], pv, root, _depth + 1)
                 else:
-                    # b's bare key must still honor a's additionalProperties
-                    cap = _extras_schema(a)
                     merged[pk] = pv if cap is True else merge2(pv, cap, root, _depth + 1)
             # a-only keys must honor b's additionalProperties
-            cbp = _extras_schema(b)
+            cbp = _extras_schema(b) if any(pk not in vb for pk in va) else True
+            if cbp is not True and _ref_web_cyclic(cbp, root):
+                cbp = True
+                out["x-grid-cap-dropped"] = True
             if cbp is not True:
                 for pk in va:
                     if pk not in vb:
@@ -445,7 +740,7 @@ def merge2(a: Any, b: Any, root: Any, _depth: int = 0) -> dict:
                 out[k] = va
             else:
                 out[k] = va
-                extra = out.get("x-grid-extra-patterns", "x-grid-branch-unified", [])
+                extra = out.get("x-grid-extra-patterns", [])
                 out["x-grid-extra-patterns"] = extra + [vb]
         elif k == "format":
             if va != vb:
@@ -545,22 +840,107 @@ def fold_allof(schema: dict, root: Any) -> dict:
 
 # ------------------------------------------------------------ normalize
 
-def normalize(schema: Any, root: Any = None) -> Any:
-    """Best-effort top-down rewrite; leaves unrewritable constructs intact."""
-    global _LEGACY_REF
+def normalize(schema: Any, root: Any = None,
+              *, hashcons: frozenset[str] | None = None,
+              _shared_out: dict[int, Any] | None = None,
+              unify_string_values: bool = False) -> Any:
+    """Best-effort top-down rewrite; leaves unrewritable constructs intact.
+
+    hashcons: enabled GRID_PERF_HASHCONS components (None = read the env).
+    'norm' installs a fresh structural memo for this run — fresh per run
+    because results are keyed on content but resolved against THIS root.
+    _shared_out (compiler-private): filled with the memo-shared result
+    nodes, the sites of the compiler's virtual-_n rule-budget charge.
+    unify_string_values: conflict-retry mode (see _unify_string_values);
+    off by default — enable only after a normal build LALR-conflicted."""
+    global _LEGACY_REF, _MEMO, _UNIFY_STRING_VALUES
+    if hashcons is None:
+        hashcons = _hashcons_components()
     if root is None:
         root = schema
     prev = _LEGACY_REF
+    prev_memo = _MEMO
+    prev_unify = _UNIFY_STRING_VALUES
     if isinstance(schema, dict):
         uri = schema.get("$schema") or ""
         _LEGACY_REF = any(m in uri for m in _LEGACY_MARKERS)
+    memo = _HashconsMemo() if "norm" in hashcons else None
+    _MEMO = memo
+    _UNIFY_STRING_VALUES = unify_string_values
     try:
-        return _norm(schema, root, depth=0)
+        result = _norm(schema, root, depth=0)
+        if memo is not None and \
+                os.environ.get("GRID_PERF_HASHCONS_DEBUG", "0") == "1":
+            _debug_verify(memo)
+        if memo is not None and _shared_out is not None:
+            _shared_out.update(memo.shared)
+        return result
     finally:
         _LEGACY_REF = prev
+        _MEMO = prev_memo
+        _UNIFY_STRING_VALUES = prev_unify
 
 
 def _norm(schema: Any, root: Any, depth: int) -> Any:
+    # mirror of the merge2 wrapper discipline above — any edit here must be
+    # mirrored there (six intentional differences: cutoff 32 vs 64, key
+    # arity, Unmergeable tri-state, entry guards, wm slot, dict-only shared
+    # registration)
+    memo = _MEMO
+    if memo is None:
+        return _norm_impl(schema, root, depth)
+    if not isinstance(schema, dict):
+        # non-dicts return unchanged at EVERY depth: no cutoff sensitivity,
+        # so they never raise the watermark
+        return schema
+    # ordering is load-bearing, both ways: the watermark raise comes BEFORE
+    # the cutoff return — a truncated call must poison the caller's
+    # watermark (depth-portable replay soundness) — and the cutoff return
+    # comes BEFORE the memo consult — identity-returned deep subtrees must
+    # never enter memo.shared (the compiler's virtual-_n charge in rule_for
+    # depends on shared matching legacy)
+    if memo.wm_norm < depth:
+        memo.wm_norm = depth
+    if depth > 64:
+        return schema
+    dig = _digest(schema, memo)
+    if dig is None:
+        return _norm_impl(schema, root, depth)
+    hit = memo.norm.get(dig)
+    if hit is not None:
+        result, rel = hit
+        # reuse only where the replayed recursion provably stays under the
+        # depth>64 cutoff; a hit raises the watermark as the walk would have
+        if depth + rel <= 64:
+            if memo.wm_norm < depth + rel:
+                memo.wm_norm = depth + rel
+            if isinstance(result, dict):
+                memo.shared[id(result)] = result
+            return result
+    deep_hit = memo.norm_deep.get((dig, depth))
+    if deep_hit is not None:
+        result, wm = deep_hit
+        if memo.wm_norm < wm:
+            memo.wm_norm = wm
+        if isinstance(result, dict):
+            memo.shared[id(result)] = result
+        return result
+    outer = memo.wm_norm
+    memo.wm_norm = depth
+    try:
+        result = _norm_impl(schema, root, depth)
+        wm = memo.wm_norm
+        if wm <= 64:
+            memo.norm[dig] = (result, wm - depth)
+        else:
+            memo.norm_deep[(dig, depth)] = (result, wm)
+        return result
+    finally:
+        if outer > memo.wm_norm:
+            memo.wm_norm = outer
+
+
+def _norm_impl(schema: Any, root: Any, depth: int) -> Any:
     if depth > 64 or not isinstance(schema, dict):
         return schema
     s = dict(schema)
@@ -720,6 +1100,11 @@ def _harmonize_string_consts(branches: list) -> list:
     lexeme wins maximal-munch priority and commits the parse to one branch).
     Rewrite the plain-string side as (consts | string-minus-consts) so the
     terminals partition the lexeme space and every branch stays live."""
+    if _UNIFY_STRING_VALUES:
+        # conflict-retry pre-pass; keys it unifies leave the consts/unify
+        # collections below empty for those keys, so the two passes compose
+        # without double-rewriting
+        branches = _unify_string_values(branches)
     consts: dict[str, set] = {}
     for b in branches:
         if not isinstance(b, dict):
@@ -781,6 +1166,86 @@ def _harmonize_string_consts(branches: list) -> list:
                                         v in subs):
                 props[k] = {"anyOf": list(subs),
                             "x-grid-branch-unified": True}
+                changed = True
+        out.append({**b, "properties": props} if changed else b)
+    return out
+
+
+def _string_value_class(v: Any) -> str | None:
+    """'enum' (string const / all-string enum), 'plain' (string-typed with
+    neither), or None (not a unifiable string shape)."""
+    if not isinstance(v, dict):
+        return None
+    if isinstance(v.get("const"), str):
+        return "enum"
+    if isinstance(v.get("enum"), list) and v["enum"] and \
+            all(isinstance(x, str) for x in v["enum"]):
+        return "enum"
+    if "const" not in v and "enum" not in v and v.get("type") == "string":
+        return "plain"
+    return None
+
+
+def _unify_string_values(branches: list) -> list:
+    """Conflict-retry variant of the consts path above (LALR-conflict retry
+    ONLY — never part of a normal build). The consts path rewrites just the
+    plain-string branches, leaving each const/enum branch its own value
+    rule; when several such near-twin rules share a terminal (const "a" in
+    one branch vs the harmonized enum-union carrying "a" in another) and
+    the branches' object shapes keep their LALR states merged, the build
+    dies in reduce-reduce/shift-reduce conflicts (WashingtonPost wp_105).
+
+    Here every branch's value for an overlapping key gets the SAME schema
+    object — the anyOf-union over all branch shapes — so rule_for's id-memo
+    (and the structural dedupe pass) collapse them into ONE rule: nothing
+    left to conflict. Per-branch tightness (const pinning per branch) is
+    lost; x-grid-branch-unified records it as unenforced, the honesty
+    contract for widened grammars. Keys whose enum sets are pairwise
+    disjoint with no coexisting plain-string shape (discriminated unions)
+    are left alone — their terminals cannot collide."""
+    enum_sets: dict[str, list[frozenset]] = {}
+    others: dict[str, list[dict]] = {}
+    for b in branches:
+        if not isinstance(b, dict):
+            continue
+        for k, v in (b.get("properties") or {}).items():
+            cls = _string_value_class(v)
+            if cls == "enum":
+                vals = [v["const"]] if isinstance(v.get("const"), str) \
+                    else v["enum"]
+                enum_sets.setdefault(k, []).append(frozenset(vals))
+            elif cls == "plain":
+                lst = others.setdefault(k, [])
+                if v not in lst:
+                    lst.append(v)
+    unified: dict[str, dict] = {}
+    for k, sets in enum_sets.items():
+        # unify only where value rules can actually collide: a plain-string
+        # shape coexists with consts, or two DIFFERENT enum sets share a
+        # lexeme; identical sets dedupe naturally, disjoint sets partition
+        overlap = bool(others.get(k)) or any(
+            a != c and a & c
+            for i, a in enumerate(sets) for c in sets[i + 1:])
+        if not overlap:
+            continue
+        cset = sorted(set().union(*sets))
+        arms: list[dict] = [{"enum": cset}]
+        for o in others.get(k, []):
+            arms.append({**o, "x-grid-not-values": sorted(
+                set(o.get("x-grid-not-values", ())) | set(cset))})
+        unified[k] = {"anyOf": arms, "x-grid-branch-unified": True}
+    if not unified:
+        return branches
+    out = []
+    for b in branches:
+        if not isinstance(b, dict):
+            out.append(b)
+            continue
+        props = dict(b.get("properties") or {})
+        changed = False
+        for k, u in unified.items():
+            if _string_value_class(props.get(k)) is not None:
+                props[k] = u    # the SAME object in every branch -> one rule
                 changed = True
         out.append({**b, "properties": props} if changed else b)
     return out

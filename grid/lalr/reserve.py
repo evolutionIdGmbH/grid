@@ -31,7 +31,16 @@ INF = math.inf
 
 
 def shortest_lexemes(dfa: ScannerDFA, n_terminals: int) -> dict[int, bytes]:
-    """BFS per DFA state; smallest-byte tie-break for reproducibility."""
+    """BFS per DFA state; smallest-byte tie-break for reproducibility.
+
+    Lazy factored DFAs dispatch to the per-component BFS: it returns the same
+    lexicographically-least shortest word per terminal, while the union-DFA
+    BFS below enumerates every state and would force full product
+    materialization on exactly the schemas the lazy regime exists for."""
+    if getattr(dfa, "lazy", False):
+        from grid.lexer.factored import shortest_lexemes_factored
+
+        return shortest_lexemes_factored(dfa)  # type: ignore[arg-type]
     out: dict[int, bytes] = {}
     frontier: list[tuple[int, bytes]] = [(dfa.start, b"")]
     seen = {dfa.start}
