@@ -4,6 +4,36 @@ Versions in the 0.2.x line are **correctness-only** (the coverage epoch,
 DESIGN-JSON-COVERAGE.md): error metrics are the headline; timings are
 recorded, not optimized (kernel frozen at v7). Speed work is the 0.3.x epoch.
 
+## 0.3.0 - 2026-07-30
+
+The performance epoch: compile-time (TTFM) tail work, selected by measured
+bake-off from a 20-candidate pool (bench/perfbench/), correctness-gated
+throughout (flag-off byte-identical; full-corpus zero-divergence verify).
+
+- Factored scanner: per-terminal DFA library with lazy product combination
+  (`GRID_PERF_FACTORED_SCANNER`); the measured scanner tail collapses
+  (per-state-cost family 45-84s -> under 1s).
+- Structural hash-consing in normalization (`GRID_PERF_HASHCONS`): the
+  exponential $ref re-normalization family now terminates deterministically.
+- NFA-derived live sets (default on): the global live fixpoint replaced by
+  per-accept reachability, proven equivalent over all 11,306 corpus schemas.
+- DeRemer-Pennello LALR lookaheads (`GRID_PERF_LALR_DP`): table-identical to
+  the canonical construction, modestly faster.
+- On-disk compile-artifact store (`GRID_PERF_ARTIFACT_STORE`, default off):
+  insertion-order-preserving keys, epoch invalidation, atomic writes.
+- Recursive-additionalProperties conjuncts are detected and recorded
+  (`x-grid-cap-dropped`) instead of failing the whole allOf merge.
+- LALR-conflict retry: `compile_schema(unify_string_values=True)` unifies
+  overlapping per-branch string values; callers retry once on
+  LALRConflictError (26 previously-conflicting schemas now compile).
+- Fixed: latent TypeError in two-pattern merge (11 schemas now compile);
+  unconditional serving import on the compile path.
+- Full-set (11,306, one machine): 10,154 passing (89.8%), 3 false-rejects,
+  every unenforced constraint recorded; TTFM avg 419 -> 147ms, p99
+  4.37s -> 1.17s; warm mask p50 unchanged at 25us.
+- bench/perfbench/: attribution profiler, candidate pool, selection record,
+  bake-off results, post-0.3.0 ROADMAP.
+
 ## 0.2.5 - 2026-07-21
 - `grid.jsonschema` package: JSON Schema -> grammar compilation promoted out
   of `bench/` with public API `compile_json_schema(schema, strict=False)`.
