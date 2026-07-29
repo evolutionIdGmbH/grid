@@ -370,8 +370,37 @@ class ScannerDFA:
         return st, length, p
 
 
-def build_scanner(terminals: dict[str, Terminal], terminal_order: tuple[str, ...]) -> ScannerDFA:
-    """Combined NFA over all terminals -> subset-construction byte DFA."""
+def _literal_node(pattern: str) -> _Node:
+    """Literal terminal text -> concatenation of single-byte char nodes."""
+    if len(pattern) > 1:
+        return _Node(
+            "cat",
+            kids=tuple(_Node("char", chars=frozenset({c})) for c in pattern.encode("latin-1")),
+        )
+    return _Node("char", chars=frozenset({ord(pattern)}))
+
+
+def build_scanner(
+    terminals: dict[str, Terminal],
+    terminal_order: tuple[str, ...],
+    *,
+    factored: bool | None = None,
+) -> ScannerDFA:
+    """Combined NFA over all terminals -> subset-construction byte DFA.
+
+    ``factored`` (None = read GRID_PERF_FACTORED_SCANNER) selects the 0.3.x
+    per-terminal-DFA product path (grid/lexer/factored.py), which may return a
+    ScannerDFA-protocol lazy facade instead of an eager ScannerDFA when the
+    product exceeds its state budget. Both paths honor GRID_PERF_NFA_LIVE for
+    live-set computation: the factored path derives each component's
+    co-accessibility from the same NFA terminal-reach (see factored.py). The
+    default path below is byte-identical with both flags off."""
+    if factored is None:
+        factored = os.environ.get("GRID_PERF_FACTORED_SCANNER", "0") == "1"
+    if factored:
+        from grid.lexer.factored import build_factored_scanner
+
+        return build_factored_scanner(terminals, terminal_order)  # type: ignore[return-value]
     mode = os.environ.get("GRID_PERF_NFA_LIVE", "1")
     b = _NFABuilder()
     root = b.new()
@@ -379,10 +408,7 @@ def build_scanner(terminals: dict[str, Terminal], terminal_order: tuple[str, ...
     for tid, name in enumerate(terminal_order):
         t = terminals[name]
         if t.is_literal:
-            node: _Node = _Node(
-                "cat",
-                kids=tuple(_Node("char", chars=frozenset({c})) for c in t.pattern.encode("latin-1")),
-            ) if len(t.pattern) > 1 else _Node("char", chars=frozenset({ord(t.pattern)}))
+            node: _Node = _literal_node(t.pattern)
         else:
             node = _parse_regex(t.pattern)
         s, a = b.build(node)
