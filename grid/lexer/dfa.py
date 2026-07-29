@@ -22,9 +22,15 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from grid.errors import GrammarInvalid
 from grid.grammar.spec import Terminal
+
+if TYPE_CHECKING:
+    # guard is mandatory: factored.py imports this module's privates at
+    # runtime, so an unguarded import would cycle
+    from grid.lexer.factored import LazyProductDFA
 
 # ---------------------------------------------------------------- regex parser
 
@@ -385,7 +391,7 @@ def build_scanner(
     terminal_order: tuple[str, ...],
     *,
     factored: bool | None = None,
-) -> ScannerDFA:
+) -> "ScannerDFA | LazyProductDFA":
     """Combined NFA over all terminals -> subset-construction byte DFA.
 
     ``factored`` (None = read GRID_PERF_FACTORED_SCANNER) selects the 0.3.x
@@ -400,7 +406,7 @@ def build_scanner(
     if factored:
         from grid.lexer.factored import build_factored_scanner
 
-        return build_factored_scanner(terminals, terminal_order)  # type: ignore[return-value]
+        return build_factored_scanner(terminals, terminal_order)
     mode = os.environ.get("GRID_PERF_NFA_LIVE", "1")
     b = _NFABuilder()
     root = b.new()
