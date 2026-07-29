@@ -54,6 +54,7 @@ from grid.lexer.dfa import (
     _parse_regex,
     _terminal_reach,
 )
+from grid.lexer.subset import byte_classes, edges_by_class, eps_closure_fn, subset_construct
 
 _DEFAULT_BUDGET = 20_000
 _COMPONENT_CAP = 4096   # wholesale-reset guard: per-schema key literals in a long-lived server
@@ -86,89 +87,21 @@ def _build_component(pattern: str, is_literal: bool) -> TerminalDFA:
     b = _NFABuilder()
     s0, acc = b.build(node)
 
-    eps_star: dict[int, frozenset[int]] = {}
-
-    def _star(st0: int) -> frozenset[int]:
-        got = eps_star.get(st0)
-        if got is None:
-            stack, seen = [st0], {st0}
-            while stack:
-                st = stack.pop()
-                for nxt in b.eps.get(st, ()):
-                    if nxt not in seen:
-                        seen.add(nxt)
-                        stack.append(nxt)
-            got = eps_star[st0] = frozenset(seen)
-        return got
-
-    def eps_closure(states) -> frozenset[int]:
-        out: frozenset[int] = frozenset()
-        for s in states:
-            out |= _star(s)
-        return out
-
-    # per-component byte classes: same partition-refinement idiom as
-    # build_scanner, over this terminal's edge charsets only (classes stay tiny)
-    distinct_charsets = {chars for edges in b.edges.values() for chars, _dst in edges}
-    blocks: list[set[int]] = [set(range(256))]
-    for chars in distinct_charsets:
-        nxt_blocks: list[set[int]] = []
-        for blk in blocks:
-            inside = blk & chars
-            outside = blk - chars
-            if inside:
-                nxt_blocks.append(inside)
-            if outside:
-                nxt_blocks.append(outside)
-        blocks = nxt_blocks
-    blocks.sort(key=min)
-    class_of = [0] * 256
-    for ci_, blk in enumerate(blocks):
-        for c in blk:
-            class_of[c] = ci_
+    # shared subset-construction core (grid/lexer/subset.py — the same helpers
+    # behind build_scanner); byte classes cover this terminal's edge charsets
+    # only, so they stay tiny. Acceptance is a post-pass over the discovery
+    # order: order[i] is the i-th subset, so the list is positionally
+    # identical to the legacy in-loop append.
+    eps_closure = eps_closure_fn(b.eps)
+    blocks, class_of = byte_classes(b.edges)
     n_classes = len(blocks)
-    edge_by_class: dict[int, list[list[int] | None]] = {}
-    for st, edges in b.edges.items():
-        per = edge_by_class[st] = [None] * n_classes
-        for chars, dst in edges:
-            seen_cls: set[int] = set()
-            for c in chars:
-                cl = class_of[c]
-                if cl in seen_cls:
-                    continue
-                seen_cls.add(cl)
-                lst = per[cl]
-                if lst is None:
-                    per[cl] = [dst]
-                else:
-                    lst.append(dst)
-
-    start_set = eps_closure(frozenset({s0}))
-    ids: dict[frozenset[int], int] = {start_set: 0}
-    order = [start_set]
-    trans: list[list[int]] = []
-    accepting: list[bool] = []
-    i = 0
-    while i < len(order):
-        cur = order[i]
-        i += 1
-        by_class: dict[int, set[int]] = {}
-        for st in cur:
-            per = edge_by_class.get(st)
-            if per is None:
-                continue
-            for cl, dsts in enumerate(per):
-                if dsts is not None:
-                    by_class.setdefault(cl, set()).update(dsts)
-        row = [DEAD] * n_classes
-        for cl, dsts in sorted(by_class.items()):
-            nxt = eps_closure(frozenset(dsts))
-            if nxt not in ids:
-                ids[nxt] = len(order)
-                order.append(nxt)
-            row[cl] = ids[nxt]
-        trans.append(row)
-        accepting.append(acc in cur)
+    order, trans = subset_construct(
+        eps_closure(frozenset({s0})),
+        edges_by_class(b.edges, class_of, n_classes),
+        eps_closure,
+        n_classes,
+    )
+    accepting = [acc in cur for cur in order]
 
     # co-accessibility: the same NFA-derived live computation as
     # dfa.build_scanner — reach[q] != 0 iff NFA state q can reach the accept

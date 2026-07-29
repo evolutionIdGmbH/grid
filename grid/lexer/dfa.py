@@ -28,6 +28,13 @@ from typing import TYPE_CHECKING
 from grid import perf_flags
 from grid.errors import GrammarInvalid
 from grid.grammar.spec import Terminal
+from grid.lexer.subset import (
+    DEAD,
+    byte_classes,
+    edges_by_class,
+    eps_closure_fn,
+    subset_construct,
+)
 
 if TYPE_CHECKING:
     # guard is mandatory: factored.py imports this module's privates at
@@ -269,8 +276,8 @@ class _NFABuilder:
 
 
 # ---------------------------------------------------------------- scanner DFA
-
-DEAD = -1
+# DEAD comes from grid/lexer/subset.py (single definition); re-exported here
+# for the ~10 importers that treat dfa.py as the lexer's public surface.
 
 
 def _terminal_reach(b: _NFABuilder, accept_terminal: dict[int, int]) -> list[int]:
@@ -405,108 +412,43 @@ def build_scanner(
         accept_terminal[a] = tid
 
     term_reach = _terminal_reach(b, accept_terminal)
-
-    # eps-closure distributes over union: precompute the per-state closure once
-    # (graph reachability over eps edges), then closure(S) = union of eps_star[s].
-    eps_star: dict[int, frozenset[int]] = {}
-
-    def _star(s0: int) -> frozenset[int]:
-        got = eps_star.get(s0)
-        if got is None:
-            stack, seen = [s0], {s0}
-            while stack:
-                st = stack.pop()
-                for nxt in b.eps.get(st, ()):
-                    if nxt not in seen:
-                        seen.add(nxt)
-                        stack.append(nxt)
-            got = eps_star[s0] = frozenset(seen)
-        return got
-
-    def eps_closure(states) -> frozenset[int]:
-        out: frozenset[int] = frozenset()
-        for s in states:
-            out |= _star(s)
-        return out
-
     prio = {tid: terminals[name].priority for tid, name in enumerate(terminal_order)}
 
-    # Alphabet compression: partition the 256 byte values into equivalence
-    # classes over the distinct edge charsets (JSON/SQL grammars have ~10-30
-    # classes), run the subset construction per CLASS, and expand to 256-wide
-    # rows at the end. Same DFA modulo state numbering; the dominant TTFM cost
-    # (the per-byte inner loop) drops by the compression factor.
-    distinct_charsets = {chars for edges in b.edges.values() for chars, _dst in edges}
-    blocks: list[set[int]] = [set(range(256))]
-    for chars in distinct_charsets:
-        nxt_blocks: list[set[int]] = []
-        for blk in blocks:
-            inside = blk & chars
-            outside = blk - chars
-            if inside:
-                nxt_blocks.append(inside)
-            if outside:
-                nxt_blocks.append(outside)
-        blocks = nxt_blocks
-    blocks.sort(key=min)  # deterministic class order (stable across processes)
-    class_of = [0] * 256
-    for ci_, blk in enumerate(blocks):
-        for c in blk:
-            class_of[c] = ci_
+    # shared subset-construction core (grid/lexer/subset.py): eps-closure
+    # memoization, byte-class alphabet compression, per-class edge index,
+    # FIFO subset loop over class-compressed rows — the same helpers behind
+    # factored._build_component.
+    eps_closure = eps_closure_fn(b.eps)
+    blocks, class_of = byte_classes(b.edges)
     n_classes = len(blocks)
-    # per NFA state: class -> destination set (edges evaluated once, per class)
-    edge_by_class: dict[int, list[list[int] | None]] = {}
-    for st, edges in b.edges.items():
-        per = edge_by_class[st] = [None] * n_classes
-        for chars, dst in edges:
-            seen_cls: set[int] = set()
-            for c in chars:
-                cl = class_of[c]
-                if cl in seen_cls:
-                    continue
-                seen_cls.add(cl)
-                lst = per[cl]
-                if lst is None:
-                    per[cl] = [dst]
-                else:
-                    lst.append(dst)
+    order, class_rows = subset_construct(
+        eps_closure(frozenset({root})),
+        edges_by_class(b.edges, class_of, n_classes),
+        eps_closure,
+        n_classes,
+    )
 
-    start_set = eps_closure(frozenset({root}))
-    ids: dict[frozenset[int], int] = {start_set: 0}
-    order = [start_set]
-    trans: list[list[int]] = []
-    accepts_all: list[frozenset[int]] = []
+    # post-passes over the discovery order (each depends only on the subset
+    # order[i], so the lists are positionally identical to the legacy in-loop
+    # annotation):
+    # - 256-wide rows: class_of[c] == cl exactly when c in blocks[cl], and
+    #   transition-free classes hold DEAD in the class row, so the expansion
+    #   reproduces the legacy sparse per-byte writes row-for-row;
+    # - live(S) = OR of term_reach over S: the subset state after a word is
+    #   exactly the NFA states reachable via it (Rabin-Scott), so terminal-
+    #   accept reachability distributes over the union;
+    # - accepts_all[i] = the tagged accept states inside order[i].
+    trans = [[crow[cl] for cl in class_of] for crow in class_rows]
+    accepts_all = [
+        frozenset(accept_terminal[st] for st in cur if st in accept_terminal)
+        for cur in order
+    ]
     live_masks: list[int] = []
-    i = 0
-    while i < len(order):
-        cur = order[i]
-        i += 1
-        # live(S) = OR of term_reach over S: the subset state after a word is
-        # exactly the NFA states reachable via it (Rabin-Scott), so terminal-
-        # accept reachability distributes over the union.
+    for cur in order:
         mask = 0
         for st in cur:
             mask |= term_reach[st]
         live_masks.append(mask)
-        by_class: dict[int, set[int]] = {}
-        for st in cur:
-            per = edge_by_class.get(st)
-            if per is None:
-                continue
-            for cl, dsts in enumerate(per):
-                if dsts is not None:
-                    by_class.setdefault(cl, set()).update(dsts)
-        row = [DEAD] * 256
-        for cl, dsts in sorted(by_class.items()):
-            nxt = eps_closure(frozenset(dsts))
-            if nxt not in ids:
-                ids[nxt] = len(order)
-                order.append(nxt)
-            dst_id = ids[nxt]
-            for c in blocks[cl]:
-                row[c] = dst_id
-        trans.append(row)
-        accepts_all.append(frozenset(accept_terminal[st] for st in cur if st in accept_terminal))
 
     if accepts_all[0]:
         bad = ", ".join(terminal_order[t] for t in accepts_all[0])
