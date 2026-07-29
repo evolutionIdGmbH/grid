@@ -153,9 +153,11 @@ _HC = frozenset({"norm", "dedupe"})
 
 
 def _inline_hashcons(value=None):
-    # verbatim: grid/jsonschema/normalize.py _hashcons_components pre-migration
+    # value grammar verbatim from grid/jsonschema/normalize.py
+    # _hashcons_components pre-migration; unset default flipped to the
+    # rc2-measured component set (E3)
     if value is None:
-        value = os.environ.get("GRID_PERF_HASHCONS", "")
+        value = os.environ.get("GRID_PERF_HASHCONS", "norm,dedupe")
     value = value.strip()
     if value in ("", "0"):
         return frozenset()
@@ -178,6 +180,17 @@ def test_hashcons_components_value_oracle(raw):
 
 def test_hashcons_components_constant():
     assert perf_flags.HASHCONS_COMPONENTS == _HC
+
+
+def test_hashcons_default_is_measured_set(monkeypatch):
+    """Unset must equal the rc2-measured configuration exactly; "0" and ""
+    remain the kill switch."""
+    monkeypatch.delenv("GRID_PERF_HASHCONS", raising=False)
+    assert perf_flags.hashcons_components() == frozenset({"norm", "dedupe"})
+    monkeypatch.setenv("GRID_PERF_HASHCONS", "0")
+    assert perf_flags.hashcons_components() == frozenset()
+    monkeypatch.setenv("GRID_PERF_HASHCONS", "")
+    assert perf_flags.hashcons_components() == frozenset()
 
 
 @pytest.mark.parametrize("raw", RAW_VALUES)

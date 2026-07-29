@@ -32,6 +32,9 @@ Flag table:
     GRID_PERF_HASHCONS          hashcons_components()       ""/"0" = none,
                                                             "1"/"all" = all,
                                                             else comma list
+                                                            (default on:
+                                                            unset =
+                                                            "norm,dedupe")
     GRID_PERF_HASHCONS_DEBUG    hashcons_debug_enabled()    == "1"
 
 Contract (enforced by tests/test_perf_flags.py):
@@ -110,10 +113,15 @@ HASHCONS_COMPONENTS = frozenset({"norm", "dedupe"})
 def hashcons_components(value: str | None = None) -> frozenset[str]:
     """GRID_PERF_HASHCONS -> enabled component set ('' / '0' = none,
     '1' / 'all' = every component, else a comma list; unknown names
-    ignored). Moved verbatim from grid/jsonschema/normalize.py, which keeps
-    back-compat aliases (_hashcons_components / _HASHCONS_COMPONENTS)."""
+    ignored). Unset defaults to "norm,dedupe" — the exact configuration the
+    v0.3.0 full-corpus run measured (pinned by name, NOT "all", so a future
+    component added to HASHCONS_COMPONENTS needs its own default decision);
+    "0" (or "") is the kill switch restoring legacy un-consed
+    normalization. Moved verbatim from grid/jsonschema/normalize.py, which
+    keeps back-compat aliases (_hashcons_components /
+    _HASHCONS_COMPONENTS)."""
     if value is None:
-        value = os.environ.get("GRID_PERF_HASHCONS", "")
+        value = os.environ.get("GRID_PERF_HASHCONS", "norm,dedupe")
     value = value.strip()
     if value in ("", "0"):
         return frozenset()
