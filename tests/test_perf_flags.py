@@ -139,9 +139,14 @@ def test_factored_budget_garbage_raises(monkeypatch, raw):
 @pytest.mark.parametrize("raw", RAW_VALUES)
 def test_lalr_algorithm_oracle(monkeypatch, raw):
     _setenv(monkeypatch, "GRID_PERF_LALR_DP", raw)
-    # verbatim: grid/lalr/compile.py compile_tables pre-migration
-    oracle = "dp" if os.environ.get("GRID_PERF_LALR_DP", "0") == "1" else "lr1_merge"
+    # == "1" value grammar unchanged; unset default flipped to "dp" (E3)
+    oracle = "dp" if os.environ.get("GRID_PERF_LALR_DP", "1") == "1" else "lr1_merge"
     assert perf_flags.lalr_algorithm() == oracle
+
+
+def test_lalr_algorithm_default_is_dp(monkeypatch):
+    monkeypatch.delenv("GRID_PERF_LALR_DP", raising=False)
+    assert perf_flags.lalr_algorithm() == "dp"
 
 
 _HC = frozenset({"norm", "dedupe"})

@@ -26,7 +26,9 @@ Flag table:
     GRID_PERF_FACTORED_BUDGET   factored_budget(default)    int(); ValueError
                                                             on garbage
     GRID_PERF_LALR_DP           lalr_algorithm()            "dp" if == "1"
-                                                            else "lr1_merge"
+                                                            (default on:
+                                                            unset = "1") else
+                                                            "lr1_merge"
     GRID_PERF_HASHCONS          hashcons_components()       ""/"0" = none,
                                                             "1"/"all" = all,
                                                             else comma list
@@ -92,9 +94,12 @@ def factored_budget(default: int) -> int:
 
 
 def lalr_algorithm() -> str:
-    """GRID_PERF_LALR_DP=1 -> "dp" (LR(0) + DeRemer-Pennello lookaheads),
-    else "lr1_merge" (canonical LR(1) merge), for lalr.compile_tables."""
-    return "dp" if os.environ.get("GRID_PERF_LALR_DP", "0") == "1" else "lr1_merge"
+    """GRID_PERF_LALR_DP -> "dp" (LR(0) + DeRemer-Pennello lookaheads, the
+    default since the v0.3.0 full-corpus run) when "1" (now the unset
+    default), else "lr1_merge" (canonical LR(1) merge — the kill-switch value
+    "0", kept as the construction-independent oracle), for
+    lalr.compile_tables."""
+    return "dp" if os.environ.get("GRID_PERF_LALR_DP", "1") == "1" else "lr1_merge"
 
 
 # 'rulefor' (structural rule_for memo) is planned but NOT implemented; the
