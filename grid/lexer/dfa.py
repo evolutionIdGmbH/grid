@@ -161,20 +161,27 @@ def build_scanner(
     # post-passes over the discovery order (each depends only on the subset
     # order[i], so the lists are positionally identical to the legacy in-loop
     # annotation):
-    # - 256-wide rows: class_of[c] == cl exactly when c in blocks[cl], and
-    #   transition-free classes hold DEAD in the class row, so the expansion
-    #   reproduces the legacy sparse per-byte writes row-for-row;
+    # - 256-wide rows: c in blocks[cl] exactly when class_of[c] == cl, so
+    #   writing each non-DEAD class over a DEAD-filled row reproduces the
+    #   legacy sparse per-byte writes row-for-row (and measures ~flat where a
+    #   256-wide class_of indexing comp cost +4% eager build time);
     # - live(S) = OR of term_reach over S: the subset state after a word is
     #   exactly the NFA states reachable via it (Rabin-Scott), so terminal-
     #   accept reachability distributes over the union;
     # - accepts_all[i] = the tagged accept states inside order[i].
-    trans = [[crow[cl] for cl in class_of] for crow in class_rows]
-    accepts_all = [
-        frozenset(accept_terminal[st] for st in cur if st in accept_terminal)
-        for cur in order
-    ]
+    trans: list[list[int]] = []
+    for crow in class_rows:
+        row = [DEAD] * 256
+        for cl, dst in enumerate(crow):
+            if dst != DEAD:
+                for c in blocks[cl]:
+                    row[c] = dst
+        trans.append(row)
+    accepts_all: list[frozenset[int]] = []
     live_masks: list[int] = []
     for cur in order:
+        accepts_all.append(
+            frozenset(accept_terminal[st] for st in cur if st in accept_terminal))
         mask = 0
         for st in cur:
             mask |= term_reach[st]
