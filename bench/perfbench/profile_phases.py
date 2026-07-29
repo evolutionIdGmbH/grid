@@ -203,7 +203,9 @@ def summarize(out_dir: str) -> None:
     for f in g.glob(os.path.join(out_dir, "*.phases.json")):
         with open(f) as fh:
             rec = json.load(fh)
-        if rec.get("running") is None:
+        if rec.get("running") is None and "error" not in rec and "rc" not in rec:
+            # completed = child reached the final flush; a pre-first-phase
+            # crash also lacks 'running' but carries error/rc
             n_done += 1
         elif "timeout_s" in rec or "rc" in rec:
             ph = rec.get("running") or "?"
