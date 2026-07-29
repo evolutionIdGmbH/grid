@@ -138,6 +138,9 @@ def _build_lr1_merged(
         i += 1
         syms = {prods[p][1][d] for (p, d, _la) in cur if d < len(prods[p][1])}
         row: dict[int, int] = {}
+        # sorted: symbol-ascending discovery must match _lr0_automaton's loop
+        # for equal state numbering across algorithms (the DP differential
+        # compares tables entry-for-entry)
         for s in sorted(syms):
             nxt = goto_set(cur, s)
             if nxt not in lr1_states:
