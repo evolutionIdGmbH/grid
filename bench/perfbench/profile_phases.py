@@ -33,6 +33,12 @@ import time
 MANIFEST = os.path.join(os.path.dirname(__file__), "manifest.json")
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "tmp", "jsb-src", "data")
 
+# measure the tree this script lives in: the venv's grid install points at the
+# main checkout, so without this pin a worktree run silently profiles main
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
 PHASES = ("schema_compile", "spec_load", "projection", "lalr", "scanner")
 
 
@@ -71,7 +77,13 @@ def child(schema_file: str, out_file: str) -> None:
     tables = phase("lalr", lambda: compile_tables(proj))
     rec["stats"]["lalr_states"] = len(getattr(tables, "action", ()) or ())
     dfa = phase("scanner", lambda: build_scanner(grammar.terminals, grammar.terminal_order))
-    rec["stats"]["dfa_states"] = len(dfa.trans)
+    if getattr(dfa, "lazy", False):
+        # GRID_PERF_FACTORED_SCANNER over-budget regime: LazyProductDFA has no
+        # dense trans; report the product states materialized so far
+        rec["stats"]["dfa_states"] = len(dfa._states)
+        rec["stats"]["dfa_lazy"] = True
+    else:
+        rec["stats"]["dfa_states"] = len(dfa.trans)
     rec["running"] = None
     rec["rss_mb"] = round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / (1 << 20))
     flush()
