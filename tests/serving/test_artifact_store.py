@@ -169,6 +169,47 @@ def test_terminal_order_key_separation(cache):
     assert t1.terminal_names != t2.terminal_names
 
 
+def test_schema_insertion_order_key_separation(cache, monkeypatch):
+    """compile_schema output depends on dict insertion order (keyword-terminal
+    numbering and rule naming follow property order), so dict-equal schemas
+    differing only in properties insertion order must get their own entries —
+    a sorted-key canon aliases them, and the round-trip faithful check cannot
+    split them because dict equality ignores order."""
+    from grid.jsonschema import compile_json_schema
+    from grid.jsonschema.compiler import compile_schema
+
+    a = {"type": "object",
+         "properties": {"alpha": {"type": "integer"}, "beta": {"type": "string"}},
+         "required": ["alpha", "beta"], "additionalProperties": False}
+    b = {"type": "object",
+         "properties": {"beta": {"type": "string"}, "alpha": {"type": "integer"}},
+         "required": ["alpha", "beta"], "additionalProperties": False}
+    assert a == b  # dict-equal: exactly the pair a sorted-key canon collapses
+    own_a, _ = compile_schema(a)  # ground truth, no store involved
+    own_b, _ = compile_schema(b)
+    assert own_a != own_b  # order-variant sources: a shared entry would lie
+    assert compile_json_schema(a)[0] == own_a
+    assert compile_json_schema(b)[0] == own_b  # cold: not served a's entry
+    assert len([p for p in _bins(cache) if p.parent.name == "schema_src"]) == 2
+    monkeypatch.setattr("grid.jsonschema.compile_schema", _boom)
+    assert compile_json_schema(a)[0] == own_a  # warm: each hit is its own
+    assert compile_json_schema(b)[0] == own_b
+
+
+def test_epoch_failure_degrades_to_miss(cache, toy_grammar, monkeypatch):
+    """code_epoch reads module sources off disk; in a pyc-only deployment it
+    raises — get must degrade to a miss instead of breaking the compile."""
+    def no_source():
+        raise OSError("pyc-only deployment: no module source on disk")
+
+    monkeypatch.setattr(store, "_put_warned", False)
+    monkeypatch.setattr(store, "code_epoch", no_source)
+    assert store.get("scanner", "k") is None
+    with pytest.warns(UserWarning, match="artifact store"):
+        dfa = store.load_or_build_scanner(toy_grammar)
+    assert dfa == build_scanner(toy_grammar.terminals, toy_grammar.terminal_order)
+
+
 def test_uncached_projection_raises_like_compile_tables(cache, toy_grammar):
     proj = RoleProjection.full(toy_grammar)  # never .build(): not CACHED
     with pytest.raises(ValueError, match="CACHED"):

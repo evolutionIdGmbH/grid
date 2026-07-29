@@ -23,11 +23,16 @@ def compile_json_schema(schema, strict: bool = False):
     import hashlib
     import json
 
-    # Tier-1 store key: canonical schema JSON + mode. Schemas that don't
-    # canonicalize faithfully (non-str keys, tuples, NaN, ...) bypass the
-    # store: the round-trip check rejects any input json.dumps would alias.
+    # Tier-1 store key: canonical schema JSON + mode. The canon PRESERVES dict
+    # insertion order (sort_keys=False): compile_schema output depends on it
+    # (keyword-terminal numbering and rule naming follow property order), so
+    # dict-equal schemas differing only in insertion order must never share an
+    # entry — and the round-trip check below cannot split them, because dict
+    # equality ignores order. Schemas that don't canonicalize faithfully
+    # (non-str keys, tuples, NaN, ...) bypass the store: the round-trip check
+    # rejects any input json.dumps would alias.
     try:
-        canon = json.dumps(schema, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        canon = json.dumps(schema, sort_keys=False, separators=(",", ":"), ensure_ascii=False)
         faithful = json.loads(canon) == schema
     except (TypeError, ValueError):
         faithful = False

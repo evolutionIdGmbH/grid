@@ -11,9 +11,10 @@ Entries live under ``<root>/<code_epoch>/<namespace>/<key>.bin``. code_epoch
 content-hashes the package version, the Python major.minor, and every pipeline
 source module, so any engine change invalidates the store wholesale. Loads
 verify an envelope (format, epoch, namespace, key) and self-heal (unlink +
-rebuild) on any mismatch or corruption; writes are atomic (pid-suffixed tmp +
-os.replace), so concurrent writers at worst duplicate work with identical
-content. Failed builds raise before any put, so error outcomes reproduce
+rebuild) on any mismatch or corruption; writes are atomic (per-writer tmp —
+pid, thread id, counter — + os.replace), so concurrent writers, threads
+included, at worst duplicate work with identical content. Failed builds raise
+before any put, so error outcomes reproduce
 exactly on warm runs. With the flag off every helper is a pure passthrough to
 the underlying builder.
 
@@ -26,9 +27,11 @@ path.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import os
 import pickle
 import sys
+import threading
 import warnings
 from functools import lru_cache
 from pathlib import Path
@@ -38,7 +41,11 @@ from grid.grammar.spec import DialectGrammar
 from grid.lalr.compile import LALRTables, compile_tables
 from grid.lexer.dfa import ScannerDFA, build_scanner
 
-FORMAT = 1
+# 2: tier-1 schema_src canon switched from sorted-key to insertion-order JSON
+#    (compile_schema output depends on dict insertion order, so sorted-key
+#    entries alias order-variant schemas and must never be served; the keying
+#    module is not in _EPOCH_MODULES, so the epoch alone would not evict them)
+FORMAT = 2
 
 # Every module whose source participates in producing a stored artifact —
 # broader than the three writer call sites: Terminal.priority and
@@ -55,6 +62,7 @@ _EPOCH_MODULES = (
 )
 
 _put_warned = False
+_tmp_counter = itertools.count()
 
 
 def enabled() -> bool:
@@ -90,10 +98,11 @@ def code_epoch() -> str:
 def get(namespace: str, key: str) -> object | None:
     if not enabled():
         return None
-    path = root() / code_epoch() / namespace / f"{key}.bin"
-    try:
+    try:  # a broken store must never break a compile: degrade to a miss
+        # (code_epoch reads module sources off disk — pyc-only deployments)
+        path = root() / code_epoch() / namespace / f"{key}.bin"
         blob = path.read_bytes()
-    except OSError:
+    except Exception:
         return None
     try:
         env = pickle.loads(blob)
@@ -126,7 +135,8 @@ def put(namespace: str, key: str, payload: object) -> None:
              "key": key, "payload": payload},
             protocol=5,
         )
-        tmp = d / f"{key}.bin.tmp.{os.getpid()}"
+        tmp = d / (f"{key}.bin.tmp.{os.getpid()}"
+                   f".{threading.get_ident()}.{next(_tmp_counter)}")
         tmp.write_bytes(blob)
         os.replace(tmp, d / f"{key}.bin")
     except Exception as exc:  # a broken store must never break a compile
