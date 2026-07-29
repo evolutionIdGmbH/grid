@@ -100,7 +100,11 @@ def _hashcons_components(value: str | None = None) -> frozenset[str]:
 class _HashconsMemo:
     """Per-normalize()-run structural memo (installed/restored around each
     run exactly like _LEGACY_REF: root and draft mode are fixed per run, so
-    entries never leak across $ref resolution scopes; single-threaded)."""
+    entries never leak across $ref resolution scopes; single-threaded).
+
+    Two tiers per family: depth-portable (digest -> (result, rel), replayable
+    at any depth d with d+rel <= cutoff) and depth-pinned ((digest, depth) ->
+    result, replayable at the exact entry depth only)."""
 
     __slots__ = ("dig", "norm", "norm_deep", "merge", "merge_deep",
                  "wm_norm", "wm_merge", "shared")
@@ -113,19 +117,25 @@ class _HashconsMemo:
         # id(node) -> (node, digest): holding the node pins its id, so a
         # recycled id can never alias a dead node's digest
         self.dig: dict[int, tuple[Any, bytes]] = {}
-        # digest -> (result, rel): rel = deepest dict-_norm depth reached
-        # below the node, relative to it; the computation never touched the
-        # depth>64 cutoff, so it replays at any depth d with d+rel <= 64
+        # digest -> (result, rel): rel = deepest dict-_norm entry depth
+        # reached at or below the node, relative to it (rel = 0 means no
+        # dict children — the entry raise includes the node's own depth);
+        # the computation never touched the depth>64 cutoff, so it replays
+        # at any depth d with d+rel <= 64
         self.norm: dict[bytes, tuple[Any, int]] = {}
-        # (digest, depth) -> (result, wm): the cutoff DID truncate this
-        # computation, making it depth-specific — reusable at the exact
-        # entry depth only (this keys the rewrite-chain blowup region)
+        # (digest, depth) -> (result, wm): the walk ENTERED the cutoff
+        # region (wm > 64), so the entry is depth-pinned — reusable at the
+        # exact entry depth only (this keys the rewrite-chain blowup
+        # region); conservative: a depth-65 dict needing no rewrite is
+        # stored depth-pinned although its result is depth-free
         self.norm_deep: dict[tuple[bytes, int], tuple[Any, int]] = {}
         # (digest(a), digest(b)) -> (ok, result-or-message, rel): same
         # watermark discipline against merge2's _depth>32 cutoff
         self.merge: dict[tuple[bytes, bytes], tuple[bool, Any, int]] = {}
         self.merge_deep: dict[tuple[bytes, bytes, int],
                               tuple[bool, Any, int]] = {}
+        # deepest _norm/merge2 entry depth reached in the current
+        # computation; charged/reset by the wrapper discipline below
         self.wm_norm = 0
         self.wm_merge = 0
 
@@ -194,7 +204,7 @@ def _digest_rec(node: Any, cache: dict[int, tuple[Any, bytes]]) -> bytes:
 
 def _digest(node: Any, memo: _HashconsMemo) -> bytes | None:
     """Structural digest of a JSON tree; None = not digestable (non-JSON
-    value, non-string key, cyclic object graph) -> that node is not memoized."""
+    value, cyclic object graph) -> that node is not memoized."""
     try:
         return _digest_rec(node, memo.dig)
     except (TypeError, ValueError, OverflowError, RecursionError):
@@ -411,6 +421,10 @@ def _both(a: dict, b: dict, key: str):
 
 def merge2(a: Any, b: Any, root: Any, _depth: int = 0) -> dict:
     """Conjunction of two schemas as one schema (raises Unmergeable)."""
+    # mirror of the _norm wrapper discipline below — any edit here must be
+    # mirrored there (six intentional differences: cutoff 32 vs 64, key
+    # arity, Unmergeable tri-state, entry guards, wm slot, dict-only shared
+    # registration)
     memo = _MEMO
     if memo is None:
         return _merge2_impl(a, b, root, _depth)
@@ -775,6 +789,10 @@ def normalize(schema: Any, root: Any = None,
 
 
 def _norm(schema: Any, root: Any, depth: int) -> Any:
+    # mirror of the merge2 wrapper discipline above — any edit here must be
+    # mirrored there (six intentional differences: cutoff 32 vs 64, key
+    # arity, Unmergeable tri-state, entry guards, wm slot, dict-only shared
+    # registration)
     memo = _MEMO
     if memo is None:
         return _norm_impl(schema, root, depth)
@@ -782,6 +800,12 @@ def _norm(schema: Any, root: Any, depth: int) -> Any:
         # non-dicts return unchanged at EVERY depth: no cutoff sensitivity,
         # so they never raise the watermark
         return schema
+    # ordering is load-bearing, both ways: the watermark raise comes BEFORE
+    # the cutoff return — a truncated call must poison the caller's
+    # watermark (depth-portable replay soundness) — and the cutoff return
+    # comes BEFORE the memo consult — identity-returned deep subtrees must
+    # never enter memo.shared (the compiler's virtual-_n charge in rule_for
+    # depends on shared matching legacy)
     if memo.wm_norm < depth:
         memo.wm_norm = depth
     if depth > 64:
