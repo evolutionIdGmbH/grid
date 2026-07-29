@@ -20,7 +20,7 @@ FIFO/min-byte-class discovery order). Per-state knowledge is local:
 state can still reach accept (a per-component co-accessibility bit — equal to
 the union-DFA live set by the same disjointness), so no global live pass
 ever runs on this path. The co-accessibility bit comes from
-dfa._terminal_reach over the component NFA — the same NFA-derived live
+nfa._terminal_reach over the component NFA — the same NFA-derived live
 computation build_scanner uses (the legacy DFA-graph alternatives and their
 env flag were deleted after the 11.3k zero-divergence verify pass on
 v0.3.0rc1, see CHANGELOG).
@@ -41,23 +41,40 @@ shared across template instances), and off the full-enumeration reserve BFS
 from __future__ import annotations
 
 import threading
+from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Protocol
 
 from grid import perf_flags
 from grid.errors import GrammarInvalid
 from grid.grammar.spec import Terminal
-from grid.lexer.dfa import (
+from grid.lexer.dfa import ScannerDFA
+from grid.lexer.nfa import _NFABuilder, _terminal_reach
+from grid.lexer.rx import _literal_node, _parse_regex
+from grid.lexer.subset import (
     DEAD,
-    ScannerDFA,
-    _literal_node,
-    _NFABuilder,
-    _parse_regex,
-    _terminal_reach,
+    byte_classes,
+    edges_by_class,
+    eps_closure_fn,
+    subset_construct,
 )
-from grid.lexer.subset import byte_classes, edges_by_class, eps_closure_fn, subset_construct
 
 _DEFAULT_BUDGET = 20_000
 _COMPONENT_CAP = 4096   # wholesale-reset guard: per-schema key literals in a long-lived server
+
+
+class ScannerComponent(Protocol):
+    """Structural seam for product components (type-only): the five attributes
+    the lazy product (_annotate/_class_step), the bounded materializer, and
+    the reserve BFS (shortest_lexemes_factored/_shortest_word) actually
+    consume. TerminalDFA is the regex/literal case; the held COUNTING_WINDOWS
+    component type plugs in as a sibling without touching the product."""
+
+    trans: tuple[tuple[int, ...], ...]
+    class_of: tuple[int, ...]
+    accepting: tuple[bool, ...]
+    co_acc: tuple[bool, ...]
+    matches_empty: bool
 
 
 @dataclass(frozen=True)
@@ -170,7 +187,7 @@ class LazyProductDFA:
     lazy = True
     start = 0
 
-    def __init__(self, comps: list[TerminalDFA], prio: dict[int, tuple[int, int]]) -> None:
+    def __init__(self, comps: Sequence[ScannerComponent], prio: dict[int, tuple[int, int]]) -> None:
         self.comps = comps
         self._prio = prio
         # global byte classes: the joint refinement of the component partitions,
@@ -335,7 +352,7 @@ def shortest_lexemes_factored(dfa: LazyProductDFA) -> dict[int, bytes]:
     return out
 
 
-def _shortest_word(comp: TerminalDFA) -> bytes | None:
+def _shortest_word(comp: ScannerComponent) -> bytes | None:
     frontier: list[tuple[int, bytes]] = [(0, b"")]
     seen = {0}
     while frontier:

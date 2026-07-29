@@ -1,7 +1,12 @@
 """Terminal regexes -> combined scanner DFA (DESIGN.md SS3 lexer/, E7).
 
-Pipeline: grid-regex subset -> NFA (Thompson) -> combined NFA (one tagged accept
-per terminal) -> subset-construction DFA over bytes.
+Pipeline: grid-regex subset (rx.py) -> NFA (Thompson, nfa.py) -> combined NFA
+(one tagged accept per terminal) -> subset-construction DFA over bytes
+(shared core in subset.py). This module holds the ScannerDFA artifact and the
+build_scanner entry point (+ the factored-path dispatch), and re-exports the
+pipeline's historically-public names (DEAD, _parse_regex, _literal_node,
+_NFABuilder, _terminal_reach) — importers treat dfa.py as the lexer's stable
+facade; keep it that way.
 
 Scanner DFA state knowledge:
 - ``accept[state]``: the winning terminal if the scan stopped here (maximal munch
@@ -28,6 +33,8 @@ from typing import TYPE_CHECKING
 from grid import perf_flags
 from grid.errors import GrammarInvalid
 from grid.grammar.spec import Terminal
+from grid.lexer.nfa import _NFA, _NFABuilder, _terminal_reach  # noqa: F401  (re-export)
+from grid.lexer.rx import _literal_node, _Node, _parse_regex
 from grid.lexer.subset import (
     DEAD,
     byte_classes,
@@ -37,276 +44,9 @@ from grid.lexer.subset import (
 )
 
 if TYPE_CHECKING:
-    # guard is mandatory: factored.py imports this module's privates at
+    # guard is mandatory: factored.py imports ScannerDFA from this module at
     # runtime, so an unguarded import would cycle
     from grid.lexer.factored import LazyProductDFA
-
-# ---------------------------------------------------------------- regex parser
-
-_ESCAPES = {"n": ord("\n"), "t": ord("\t"), "r": ord("\r"), "0": 0}
-_MAX_REPEAT = 8192      # {m,n} bound cap: expansion is linear in n
-
-
-def _expand_repeat(node: _Node, m: int, n: int | None) -> _Node:
-    """{m,n} -> m copies + (n-m) optionals ({m,} -> m copies + a star tail).
-    Expansion happens at parse time; the NFA builder is unchanged and shared
-    subtrees are safe (construction walks per visit)."""
-    kids: list[_Node] = [node] * m
-    if n is None:
-        kids.append(_Node("star", kids=(node,)))
-    else:
-        kids.extend([_Node("opt", kids=(node,))] * (n - m))
-    if not kids:
-        return _Node("eps")
-    return kids[0] if len(kids) == 1 else _Node("cat", kids=tuple(kids))
-
-
-@dataclass
-class _Node:
-    kind: str                      # char|class|any|cat|alt|star|plus|opt|eps
-    chars: frozenset[int] = frozenset()
-    kids: tuple[_Node, ...] = ()
-
-
-def _parse_regex(pattern: str) -> _Node:
-    pos = 0
-
-    def peek() -> str | None:
-        return pattern[pos] if pos < len(pattern) else None
-
-    def take() -> str:
-        nonlocal pos
-        ch = pattern[pos]
-        pos += 1
-        return ch
-
-    def parse_alt() -> _Node:
-        branches = [parse_cat()]
-        while peek() == "|":
-            take()
-            branches.append(parse_cat())
-        return branches[0] if len(branches) == 1 else _Node("alt", kids=tuple(branches))
-
-    def parse_cat() -> _Node:
-        items: list[_Node] = []
-        while peek() not in (None, "|", ")"):
-            items.append(parse_post())
-        if not items:
-            return _Node("eps")
-        return items[0] if len(items) == 1 else _Node("cat", kids=tuple(items))
-
-    def parse_post() -> _Node:
-        node = parse_atom()
-        while True:
-            c = peek()
-            if c in ("*", "+", "?"):
-                op = take()
-                node = _Node({"*": "star", "+": "plus", "?": "opt"}[op], kids=(node,))
-            elif c == "{":
-                rep = try_parse_repeat()
-                if rep is None:
-                    break               # literal '{' consumed by parse_atom later
-                m, n = rep
-                node = _expand_repeat(node, m, n)
-            else:
-                break
-        return node
-
-    def try_parse_repeat():
-        """Parse {m} / {m,} / {m,n} after an atom; None (no input consumed)
-        when the braces are not a valid quantifier — the '{' then reads as a
-        literal, matching the ECMA convention."""
-        nonlocal pos
-        save = pos
-        take()                          # '{'
-        digits = ""
-        while peek() is not None and peek().isdigit():
-            digits += take()
-        if not digits:
-            pos = save
-            return None
-        m = int(digits)
-        n: int | None = m
-        if peek() == ",":
-            take()
-            digits = ""
-            while peek() is not None and peek().isdigit():
-                digits += take()
-            n = int(digits) if digits else None
-        if peek() != "}":
-            pos = save
-            return None
-        take()                          # '}'
-        if n is not None and n < m:
-            raise GrammarInvalid(f"bad repetition {{{m},{n}}} in regex {pattern!r}")
-        if m > _MAX_REPEAT or (n is not None and n > _MAX_REPEAT):
-            raise GrammarInvalid(
-                f"repetition bound over {_MAX_REPEAT} in regex {pattern!r}")
-        return m, n
-
-    def parse_atom() -> _Node:
-        ch = take()
-        if ch == "(":
-            node = parse_alt()
-            if peek() != ")":
-                raise GrammarInvalid(f"unclosed group in regex {pattern!r}")
-            take()
-            return node
-        if ch == "[":
-            return parse_class()
-        if ch == ".":
-            return _Node("class", chars=frozenset(range(256)) - {ord("\n")})
-        if ch == "\\":
-            esc = take()
-            if esc in _ESCAPES:
-                return _Node("char", chars=frozenset({_ESCAPES[esc]}))
-            if esc == "x":
-                hexs = take() + take()
-                return _Node("char", chars=frozenset({int(hexs, 16)}))
-            return _Node("char", chars=frozenset({ord(esc)}))
-        return _Node("char", chars=frozenset({ord(ch)}))
-
-    def parse_class() -> _Node:
-        negate = False
-        if peek() == "^":
-            take()
-            negate = True
-        chars: set[int] = set()
-        first = True
-        while peek() != "]" or first:
-            if peek() is None:
-                raise GrammarInvalid(f"unclosed class in regex {pattern!r}")
-            first = False
-            ch = take()
-            if ch == "\\":
-                esc = take()
-                if esc == "x":
-                    code = int(take() + take(), 16)
-                else:
-                    code = _ESCAPES.get(esc, ord(esc))
-            else:
-                code = ord(ch)
-            if peek() == "-" and pos + 1 < len(pattern) and pattern[pos + 1] != "]":
-                take()
-                hi_ch = take()
-                if hi_ch == "\\":
-                    esc = take()
-                    hi = int(take() + take(), 16) if esc == "x" else _ESCAPES.get(esc, ord(esc))
-                else:
-                    hi = ord(hi_ch)
-                chars.update(range(code, hi + 1))
-            else:
-                chars.add(code)
-        take()  # ']'
-        if negate:
-            chars = set(range(256)) - chars
-        return _Node("class", chars=frozenset(chars))
-
-    node = parse_alt()
-    if pos != len(pattern):
-        raise GrammarInvalid(f"trailing regex input at {pattern[pos:]!r}")
-    return node
-
-
-# ---------------------------------------------------------------- NFA
-
-@dataclass
-class _NFA:
-    """Byte-labelled NFA with epsilon edges; single (start, accept) pair."""
-
-    start: int
-    accept: int
-    eps: dict[int, list[int]]
-    edges: dict[int, list[tuple[frozenset[int], int]]]
-
-
-class _NFABuilder:
-    def __init__(self) -> None:
-        self.n = 0
-        self.eps: dict[int, list[int]] = {}
-        self.edges: dict[int, list[tuple[frozenset[int], int]]] = {}
-
-    def new(self) -> int:
-        self.n += 1
-        return self.n - 1
-
-    def add_eps(self, a: int, b: int) -> None:
-        self.eps.setdefault(a, []).append(b)
-
-    def add_edge(self, a: int, chars: frozenset[int], b: int) -> None:
-        self.edges.setdefault(a, []).append((chars, b))
-
-    def build(self, node: _Node) -> tuple[int, int]:
-        s, a = self.new(), self.new()
-        if node.kind in ("char", "class"):
-            self.add_edge(s, node.chars, a)
-        elif node.kind == "eps":
-            self.add_eps(s, a)
-        elif node.kind == "cat":
-            prev = s
-            for kid in node.kids:
-                ks, ka = self.build(kid)
-                self.add_eps(prev, ks)
-                prev = ka
-            self.add_eps(prev, a)
-        elif node.kind == "alt":
-            for kid in node.kids:
-                ks, ka = self.build(kid)
-                self.add_eps(s, ks)
-                self.add_eps(ka, a)
-        elif node.kind == "star":
-            ks, ka = self.build(node.kids[0])
-            self.add_eps(s, ks)
-            self.add_eps(s, a)
-            self.add_eps(ka, ks)
-            self.add_eps(ka, a)
-        elif node.kind == "plus":
-            ks, ka = self.build(node.kids[0])
-            self.add_eps(s, ks)
-            self.add_eps(ka, ks)
-            self.add_eps(ka, a)
-        elif node.kind == "opt":
-            ks, ka = self.build(node.kids[0])
-            self.add_eps(s, ks)
-            self.add_eps(s, a)
-            self.add_eps(ka, a)
-        else:  # pragma: no cover
-            raise AssertionError(node.kind)
-        return s, a
-
-
-# ---------------------------------------------------------------- scanner DFA
-# DEAD comes from grid/lexer/subset.py (single definition); re-exported here
-# for the ~10 importers that treat dfa.py as the lexer's public surface.
-
-
-def _terminal_reach(b: _NFABuilder, accept_terminal: dict[int, int]) -> list[int]:
-    """term_reach[q] = bitmask of terminals whose accept state is reachable from
-    NFA state q via eps/byte edges (>= 0 bytes). One reverse DFS per accept
-    state; per-terminal sub-NFAs are disjoint (fresh states per build call), so
-    total work is O(NFA edges). Empty byte classes (e.g. [^\\x00-\\xff]) produce
-    edges the DFA can never take — following them in reverse would over-report
-    live terminals, so they are skipped."""
-    rev: list[list[int]] = [[] for _ in range(b.n)]
-    for src, dsts in b.eps.items():
-        for dst in dsts:
-            rev[dst].append(src)
-    for src, edges in b.edges.items():
-        for chars, dst in edges:
-            if not chars:
-                continue
-            rev[dst].append(src)
-    reach: list[int] = [0] * b.n
-    for acc, tid in accept_terminal.items():
-        bit = 1 << tid
-        stack = [acc]
-        while stack:
-            q = stack.pop()
-            if reach[q] & bit:
-                continue
-            reach[q] |= bit
-            stack.extend(rev[q])
-    return reach
 
 
 @dataclass(frozen=True)
@@ -364,22 +104,12 @@ class ScannerDFA:
         return st, length, p
 
 
-def _literal_node(pattern: str) -> _Node:
-    """Literal terminal text -> concatenation of single-byte char nodes."""
-    if len(pattern) > 1:
-        return _Node(
-            "cat",
-            kids=tuple(_Node("char", chars=frozenset({c})) for c in pattern.encode("latin-1")),
-        )
-    return _Node("char", chars=frozenset({ord(pattern)}))
-
-
 def build_scanner(
     terminals: dict[str, Terminal],
     terminal_order: tuple[str, ...],
     *,
     factored: bool | None = None,
-) -> "ScannerDFA | LazyProductDFA":
+) -> ScannerDFA | LazyProductDFA:
     """Combined NFA over all terminals -> subset-construction byte DFA.
 
     ``factored`` (None = read GRID_PERF_FACTORED_SCANNER, default ON since
