@@ -642,7 +642,7 @@ def _merge2_impl(a: Any, b: Any, root: Any, _depth: int = 0) -> dict:
                 out[k] = va
             else:
                 out[k] = va
-                extra = out.get("x-grid-extra-patterns", "x-grid-branch-unified", [])
+                extra = out.get("x-grid-extra-patterns", [])
                 out["x-grid-extra-patterns"] = extra + [vb]
         elif k == "format":
             if va != vb:

@@ -235,3 +235,25 @@ def test_normalize_idempotent_on_cases():
         n1 = normalize(s)
         n2 = normalize(n1)
         assert n1 == n2, s
+
+
+def test_merge_two_distinct_patterns():
+    # regression: the two-pattern arm crashed with a 3-argument dict.get,
+    # so no schema reaching it ever compiled
+    m = merge2({"type": "string", "pattern": "^a"},
+               {"type": "string", "pattern": "b$"}, None)
+    assert m["pattern"] == "^a"
+    assert m["x-grid-extra-patterns"] == ["b$"]
+
+
+def test_allof_two_patterns_no_crash():
+    # compile-level companion: a clean Unsupported decline is acceptable,
+    # a TypeError is not; hashcons must not change that
+    from grid.jsonschema.compiler import Unsupported, compile_schema
+    s = {"allOf": [{"type": "string", "pattern": "^a"},
+                   {"type": "string", "pattern": "b$"}]}
+    for components in (frozenset(), frozenset({"norm", "dedupe"})):
+        try:
+            compile_schema(s, hashcons=components)
+        except Unsupported:
+            pass
