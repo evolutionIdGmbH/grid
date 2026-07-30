@@ -108,6 +108,34 @@ def test_factored_budget_garbage_raises(monkeypatch, raw):
         perf_flags.factored_budget(20_000)
 
 
+@pytest.mark.parametrize("raw", [None, "3", "1000000", "8192", "-1"])
+@pytest.mark.parametrize("default", [8192, 7])
+def test_component_budget_oracle(monkeypatch, raw, default):
+    _setenv(monkeypatch, "GRID_PERF_COMPONENT_BUDGET", raw)
+    # int() with injected default, like factored_budget
+    oracle = int(os.environ.get("GRID_PERF_COMPONENT_BUDGET", str(default)))
+    assert perf_flags.component_budget(default) == oracle
+    if raw is None:
+        assert perf_flags.component_budget(default) == default
+
+
+def test_component_budget_zero_disables(monkeypatch):
+    # "0" is the kill switch: None = cap disabled = legacy eager component
+    # builds (NOT a zero-state cap — that meaning is reserved for the
+    # build_factored_scanner component_budget PARAMETER, the test hook)
+    monkeypatch.setenv("GRID_PERF_COMPONENT_BUDGET", "0")
+    assert perf_flags.component_budget(8192) is None
+    monkeypatch.delenv("GRID_PERF_COMPONENT_BUDGET", raising=False)
+    assert perf_flags.component_budget(0) is None  # a 0 default disables too
+
+
+@pytest.mark.parametrize("raw", ["abc", "", " ", "1.5", "0x10"])
+def test_component_budget_garbage_raises(monkeypatch, raw):
+    monkeypatch.setenv("GRID_PERF_COMPONENT_BUDGET", raw)
+    with pytest.raises(ValueError):
+        perf_flags.component_budget(8192)
+
+
 @pytest.mark.parametrize("raw", RAW_VALUES)
 def test_lalr_algorithm_oracle(monkeypatch, raw):
     _setenv(monkeypatch, "GRID_PERF_LALR_DP", raw)
@@ -193,6 +221,11 @@ def test_every_reader_is_call_time(monkeypatch):
     assert perf_flags.factored_budget(20_000) == 3
     monkeypatch.setenv("GRID_PERF_FACTORED_BUDGET", "4")
     assert perf_flags.factored_budget(20_000) == 4
+
+    monkeypatch.setenv("GRID_PERF_COMPONENT_BUDGET", "3")
+    assert perf_flags.component_budget(8192) == 3
+    monkeypatch.setenv("GRID_PERF_COMPONENT_BUDGET", "0")
+    assert perf_flags.component_budget(8192) is None
 
     monkeypatch.setenv("GRID_PERF_LALR_DP", "1")
     assert perf_flags.lalr_algorithm() == "dp"

@@ -21,6 +21,12 @@ Flag table:
                                                             eager builder)
     GRID_PERF_FACTORED_BUDGET   factored_budget(default)    int(); ValueError
                                                             on garbage
+    GRID_PERF_COMPONENT_BUDGET  component_budget(default)   int(); "0" = cap
+                                                            disabled (None:
+                                                            legacy eager
+                                                            component builds);
+                                                            ValueError on
+                                                            garbage
     GRID_PERF_LALR_DP           lalr_algorithm()            "dp" if == "1"
                                                             (default on:
                                                             unset = "1") else
@@ -76,6 +82,21 @@ def factored_budget(default: int) -> int:
     non-integer value raises ValueError exactly like the historical inline
     int() read."""
     return int(os.environ.get("GRID_PERF_FACTORED_BUDGET", str(default)))
+
+
+def component_budget(default: int) -> int | None:
+    """GRID_PERF_COMPONENT_BUDGET -> per-terminal component state budget for
+    the factored scanner (factored._build_component; sub-flag of
+    GRID_PERF_FACTORED_SCANNER, never read on the eager path). Over-budget
+    components come back as demand-driven LazyTerminalDFAs instead of eager
+    subset constructions — the substring-union terminal family builds ~2^k
+    eager states (BAKEOFF.md F1). "0" is the kill switch: returns None = cap
+    disabled = the pre-cap eager component builds (and their hang on family
+    schemas). Other values are int() with the default injected by the call
+    site (factored._DEFAULT_COMPONENT_BUDGET), ValueError on garbage —
+    the factored_budget grammar except for the "0" special case."""
+    val = int(os.environ.get("GRID_PERF_COMPONENT_BUDGET", str(default)))
+    return None if val == 0 else val
 
 
 def lalr_algorithm() -> str:
