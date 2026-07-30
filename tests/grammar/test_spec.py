@@ -224,3 +224,29 @@ def test_from_parts_check_mode_invalid_message_parity(monkeypatch):
     with pytest.raises(GrammarInvalid, match="useless"):
         spec.DialectGrammar.from_parts(parts)
 
+
+
+# -- full_built (P2 trusted full-projection fast path) -----------------------
+
+
+def test_full_built_matches_full_build(toy_grammar):
+    a = RoleProjection.full(toy_grammar).build()
+    b = RoleProjection.full_built(toy_grammar)
+    assert b.state == "CACHED"
+    assert b.role_shape_hash == a.role_shape_hash
+    assert b.productions == a.productions
+
+
+def test_full_built_requires_frozen():
+    g = spec.DialectGrammar(source="%start a\nX: /x/\na: X\n").parse()
+    with pytest.raises(GrammarInvalid):
+        RoleProjection.full_built(g)
+
+
+def test_full_built_tables_fingerprint(toy_grammar):
+    from grid.lalr.compile import compile_tables
+
+    ta = compile_tables(RoleProjection.full(toy_grammar).build())
+    tb = compile_tables(RoleProjection.full_built(toy_grammar))
+    assert ta.fingerprint == tb.fingerprint
+    assert ta.action == tb.action and ta.goto == tb.goto
