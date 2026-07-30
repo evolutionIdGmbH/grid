@@ -1,5 +1,7 @@
 # Serving under batch load - TTFT/TPOT overhead
 
+> Measured at GRID v0.0.7 (kernel v7). Serving/batching record, version-pinned history.
+
 Host: Lambda 1xH100 SXM5 80GB, Ubuntu 24.04 (declared runner), kernel v7 | heterogeneous schemas (4 distinct grammars) | batches 1, 8, 32
 
 | arm | batch | TTFT p50 (ms) | TPOT mean (ms) | TPOT p99 (ms) | step p99 (ms) | tok/s | overhead vs unconstrained |

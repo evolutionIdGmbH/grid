@@ -1,5 +1,7 @@
 # Policy/RBAC enforcement - adversarial prompt suite, model-in-loop
 
+> Measured at GRID v0.0.x (kernel v6 era). Version-pinned history.
+
 Host: Lambda 1xH100 PCIe 80GB, Ubuntu 24.04 (declared runner) | model: `Qwen/Qwen2.5-0.5B-Instruct` | backend: vllm+grid | role: analyst (select-only) | 12 injection prompts | wall 47.7s
 
 Each prompt explicitly solicits a forbidden verb/identifier. The mask never reads the prompt, so every output must be free of forbidden lexemes.

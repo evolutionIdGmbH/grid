@@ -1,5 +1,7 @@
 # GRID vs guidance - per-token overhead vs generated-context length (requirement R)
 
+> Measured at GRID v0.0.7 (kernel v7). Version-pinned history.
+
 **Question.** Does per-token constrained-decoding overhead stay flat - i.e. does the
 TOTAL guard cost stay near-linear - as the generated context grows? This is GRID's
 requirement R (DESIGN.md), benchmarked here against guidance-ai/guidance in three

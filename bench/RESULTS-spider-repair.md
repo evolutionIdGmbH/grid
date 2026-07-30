@@ -1,5 +1,7 @@
 # Spider dev - execution accuracy (EX), GRID-constrained vs unconstrained
 
+> Measured at GRID v0.0.7 (kernel v7). Version-pinned history.
+
 Model: `Qwen/Qwen2.5-7B-Instruct` (cuda, greedy) | sample: 1034 dev questions (seed 0) | max_tokens 128 | grammar: `grammars/sql_spider.grid` (100% dev-gold coverage) + per-database L3 lexicons | host: Lambda 1x A10 24GB, Ubuntu 24.04 (declared runner; virtualized)
 
 EX = predicted and gold result sets match on the Spider SQLite database (order-sensitive iff gold has ORDER BY). Syntax-valid = sqlite EXPLAIN accepts. GRID generations parse by construction and every identifier is schema-valid via the L3 lexicons; its failures are semantic, not syntactic.

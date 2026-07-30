@@ -1,5 +1,7 @@
 # End-to-end soundness/completeness/termination at scale - model arm
 
+> Measured at GRID v0.0.x (kernel v5 era). Version-pinned history.
+
 Host: Lambda 1xH100 PCIe 80GB, Ubuntu 24.04 (declared runner) | grammar: `grammars/sql_subset.grid` + L3 schema lexicons | model: `Qwen/Qwen2.5-0.5B-Instruct` | mode-1 GRID-owned loop, multinomial sampler | 1,000 seeded generations | wall 35.2 min
 
 Real model logits drive the sampler; the mask constrains; GRID owns the loop and writes the audit chain. EOS-only-at-ACCEPT and the mask invariant are asserted inside the loop (`grid/generate/api.py`). This is the model-in-loop complement to the 10k model-free forced-random-walk arm (`RESULTS-g5-walk.md`).

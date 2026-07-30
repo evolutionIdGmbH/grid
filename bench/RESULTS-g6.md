@@ -1,5 +1,7 @@
 # Policy/RBAC enforcement (adversarial arm) - model-independent
 
+> Measured at GRID v0.0.x (kernel v6 era). Version-pinned history.
+
 Host: local dev (unpinned) | grammar `grammars/sql_subset.grid` + L3 schema lexicons + role projections | tokenizer `Qwen/Qwen2.5-0.5B-Instruct` (151,665 tokens)
 
 Exhaustive multi-token speller (BFS over mask-admitted token paths) at every reachable identifier position: can a forbidden lexeme complete at a grammar boundary? This is the multi-token generalization of the single-token prefix property; no sampler can reach a target by a path the mask forbids.

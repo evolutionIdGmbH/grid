@@ -1,5 +1,7 @@
 # Audit-trail replay and tamper detection - full-scale run (E14)
 
+> Measured at GRID v0.0.7 (kernel v7 era). Version-pinned history.
+
 Host: local dev (unpinned) | grammar: `grammars/sql_subset.grid` | MockTokenizer (48 tokens) | mode-1 GRID-owned loop, max_tokens 40 | key format: v2
 
 - v1-log dual-key compat: **8/8 bit-identical** (legacy-key logs replayed through the genN producer; every consulted config byte-compared under both key forms)
