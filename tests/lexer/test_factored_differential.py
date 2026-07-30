@@ -42,6 +42,21 @@ from grid.lexer.factored import (
 )
 from grid.lexer.run import LexerRun, ScanReject, scan
 
+
+@pytest.fixture(autouse=True, scope="module")
+def _expanded_components():
+    """The object under test is the EXPANDED factored path's state-for-state
+    equality with the eager union build (numbering included). Counting
+    components (GRID_PERF_COUNTING) are a different automaton by design —
+    control states + counters, count-blind trans reads assert — and their
+    equivalence gate is behavioral (tests/lexer/test_counting_windows.py),
+    so pin the flag off here whatever the CI leg exports."""
+    mp = pytest.MonkeyPatch()
+    mp.setenv("GRID_PERF_COUNTING", "0")
+    yield
+    mp.undo()
+
+
 # ---------------------------------------------------------------- corpora
 
 WINDOW_PATTERNS = [

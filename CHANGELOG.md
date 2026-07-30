@@ -191,6 +191,38 @@ items), so differential gates assert table equality under budget and
 declared-class equality over it. With P3's substring-union fix this leaves
 no known compile-cap family, pending the epoch's one-shot full run.
 
+Counting-window components (P4 phase 1, `GRID_PERF_COUNTING`, default OFF):
+eligible one-shot `{m,n}` loops (prefix-code body, non-nullable
+continuation, span >= 8) keep a counted-loop NFA node instead of the O(n)
+parse-time expansion and determinize per terminal into a
+`CountingTerminalDFA` — a ScannerComponent sibling on the factored path
+(O(1) control states + a bounded counter; the held COUNTING_WINDOWS
+runtime surface re-derived per component, which dissolves its
+cross-terminal fallback/rebuild machinery). The lazy product grows a
+global counter table and caches per-(state, class) transition PLANS —
+variant tables, never a count-dependent successor id — and materializes
+to the held eager format (`ScannerDFA.counters` + `guard_rows`), so the
+runtime scan state is (state, counts) via `step`/`scan_full` everywhere
+(lexer run, Python walk, guide extension, reserve BFS); genN keys append
+`(counts_p, counts_q)`, the artifact store scopes flag-on entries under a
+counting key and defers counting-scanner persistence, and counting DFAs
+self-gate off the Rust kernel (Python spec walk until the kernel v8
+counter step) and off the S2 slicer proof. Gates: 67-test differential
+(product equivalence is a synchronized BFS over the whole reachable
+configuration space against the expanded flag-off oracle; boundary
+lexemes at m-1/m/n/n+1 incl. escapes and multi-byte UTF-8; geps-aware
+component co-acc against a configuration-space oracle; cache-key counter
+separation; memo/selection isolation), full suite green flag-on and -off
+(new CI leg), 400-schema corpus sample: grammar text/records
+byte-identical, flag-on-without-counters DFAs field-identical, 12
+counterful schemas probe-equal. Spot builds: (0,64) window 448ms ->
+3.4ms, (0,128) 3.1s -> 3.1ms, (0,128) x 200 keys 3.2s -> 67ms
+(materializes 1102 states vs 2604 expanded); o9823/o9843 stay parity
+(~0.7s -> ~0.9s, the family the factored path already subsumed — the
+BAKEOFF verdict, unchanged). Window budgets and degradation predicates
+are untouched by construction (asserted): the `{m,n}`-beyond-cap coverage
+lift is phase 3, kernel v8 counter frames phase 2.
+
 ## 0.3.0 - 2026-07-30
 
 The performance epoch: compile-time (TTFM) tail work, selected by measured

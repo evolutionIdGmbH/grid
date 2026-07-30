@@ -60,3 +60,13 @@ jobs:
         run: >
           GRID_PERF_COMPONENT_BUDGET=1 GRID_PERF_FACTORED_BUDGET=0 GRID_NO_RUST=1
           pytest tests/lexer tests/mask tests/trie tests/guide tests/generate tests/jsonschema_bridge -q
+      - name: Tests (counting-window components, P4 phase 1)
+        # eligible {m,n} windows become counting components on the factored
+        # path; counting DFAs are self-gated off the Rust kernel (Python spec
+        # walk until kernel v8), window-free grammars keep the kernel — no
+        # GRID_NO_RUST needed. Modules that pin expanded-scanner internals
+        # (factored numbering, dense-graph live oracle) pin the flag off
+        # themselves.
+        run: >
+          GRID_PERF_COUNTING=1
+          pytest tests/ -q

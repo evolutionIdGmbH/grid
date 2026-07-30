@@ -63,6 +63,7 @@ GRID_PERF_COMPONENT_BUDGET=0 restores it.
 
 from __future__ import annotations
 
+import itertools
 import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -71,6 +72,7 @@ from typing import Protocol
 from grid import perf_flags
 from grid.errors import GrammarInvalid
 from grid.grammar.spec import Terminal
+from grid.lexer.counting import _MAX_COUNTERS, CountingTerminalDFA, build_counting_component
 from grid.lexer.dfa import ScannerDFA
 from grid.lexer.nfa import _NFABuilder, _terminal_reach
 from grid.lexer.rx import _literal_node, _parse_regex
@@ -217,6 +219,11 @@ class LazyTerminalDFA:
 
 _COMPONENTS: dict[tuple[str, bool, int | None], TerminalDFA | LazyTerminalDFA] = {}
 
+# counting components (GRID_PERF_COUNTING) memoize separately so the plain
+# memo above stays byte-identical flag-off; None = "no eligible loops / fell
+# back" is a cached outcome (the caller then uses the plain component)
+_COUNTING_COMPONENTS: dict[tuple[str, int | None], CountingTerminalDFA | None] = {}
+
 
 def _build_component(
     pattern: str, is_literal: bool, budget: int | None,
@@ -294,6 +301,26 @@ def _component(
     return got
 
 
+def _counting_component(
+    pattern: str, budget: int | None = None,
+) -> CountingTerminalDFA | None:
+    """Memoized counting-component build (non-literal patterns only; the
+    caller falls back to _component on None). The memo caches the None
+    outcome too — eligibility lowering re-runs are pure waste — and is keyed
+    by (pattern, resolved budget) ONLY: the _MAX_COUNTERS selection happens
+    at product-assembly time and never leaks into this memo (a dropped
+    terminal in one schema must not poison another schema's build; the
+    _COMPONENT_CAP wholesale reset is likewise selection-agnostic)."""
+    if budget is None:
+        budget = perf_flags.component_budget(_DEFAULT_COMPONENT_BUDGET)
+    key = (pattern, budget)
+    if key in _COUNTING_COMPONENTS:   # None is a valid cached outcome
+        return _COUNTING_COMPONENTS[key]
+    if len(_COUNTING_COMPONENTS) >= _COMPONENT_CAP:
+        _COUNTING_COMPONENTS.clear()
+    return _COUNTING_COMPONENTS.setdefault(key, build_counting_component(pattern, budget))
+
+
 class _LazyRow:
     """One state's transition row: ``row[byte]`` materializes the successor."""
 
@@ -326,6 +353,20 @@ class LazyProductDFA:
     ``live`` are list-backed and valid for every id already handed out.
     State creation is locked (producer prefetch pools walk on threads);
     duplicate-compute races are benign, duplicate ids are not.
+
+    Counting members (GRID_PERF_COUNTING; CountingTerminalDFA components)
+    extend the product with a global counter table: ``counters`` is the
+    concatenation of member counter tables in tid order and each member's
+    local cids are offset into it. Transitions on counting products go
+    through ``step(sid, counts, byte)``: the per-(sid, gclass) cache stores a
+    count-independent transition PLAN (per-member variant tables with cids
+    remapped, drop-resets precomputed) — never a single successor id, which
+    for a guarded transition would be the forbidden wrong-mask class — and
+    the plan is evaluated under the live counts per step. ``_class_step``
+    (the count-blind protocol surface) asserts the plan is guard-free before
+    serving it. materialize() lowers the plans to the held eager format:
+    ScannerDFA.guard_rows keyed (state, byte) with variants (conds, dst,
+    ops), so every ported runtime dispatcher works unchanged.
     """
 
     lazy = True
@@ -351,16 +392,30 @@ class LazyProductDFA:
         self._n_g = len(reps)
         self._cmap = [tuple(c.class_of[rb] for rb in reps) for c in comps]
 
+        # global counter table: member tables concatenated in tid order,
+        # member-local cid k -> global cid _coffs[tid] + k. () = plain product
+        # (every code path below then matches the pre-counting behavior).
+        self._coffs: dict[int, int] = {}
+        counters: list[tuple[int, int]] = []
+        for t, c in enumerate(comps):
+            cc = getattr(c, "counters", ())
+            if cc:
+                self._coffs[t] = len(counters)
+                counters.extend(cc)
+        self.counters: tuple[tuple[int, int], ...] = tuple(counters)
+
         start_state = tuple((t, 0) for t in range(len(comps)))
         self._states: list[tuple[tuple[int, int], ...]] = [start_state]
         self._crows: list[list[int | None]] = [[None] * self._n_g]
+        self._prows: list[list[tuple | None]] = [[None] * self._n_g] if counters else []
         self.accept: list[int] = []
         self.accepts_all: list[frozenset[int]] = []
         self.live: list[frozenset[int]] = []
         self._annotate(start_state)
         self._ids: dict[tuple[tuple[int, int], ...], int] = {start_state: 0}
-        # live is monotone non-increasing along product transitions, so the
-        # start state carries the maximum (INV-LEX1's H_max) — no global pass
+        # live is monotone non-increasing along product transitions (variant
+        # successors included), so the start state carries the maximum
+        # (INV-LEX1's H_max) — no global pass
         self.h_max = len(self.live[0])
         self._lock = threading.Lock()
         self.trans = _LazyTrans(self)
@@ -373,6 +428,14 @@ class LazyProductDFA:
         self.live.append(frozenset(t for t, cs in st if comps[t].co_acc[cs]))
 
     def _class_step(self, sid: int, g: int) -> int:
+        if self.counters:
+            # counting product: transitions resolve through the count-aware
+            # plan; the count-blind protocol surface (trans facade) is only
+            # valid where the plan is guard- and op-free
+            plan = self._plan(sid, g)
+            assert plan[0] == 0, \
+                "counting product: count-dependent transition needs step()"
+            return plan[1]
         got = self._crows[sid][g]
         if got is None:
             comps = self.comps
@@ -385,6 +448,67 @@ class LazyProductDFA:
             self._crows[sid][g] = got
         return got
 
+    def _plan(self, sid: int, g: int) -> tuple:
+        """Count-independent transition plan for (sid, gclass) — cached, and
+        the ONLY thing cached for counting products (caching a successor id
+        for a guarded transition is the forbidden wrong-mask class).
+
+        Shapes: ``(0, dst_sid)`` when no member step is count-dependent or
+        op-carrying (dst interned eagerly — safe, it is count-independent);
+        ``(1, entries, static_ops)`` otherwise, with entries per surviving
+        member either ``(0, tid, dst_comp_state)`` (fixed) or ``(1, tid,
+        variants, drop_resets)`` (variants = the member's guard_rows row with
+        local cids remapped global, covering the whole count space with DEAD
+        boxes explicit; drop_resets = reset ops for the member's counters
+        occupied at its current state, applied when it dies under the live
+        counts). static_ops carries the count-INDEPENDENT resets: members
+        whose fixed step drops them while their loop region was occupied."""
+        got = self._prows[sid][g]
+        if got is None:
+            comps, cmap, coffs = self.comps, self._cmap, self._coffs
+            entries: list[tuple] = []
+            static_ops: list[tuple[int, int]] = []
+            guarded = False
+            for t, cs in self._states[sid]:
+                cls = cmap[t][g]
+                comp = comps[t]
+                off = coffs.get(t)
+                if off is None:
+                    nc = comp.step(cs, cls)
+                    if nc != DEAD:
+                        entries.append((0, t, nc))
+                    continue
+                var = comp.guard_rows.get((cs, cls))
+                if var is None:
+                    nc = comp.trans[cs][cls]
+                    if nc != DEAD:
+                        entries.append((0, t, nc))
+                    else:
+                        occ = comp.occupied[cs]
+                        if occ:
+                            # member drops on this class regardless of counts:
+                            # its counters reset to canonical 0
+                            static_ops.extend((cid + off, 2) for cid in sorted(occ))
+                    continue
+                guarded = True
+                remapped = tuple(
+                    (
+                        tuple((cid + off, lo, hi) for cid, lo, hi in conds),
+                        dst,
+                        tuple((cid + off, op) for cid, op in ops),
+                    )
+                    for conds, dst, ops in var
+                )
+                drop_resets = tuple((cid + off, 2) for cid in sorted(comp.occupied[cs]))
+                entries.append((1, t, remapped, drop_resets))
+            if not guarded and not static_ops:
+                nxt = tuple((t, nc) for _k, t, nc in entries)
+                got = (0, self._intern(nxt) if nxt else DEAD)
+            else:
+                got = (1, tuple(entries), tuple(static_ops))
+            self._prows[sid][g] = got   # racing writes store equal plans
+        return got
+
     def _intern(self, st: tuple[tuple[int, int], ...]) -> int:
         got = self._ids.get(st)
         if got is not None:
@@ -395,6 +519,8 @@ class LazyProductDFA:
                 got = len(self._states)
                 self._states.append(st)
                 self._crows.append([None] * self._n_g)
+                if self.counters:
+                    self._prows.append([None] * self._n_g)
                 self._annotate(st)
                 self._ids[st] = got   # published last: lists are indexable first
         return got
@@ -402,9 +528,68 @@ class LazyProductDFA:
     # -- ScannerDFA protocol (grid/lexer/dfa.py semantics, verbatim) ---------
 
     def next(self, state: int, byte: int) -> int:
+        assert not self.counters, "counting DFA: hand-stepping must go through step()"
         return self._class_step(state, self._gclass_of[byte])
 
+    def zero_counts(self) -> tuple[int, ...]:
+        return (0,) * len(self.counters)
+
+    def step(self, sid: int, counts: tuple[int, ...], byte: int) -> tuple[int, tuple[int, ...]]:
+        """One counter-aware byte step: (state', counts'). Counter-free
+        products reduce to the plain class step (counts pass through)."""
+        g = self._gclass_of[byte]
+        if not self.counters:
+            return self._class_step(sid, g), counts
+        plan = self._plan(sid, g)
+        if plan[0] == 0:
+            return plan[1], counts
+        _tag, entries, ops_all = plan
+        nxt: list[tuple[int, int]] = []
+        extra_ops: list[tuple[int, int]] = []
+        for e in entries:
+            if e[0] == 0:
+                nxt.append((e[1], e[2]))
+                continue
+            _k, t, variants, drop_resets = e
+            for conds, dst, ops in variants:
+                ok = True
+                for cid, lo, hi in conds:
+                    c = counts[cid]
+                    if c < lo or c > hi:
+                        ok = False
+                        break
+                if not ok:
+                    continue
+                if dst != DEAD:
+                    nxt.append((t, dst))
+                    if ops:
+                        extra_ops.extend(ops)
+                elif drop_resets:
+                    extra_ops.extend(drop_resets)
+                break   # variant boxes are disjoint: first match is the match
+        if not nxt:
+            return DEAD, counts
+        if ops_all or extra_ops:
+            lst = list(counts)
+            for cid, op in itertools.chain(ops_all, extra_ops):
+                if op == 1:
+                    m, n = self.counters[cid]
+                    cap = n if n >= 0 else m
+                    v = lst[cid] + 1
+                    lst[cid] = cap if v > cap else v
+                else:
+                    lst[cid] = 0
+            counts = tuple(lst)
+        return self._intern(tuple(nxt)), counts
+
     def scan_state(self, remainder: bytes) -> int:
+        if self.counters:
+            st, counts = 0, self.zero_counts()
+            for b in remainder:
+                st, counts = self.step(st, counts, b)
+                if st == DEAD:
+                    return DEAD
+            return st
         st = 0
         step, gof = self._class_step, self._gclass_of
         for b in remainder:
@@ -414,6 +599,9 @@ class LazyProductDFA:
         return st
 
     def scan_with_last_accept(self, remainder: bytes) -> tuple[int, int, int]:
+        if self.counters:
+            q, _cq, length, p, _cp = self.scan_full(remainder)
+            return q, length, p
         st = 0
         step, gof, accept = self._class_step, self._gclass_of, self.accept
         length, p = 0, -1
@@ -425,6 +613,22 @@ class LazyProductDFA:
                 length, p = i + 1, st
         return st, length, p
 
+    def scan_full(self, remainder: bytes) -> tuple[int, tuple[int, ...], int, int, tuple[int, ...]]:
+        """Counter-carrying scan_with_last_accept (dfa.ScannerDFA.scan_full
+        semantics verbatim): ``(q, counts_q, l, p, counts_p)``; ``counts_p``
+        is () when no prefix accepts."""
+        st, counts = 0, self.zero_counts()
+        length, p = 0, -1
+        counts_p: tuple[int, ...] = ()
+        accept = self.accept
+        for i, b in enumerate(remainder):
+            st, counts = self.step(st, counts, b)
+            if st == DEAD:
+                return DEAD, counts, length, p, counts_p
+            if accept[st] != -1:
+                length, p, counts_p = i + 1, st, counts
+        return st, counts, length, p, counts_p
+
     # -- bounded materialization ---------------------------------------------
 
     def materialize(self, budget: int) -> ScannerDFA | None:
@@ -432,7 +636,13 @@ class LazyProductDFA:
         classes ascending by min byte): within budget the result equals
         build_scanner's ScannerDFA EXACTLY — numbering included — by the
         product/subset bijection. None on breach (already-materialized states
-        stay; the facade then serves them demand-order)."""
+        stay; the facade then serves them demand-order). Counting products
+        (GRID_PERF_COUNTING) lower their transition plans to the held eager
+        format instead — counters + guard_rows keyed (state, byte) — there is
+        no expanded-numbering oracle for those (equivalence to the expanded
+        DFA is behavioral, tests/lexer/test_counting_windows.py)."""
+        if self.counters:
+            return self._materialize_counting(budget)
         i = 0
         n_g = self._n_g
         step = self._class_step
@@ -454,24 +664,108 @@ class LazyProductDFA:
             h_max=max((len(s) for s in lives), default=0),
         )
 
+    def _materialize_counting(self, budget: int) -> ScannerDFA | None:
+        """Counting-product materialization: same FIFO/ascending-class BFS,
+        with count-dependent cells lowered to product-level variant tables.
+        Per cell the guarded members' variant boxes are crossed (ascending
+        tid; per-member variant order preserved) — each combo is a box over
+        the global counter space whose successor tuple drops the members dead
+        in it; combos where every member drops are skipped, so uncovered
+        count regions fall through to DEAD exactly like the held step().
+        Successor states intern in combo-enumeration order (deterministic:
+        genN keys embed materialized state ids). The dense trans value on a
+        guarded cell is the largest-successor variant (the held dense-row
+        convention — advisory only; ScannerDFA.next asserts)."""
+        i = 0
+        n_g = self._n_g
+        guard_cells: dict[tuple[int, int], tuple] = {}   # (sid, gclass) -> variants
+        while i < len(self._states):
+            if len(self._states) > budget:
+                return None
+            for g in range(n_g):
+                plan = self._plan(i, g)
+                if plan[0] == 0:
+                    self._crows[i][g] = plan[1]
+                    continue
+                variants, dense = self._lower_plan(plan)
+                self._crows[i][g] = dense
+                if variants:
+                    guard_cells[(i, g)] = variants
+            i += 1
+        gof = self._gclass_of
+        trans = tuple(tuple(row[g] for g in gof) for row in self._crows)
+        guard_rows: dict[tuple[int, int], tuple] = {}
+        for (sid, g), vt in guard_cells.items():
+            for byte in range(256):
+                if gof[byte] == g:
+                    guard_rows[(sid, byte)] = vt
+        lives = tuple(self.live)
+        return ScannerDFA(
+            start=0,
+            trans=trans,
+            accept=tuple(self.accept),
+            accepts_all=tuple(self.accepts_all),
+            live=lives,
+            h_max=max((len(s) for s in lives), default=0),
+            counters=self.counters,
+            guard_rows=guard_rows,
+        )
+
+    def _lower_plan(self, plan: tuple) -> tuple[tuple, int]:
+        """One count-dependent plan -> (product variants, dense advisory)."""
+        _tag, entries, static_ops = plan
+        var_lists = [e[2] for e in entries if e[0] == 1]
+        out: list[tuple[tuple, int, tuple]] = []
+        best: tuple[int, int] | None = None   # (n_members, dst_sid)
+        for combo in itertools.product(*var_lists):
+            it = iter(combo)
+            nxt: list[tuple[int, int]] = []
+            conds: list[tuple[int, int, int]] = []
+            ops: list[tuple[int, int]] = list(static_ops)
+            for e in entries:
+                if e[0] == 0:
+                    nxt.append((e[1], e[2]))
+                    continue
+                vconds, dst, vops = next(it)
+                conds.extend(vconds)
+                if dst != DEAD:
+                    nxt.append((e[1], dst))
+                    ops.extend(vops)
+                else:
+                    ops.extend(e[3])   # drop_resets
+            if not nxt:
+                continue   # dead under these counts: step() falls through
+            dst_id = self._intern(tuple(nxt))
+            out.append((tuple(conds), dst_id, tuple(ops)))
+            if best is None or len(nxt) > best[0]:
+                best = (len(nxt), dst_id)
+        return tuple(out), best[1] if best is not None else DEAD
+
 
 def build_factored_scanner(
     terminals: dict[str, Terminal],
     terminal_order: tuple[str, ...],
     budget: int | None = None,
     component_budget: int | None = None,
+    counting: bool | None = None,
 ) -> ScannerDFA | LazyProductDFA:
     """The default (GRID_PERF_FACTORED_SCANNER, "0" = legacy eager) path
     behind dfa.build_scanner. ``budget``/``component_budget`` default (None)
     to the GRID_PERF_FACTORED_BUDGET / GRID_PERF_COMPONENT_BUDGET call-time
     reads (see _component for the component budget's 0-vs-kill-switch
-    convention)."""
-    # components in terminal_order: the first GrammarInvalid from a bad regex
-    # is raised for the same terminal as the eager path
-    comps = [
-        _component(terminals[name].pattern, terminals[name].is_literal, component_budget)
-        for name in terminal_order
-    ]
+    convention); ``counting`` (None = GRID_PERF_COUNTING, default off) swaps
+    eligible window terminals to CountingTerminalDFA components."""
+    if counting is None:
+        counting = perf_flags.counting_enabled()
+    if counting:
+        comps = _counting_comps(terminals, terminal_order, component_budget)
+    else:
+        # components in terminal_order: the first GrammarInvalid from a bad
+        # regex is raised for the same terminal as the eager path
+        comps = [
+            _component(terminals[name].pattern, terminals[name].is_literal, component_budget)
+            for name in terminal_order
+        ]
     empty = frozenset(tid for tid, c in enumerate(comps) if c.matches_empty)
     if empty:
         # same frozenset value + join as build_scanner: identical message text
@@ -495,19 +789,102 @@ def build_factored_scanner(
     return dense if dense is not None else product
 
 
+def _counting_comps(
+    terminals: dict[str, Terminal],
+    terminal_order: tuple[str, ...],
+    component_budget: int | None,
+) -> list[TerminalDFA | LazyTerminalDFA | CountingTerminalDFA]:
+    """Component fetch with counting swap-in + the global _MAX_COUNTERS
+    selection (kernel v8 frame budget: at most 8 counters per product).
+
+    Selection ranks eligible loops by largest span with the held tie-break —
+    (span desc, terminal id asc, in-terminal loop order asc) — at TERMINAL
+    granularity: a terminal either keeps its counting component whole or
+    re-fetches as the plain expanded component (partial keeps would need
+    pattern-external memo keys; deliberate simplification vs the held
+    per-loop _drop_reps). Runs at product-assembly time so the pattern-keyed
+    memos never see selection state."""
+    comps: list = []
+    counting_idx: list[int] = []
+    for name in terminal_order:
+        t = terminals[name]
+        c = None
+        if not t.is_literal:
+            # counting fetch parses first — same _parse_regex, so the first
+            # GrammarInvalid is raised for the same terminal as the plain path
+            c = _counting_component(t.pattern, component_budget)
+        if c is None:
+            c = _component(t.pattern, t.is_literal, component_budget)
+        else:
+            counting_idx.append(len(comps))
+        comps.append(c)
+    total = sum(len(comps[t].counters) for t in counting_idx)
+    if total > _MAX_COUNTERS:
+        loops = [
+            (-(n if n >= 0 else m), t, li)
+            for t in counting_idx
+            for li, (m, n) in enumerate(comps[t].counters)
+        ]
+        loops.sort()
+        used = 0
+        selected: set[int] = set()
+        dropped: set[int] = set()
+        for _negspan, t, _li in loops:
+            if t in selected or t in dropped:
+                continue
+            k = len(comps[t].counters)
+            if used + k <= _MAX_COUNTERS:
+                selected.add(t)
+                used += k
+            else:
+                dropped.add(t)
+        for t in dropped:
+            name = terminal_order[t]
+            comps[t] = _component(
+                terminals[name].pattern, terminals[name].is_literal, component_budget)
+    return comps
+
+
 def shortest_lexemes_factored(dfa: LazyProductDFA) -> dict[int, bytes]:
     """Per-component BFS: the lexicographically-least shortest accepted word
     per terminal — exactly what reserve.shortest_lexemes' union-DFA BFS
     returns (acceptance is a per-component state property; smallest-byte
-    level order is lexicographic order) — without touching the product."""
+    level order is lexicographic order) — without touching the product.
+    Counting components BFS over (state, counts) configurations — the space
+    of the expanded component, bounded by the counter caps."""
     out: dict[int, bytes] = {}
     for tid, comp in enumerate(dfa.comps):
         if not comp.co_acc[0]:
             continue   # empty language: the union BFS never sees this terminal
-        word = _shortest_word(comp)
+        if getattr(comp, "counters", ()):
+            word = _shortest_word_counting(comp)
+        else:
+            word = _shortest_word(comp)
         if word is not None:
             out[tid] = word
     return out
+
+
+def _shortest_word_counting(comp: CountingTerminalDFA) -> bytes | None:
+    """_shortest_word over (control state, counts) configurations (same
+    smallest-byte level order; counter caps bound the space)."""
+    zero = comp.zero_counts()
+    frontier: list[tuple[int, tuple[int, ...], bytes]] = [(0, zero, b"")]
+    seen = {(0, zero)}
+    while frontier:
+        for st, _cts, path in frontier:
+            if comp.accepting[st]:
+                return path
+        nxt: list[tuple[int, tuple[int, ...], bytes]] = []
+        cof = comp.class_of
+        for st, cts, path in frontier:
+            for byte in range(256):
+                ns, ncts = comp.step_counts(st, cts, cof[byte])
+                if ns != DEAD and (ns, ncts) not in seen:
+                    seen.add((ns, ncts))
+                    nxt.append((ns, ncts, path + bytes([byte])))
+        frontier = nxt
+    return None
 
 
 def _shortest_word(comp: ScannerComponent) -> bytes | None:

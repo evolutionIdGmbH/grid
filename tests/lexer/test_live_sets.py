@@ -15,6 +15,19 @@ from grid.jsonschema import compile_json_schema
 from grid.lexer.dfa import DEAD, build_scanner
 
 
+@pytest.fixture(autouse=True, scope="module")
+def _expanded_scanner():
+    """The dense-graph forward BFS oracle below only reads ``trans`` rows,
+    which are advisory on a counting DFA's guarded cells (GRID_PERF_COUNTING)
+    — the counting live gate is the configuration-space oracle in
+    tests/lexer/test_counting_windows.py. Pin the flag off whatever the CI
+    leg exports."""
+    mp = pytest.MonkeyPatch()
+    mp.setenv("GRID_PERF_COUNTING", "0")
+    yield
+    mp.undo()
+
+
 def _dfa_of(patterns: list[str]):
     terms = {
         f"T{i}": Terminal(name=f"T{i}", pattern=pat, is_literal=False,

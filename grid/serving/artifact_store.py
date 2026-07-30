@@ -50,9 +50,18 @@ FORMAT = 2
 
 # Every module whose source participates in producing a stored artifact —
 # broader than the three writer call sites: Terminal.priority and
-# role_shape_hash semantics live in spec.py/projection.py.
+# role_shape_hash semantics live in spec.py/projection.py, and the scanner
+# pipeline spans the whole lexer package since the E2 split (subset/rx/nfa
+# behind the dfa facade, factored components, counting components) — a
+# semantic change to any of them changes stored scanners and must rotate
+# the epoch.
 _EPOCH_MODULES = (
     "grid.lexer.dfa",
+    "grid.lexer.subset",
+    "grid.lexer.rx",
+    "grid.lexer.nfa",
+    "grid.lexer.factored",
+    "grid.lexer.counting",
     "grid.lalr.compile",
     "grid.jsonschema.compiler",
     "grid.jsonschema.normalize",
@@ -159,14 +168,30 @@ def _order_key(terminal_order: tuple[str, ...]) -> str:
 
 
 def load_or_build_scanner(grammar: DialectGrammar) -> ScannerDFA:
-    """Drop-in for ``build_scanner(grammar.terminals, grammar.terminal_order)``."""
+    """Drop-in for ``build_scanner(grammar.terminals, grammar.terminal_order)``.
+
+    GRID_PERF_COUNTING scopes the store instead of keying it (P4 phase 1):
+    flag-on entries live under a ``:c1``-suffixed key, so flag-off keys and
+    artifacts stay byte-identical and neither regime is ever served the
+    other's scanner — a counting scanner served flag-off would break the
+    flag's byte-identity contract, and an expanded scanner served flag-on
+    would silently disable counting (poisoning any A/B measurement through a
+    shared cache). Counting-CARRYING scanners are additionally never
+    persisted (their serialization format is the planned FORMAT-bump
+    follow-on): under the flag, window-free grammars — whose flag-on build
+    is value-identical to flag-off — roundtrip as before, window grammars
+    rebuild per process."""
     if not enabled():
         return build_scanner(grammar.terminals, grammar.terminal_order)
     key = f"{grammar.fingerprint}:{_order_key(grammar.terminal_order)}"
+    if perf_flags.counting_enabled():
+        key += ":c1"
     hit = get("scanner", key)
-    if isinstance(hit, ScannerDFA):
+    if isinstance(hit, ScannerDFA) and not hit.counters:
         return hit
     dfa = build_scanner(grammar.terminals, grammar.terminal_order)
+    if getattr(dfa, "counters", ()):
+        return dfa  # deliberate no-put: counting persistence is the follow-on
     put("scanner", key, dfa)
     return dfa
 

@@ -36,11 +36,16 @@ def shortest_lexemes(dfa: ScannerDFA, n_terminals: int) -> dict[int, bytes]:
     Lazy factored DFAs dispatch to the per-component BFS: it returns the same
     lexicographically-least shortest word per terminal, while the union-DFA
     BFS below enumerates every state and would force full product
-    materialization on exactly the schemas the lazy regime exists for."""
+    materialization on exactly the schemas the lazy regime exists for.
+    (Counting facades take that route too — the per-component BFS is
+    counting-aware.) Dense counting DFAs (GRID_PERF_COUNTING) BFS over
+    (state, counts) configurations instead."""
     if getattr(dfa, "lazy", False):
         from grid.lexer.factored import shortest_lexemes_factored
 
         return shortest_lexemes_factored(dfa)  # type: ignore[arg-type]
+    if dfa.counters:
+        return _shortest_lexemes_counting(dfa)
     out: dict[int, bytes] = {}
     frontier: list[tuple[int, bytes]] = [(dfa.start, b"")]
     seen = {dfa.start}
@@ -56,6 +61,29 @@ def shortest_lexemes(dfa: ScannerDFA, n_terminals: int) -> dict[int, bytes]:
                 if ns != DEAD and ns not in seen:
                     seen.add(ns)
                     nxt.append((ns, path + bytes([byte])))
+        frontier = nxt
+    return out
+
+
+def _shortest_lexemes_counting(dfa: ScannerDFA) -> dict[int, bytes]:
+    """shortest_lexemes over (state, counts) configurations — the space of the
+    expanded DFA (counter caps bound it); compile-time only."""
+    out: dict[int, bytes] = {}
+    start = (dfa.start, dfa.zero_counts())
+    frontier: list[tuple[int, tuple[int, ...], bytes]] = [(dfa.start, dfa.zero_counts(), b"")]
+    seen = {start}
+    while frontier:
+        nxt: list[tuple[int, tuple[int, ...], bytes]] = []
+        for st, _cts, path in frontier:
+            for t in dfa.accepts_all[st]:
+                if t not in out:
+                    out[t] = path
+        for st, cts, path in frontier:
+            for byte in range(256):
+                ns, ncts = dfa.step(st, cts, byte)
+                if ns != DEAD and (ns, ncts) not in seen:
+                    seen.add((ns, ncts))
+                    nxt.append((ns, ncts, path + bytes([byte])))
         frontier = nxt
     return out
 
