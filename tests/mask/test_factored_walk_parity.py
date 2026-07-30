@@ -17,13 +17,38 @@ import numpy as np
 import pytest
 
 from grid.generate import build_guide
+from grid.grammar import spec
+from grid.grammar.projection import RoleProjection
 from grid.guide import COMPLETE
+from grid.lalr.compile import compile_tables
 from grid.lalr.stack import allowed_terminals, root_node, shift_terminal
-from grid.lexer.factored import LazyProductDFA, build_factored_scanner
+from grid.lexer.dfa import build_scanner
+from grid.lexer.factored import (
+    LazyProductDFA,
+    LazyTerminalDFA,
+    build_factored_scanner,
+)
 from grid.mask.producer import MaskProducer
 from grid.models.tokenizer_adapter import MockTokenizer
 from grid.trie.build import build_trie
 from grid.trie.walk import _walk_py, make_verdict_kernel, walk
+
+# the substring-union scanner family (BAKEOFF.md F1) scaled down: the TAG
+# terminal keeps a per-keyword matched bit alive through the trailing
+# closures, the P3 over-component-budget shape
+UNION_SOURCE = """%start doc
+%ignore WS
+WS: /[ \\t\\n]+/
+TAG: /"([a-e]*ab[a-e]*|[a-e]*cd[a-e]*|[a-e]*ace[a-e]*|[a-e]*bd[a-e]*)"/
+NUM: /[0-9]+/
+doc: item | doc item
+item: TAG | NUM
+"""
+
+UNION_TOKENS = (
+    '"', "a", "b", "c", "d", "e", "ab", "cd", '"a', '"ab', 'ab"', 'cd"',
+    '"cd', "ace", 'e"', "1", "12", "3", " ", '" ', '"e', "bd",
+)
 
 
 def _lazy_of(grammar) -> LazyProductDFA:
@@ -107,10 +132,57 @@ def test_lazy_takes_raw_schema_scoped_key(sql_grammar, sql_tables, sql_tokenizer
     eager_p = MaskProducer(tables=sql_tables,
                            dfa=build_factored_scanner(sql_grammar.terminals,
                                                       sql_grammar.terminal_order,
-                                                      budget=10**9),
+                                                      budget=10**9,
+                                                      component_budget=10**9),
                            trie=trie, vocab_size=vocab, schema_fingerprint="fp-mat")
     eager_p.set_genn_keys(True)
     assert eager_p.cache_key(b"select", A)[0] == "genN"  # materialized keeps genN
+
+
+def test_walk_parity_union_lazy_components(monkeypatch):
+    """P3: the over-component-budget product (every component lazy) must
+    serve identical WalkResults through the pure-Python spec walk, and stay
+    gated off the kernel."""
+    grammar = spec.load(UNION_SOURCE)
+    tables = compile_tables(RoleProjection.full(grammar).build())
+    eager = build_scanner(grammar.terminals, grammar.terminal_order, factored=False)
+    lazy_c = build_factored_scanner(
+        grammar.terminals, grammar.terminal_order, budget=0, component_budget=0)
+    assert isinstance(lazy_c, LazyProductDFA)
+    assert all(isinstance(c, LazyTerminalDFA) for c in lazy_c.comps)
+    assert make_verdict_kernel(tables, lazy_c, None) is None
+    trie = build_trie(MockTokenizer(extra_tokens=UNION_TOKENS))
+    _walk_parity(tables, eager, lazy_c, trie,
+                 [b"", b'"', b'"a', b'"ab', b'"abc', b'"e', b"1", b"12", b" ", b'"cd'])
+
+
+def test_union_guide_end_to_end_lockstep(monkeypatch):
+    """Flag-off guide vs component-breach guide (GRID_PERF_COMPONENT_BUDGET=2
+    -> skip-materialize -> lazy product over lazy components) in lockstep:
+    identical per-step mask id sets and statuses."""
+    monkeypatch.setenv("GRID_PERF_FACTORED_SCANNER", "0")
+    g_off = build_guide(UNION_SOURCE, MockTokenizer(extra_tokens=UNION_TOKENS))
+    monkeypatch.setenv("GRID_PERF_FACTORED_SCANNER", "1")
+    monkeypatch.setenv("GRID_PERF_COMPONENT_BUDGET", "2")
+    g_on = build_guide(UNION_SOURCE, MockTokenizer(extra_tokens=UNION_TOKENS))
+    assert isinstance(g_on.dfa, LazyProductDFA)
+    assert any(isinstance(c, LazyTerminalDFA) for c in g_on.dfa.comps)
+
+    rng = random.Random(23)
+    s_off, s_on = g_off.initial_state, g_on.initial_state
+    for _step in range(40):
+        ids_off, _ = g_off._mask_ids(s_off)
+        ids_on, _ = g_on._mask_ids(s_on)
+        set_off = {int(t) for t in np.asarray(ids_off)}
+        set_on = {int(t) for t in np.asarray(ids_on)}
+        assert set_off == set_on, _step
+        assert s_off.status == s_on.status
+        choices = sorted(set_off - {g_off.eos_token_id})
+        if not choices or s_off.status == COMPLETE:
+            break
+        tok = rng.choice(choices)
+        s_off = g_off.get_next_state(s_off, tok)
+        s_on = g_on.get_next_state(s_on, tok)
 
 
 @pytest.mark.parametrize("source_fixture,tokens_seed", [("toy", 11), ("sql", 13)])
@@ -118,7 +190,7 @@ def test_guide_end_to_end_lockstep(request, monkeypatch, source_fixture, tokens_
     source = request.getfixturevalue(f"{source_fixture}_source")
     tokenizer = request.getfixturevalue(f"{source_fixture}_tokenizer")
 
-    monkeypatch.delenv("GRID_PERF_FACTORED_SCANNER", raising=False)
+    monkeypatch.setenv("GRID_PERF_FACTORED_SCANNER", "0")  # default is on now
     g_off = build_guide(source, MockTokenizer(extra_tokens=tokenizer.extra_tokens))
     monkeypatch.setenv("GRID_PERF_FACTORED_SCANNER", "1")
     monkeypatch.setenv("GRID_PERF_FACTORED_BUDGET", "0")

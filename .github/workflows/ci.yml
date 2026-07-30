@@ -33,13 +33,22 @@ jobs:
           pip install --force-reinstall dist/*.whl
       - name: Lint
         run: ruff check grid tests
-      - name: Tests (gates G0-G4 slice + mini-G5/G6/G10a)
+      - name: Tests (gates G0-G4 slice + mini-G5/G6/G10a, shipped defaults)
         run: pytest tests/ -q
-      - name: Tests (GRID_PERF_FACTORED_SCANNER=1 leg)
-        run: GRID_PERF_FACTORED_SCANNER=1 pytest tests/ -q
+      - name: Tests (legacy kill-switch leg — pre-0.3.0 flag-off configuration)
+        run: >
+          GRID_PERF_FACTORED_SCANNER=0 GRID_PERF_LALR_DP=0 GRID_PERF_HASHCONS=0
+          pytest tests/ -q
       - name: Tests (factored lazy regime, pure-spec walk)
         # budget 0 forces every scanner onto the LazyProductDFA facade; crossed
         # with GRID_NO_RUST so kernel-only suites skip instead of asserting v7
         run: >
-          GRID_PERF_FACTORED_SCANNER=1 GRID_PERF_FACTORED_BUDGET=0 GRID_NO_RUST=1
+          GRID_PERF_FACTORED_BUDGET=0 GRID_NO_RUST=1
+          pytest tests/lexer tests/mask tests/trie tests/guide tests/generate tests/jsonschema_bridge -q
+      - name: Tests (component-lazy regime, P3)
+        # component budget 1 forces every non-degenerate terminal onto the
+        # demand-interned LazyTerminalDFA (env "0" is the kill switch, so 1 is
+        # the smallest all-lazy value); product budget 0 stacks the facades
+        run: >
+          GRID_PERF_COMPONENT_BUDGET=1 GRID_PERF_FACTORED_BUDGET=0 GRID_NO_RUST=1
           pytest tests/lexer tests/mask tests/trie tests/guide tests/generate tests/jsonschema_bridge -q

@@ -331,6 +331,28 @@ GRID_NO_RUST=1 .venv/bin/pytest tests/ -q         # force the executable-spec pa
 .venv-bench/bin/python bench/r_microharness.py --quick   # requirement-R harness
 ```
 
+**GRID_PERF_* flags** (`grid/perf_flags.py` is the single source of truth;
+grammars tested in `tests/test_perf_flags.py`). Since the 0.3.0 epoch's
+full-corpus run the compile-path winners are DEFAULT-ON, each with an env
+kill switch that restores the legacy path byte-identically:
+
+| flag | default | kill switch / values |
+|---|---|---|
+| `GRID_PERF_FACTORED_SCANNER` | on | `=0` restores the eager union builder (kept as the factored path's exactness oracle) |
+| `GRID_PERF_LALR_DP` | on (DeRemer-Pennello) | `=0` restores canonical `lr1_merge` (kept as the construction-independent oracle) |
+| `GRID_PERF_HASHCONS` | `norm,dedupe` | `=0` (or `""`) disables; comma list for component-granular A/B |
+| `GRID_PERF_ARTIFACT_STORE` | off | any value but `0` enables; default-on deferred until a warm-hit p50 measurement (BAKEOFF F2: +5-7ms cold per fast build) |
+| `GRID_PERF_FACTORED_BUDGET` | 20000 | product-state budget (tuning knob, not a flag): over budget the scanner serves the LazyProductDFA facade |
+| `GRID_PERF_COMPONENT_BUDGET` | 16384 | per-terminal component state budget (P3): over budget the terminal becomes a demand-interned LazyTerminalDFA and the scanner skips straight to the lazy product (the substring-union family — 5 former compile timeouts — compiles in seconds); `=0` disables the cap, restoring eager component builds and the family hang |
+
+`GRID_PERF_NFA_LIVE` no longer exists: the legacy DFA-graph live-set
+fixpoint and the verify branches were DELETED after the 11.3k
+zero-divergence verify pass on v0.3.0rc1
+(`bench/RESULTS-jsonschemabench-v0.3.0rc2.md`); live sets have exactly one
+implementation (`dfa._terminal_reach`), pinned by an independent
+forward-BFS oracle in `tests/lexer/test_live_sets.py` and the
+eager-vs-factored byte-identical differential.
+
 ---
 
 ## Part 2 - Formal and technical design

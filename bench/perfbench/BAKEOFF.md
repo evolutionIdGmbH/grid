@@ -116,3 +116,89 @@ Footnote: records with running != null and no timeout_s/rc marker are
 incomplete, not fast; profile_phases.py now marks crashed children (rc),
 requeues unmarked partials on resume, and reports incomplete records
 explicitly.
+
+## Postscript: flag disposition (E3, post-v0.3.0, wave A)
+
+Executed against the rc2 full-corpus run (tmp/mb-grid-v030rc2, 11,306
+schemas, GRID_PERF_HASHCONS=norm,dedupe GRID_PERF_LALR_DP=1
+GRID_PERF_FACTORED_SCANNER=1; adjudicated in
+bench/RESULTS-jsonschemabench-v0.3.0rc2.md). This section records outcomes;
+the tables above are history and stand as written.
+
+| flag | verdict executed |
+|---|---|
+| NFA_LIVE | DELETED (flag + `_live_fixpoint` + `_graph_co_acc`/`_live_mode` + verify branches); sanction: the 11.3k zero-divergence verify pass on rc1. Surviving gates: test-local forward-BFS oracle (test_live_sets.py), eager-vs-factored byte-identical differential. Component memo key loses its mode dimension. |
+| FACTORED_SCANNER | default ON; `=0` kill switch kept — the eager union builder remains the factored path's exactness oracle |
+| LALR_DP | default ON; `=0` kill switch kept — lr1_merge remains the construction-independent oracle (helm residual work wants the A/B) |
+| HASHCONS | default `norm,dedupe` (the measured configuration, pinned by name — a future component needs its own default decision); `=0`/comma-list grammar kept |
+| ARTIFACT_STORE | stays default-off per F2 (+5-7ms cold schema_compile per fast build); revisit with a warm-hit measurement in the serving epoch |
+| FACTORED_BUDGET | unchanged: documented tuning knob (20k), not a flag |
+
+Serving smoke at the new defaults (replaying valid corpus instances
+byte-token-wise to COMPLETE): dense regime OK; naturally-over-budget
+schema (Github_medium o33033) served 1091 tokens through the
+LazyProductDFA facade with the kernel- and genN-exclusion gates asserted
+live, forced-lazy == natural trajectories.
+
+## Postscript: P3 component budget (post-v0.3.0, wave A)
+
+The substring-union residual family is closed. Root cause held up under a
+direct probe (the F1 anatomy above): the persistent per-keyword matched bit
+gives the eager per-terminal subset construction ~2^k reachable subsets
+(o83132 S2 reproduced at 50k states/9.9s still climbing toward the recorded
+268,803; o5195 S0 breached a 30k probe cap at 8s with the frontier open),
+while a demand-driven walk of the same automaton materializes at most one
+new subset per scanned byte (o83132 post-fix: 9,028 walked test-corpus
+bytes -> 478 product states / 58 S2 subsets, 0.75us/byte cold, 0.35us/byte
+warm, zero growth on re-walk — the deferred memo-cap/product-swap lever
+stays unneeded).
+
+Fix (grid/lexer/factored.py + subset.py): GRID_PERF_COMPONENT_BUDGET caps
+the eager component build; over the cap the terminal comes back as a
+demand-interned LazyTerminalDFA (annotations are pure functions of the
+subset value, so the product's recorded sets are exact by construction) and
+the scanner skips straight to the lazy product — the union DFA is at least
+component-sized, so the product budget would abort materialization anyway.
+Default 16384 from the manifest-set sweep (853 schemas, 21,223 unique
+patterns): largest terminating NON-family component 7,210, but strmprivacy
+Stream carries a 15,865-state terminating component inside a product that
+compiles DENSE today (its eager and factored digests are equal), so 16384
+is the smallest power of two that keeps every dense-today build
+byte-identical; every 2^k member still breaches (certifying "component >
+budget" inherently costs budget-many subset states: 1.8-11.9s across the
+family, o48423 worst).
+
+Family outcomes, one process per schema (profile_phases p3_family set,
+jobs 1), vs the rc2/F1 baselines:
+
+| schema | before | after (scanner phase) |
+|---|---|---|
+| o5195 / o48423 / o47656 / o47657 / o48427 | compile timeout (>=120s) | 5.35 / 12.38 / 2.94 / 2.94 / 5.13s |
+| o83132 | 87-89s, 2.2GB RSS | 3.15s, 136MB (family RSS max 237MB) |
+| o83133 / o33033 | 5.8 / 6.2s | 2.32 / 2.22s |
+| BatchJob / DataConnector | 11.9 / 13.4s | 10.29 / 11.70s (their 8.7-15.9k-state terminating components stay eager under 16384 by the Stream/DataContract byte-identity constraint; an 8192 budget would halve these two at the cost of flipping Stream/DataContract off the dense path) |
+| DataContract / Stream | 7.4 / 0.7s (warm-memo) | byte-identical path (6.58 / 3.14s cold; Stream dense, 16,229 states) |
+| o83677 / io-package | LALRConflictError before scanner | unchanged |
+
+Gates run: (a) scanner-digest over all five manifest sets + builtin (878
+units, tmp/scanner-digest-p3-{pre,post,off}): kill-switch leg
+(--flag GRID_PERF_COMPONENT_BUDGET=0) 878/878 bit-identical to pre; default
+leg diverges on exactly one unit — o33033, the only family schema whose
+eager arm finishes inside the tool timeout — and a 200-state
+FIFO-order product probe of both variants shows identical rows/accept/
+accepts_all/live/h_max (the divergence is the component-representation
+encoding in the digest, not behavior). (b) MaskBench over the 14-schema
+family vs rc2: all 9 previously-completing schemas outcome-IDENTICAL
+(test verdicts, token counts, and TBM p50 unchanged: o83132 165->165us,
+BatchJob 180->181us, Stream dense 27->30us; p99 tails unchanged), and the 5
+timeouts flip to runs with ZERO validation/invalidation errors. (c) reserve
+BFS on lazy components: 10-30ms, 65-87 states materialized (visits each
+state once, bounded by shortest-word depth — no cap needed, and none could
+help: capping would trade this for the strictly larger eager cost).
+
+Residual: the certification cost itself (seconds, linear in the budget) —
+any exact cap pays it once per breaching pattern per process; and the
+(16384, 20000] corner (a hypothetical out-of-corpus terminating component
+whose product fits the product budget) degrades gracefully to the lazy
+product with identical masks, restorable via GRID_PERF_COMPONENT_BUDGET=0.
+helm-testsuite LALR is now the only known compile-cap family.

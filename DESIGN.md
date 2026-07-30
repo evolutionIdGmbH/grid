@@ -74,6 +74,8 @@ Two implementations of the same semantics, bound by differential tests:
 ```
 grid/
   protocols.py          # tool-family protocol shapes (normative definitions)
+  perf_flags.py         # GRID_PERF_* env-flag table: one call-time reader per flag
+                        # (single source of truth; grammars tested in tests/test_perf_flags.py)
   guide.py              # GridGuide, GridState  (Guide protocol implementation)
   processors.py         # GridLogitsProcessor   (tool-family logits-processor shape)
   generate/
@@ -91,7 +93,11 @@ grid/
                         # reduce-chain simulation (normative algorithm in §6 step 1-2)
     reserve.py          # ReserveTable: token-denominated min-completion costs (§5 E4a)
   lexer/
-    dfa.py              # derivative-based lexer DFAs, lazily materialized
+    dfa.py              # ScannerDFA + build_scanner entry (stable import facade)
+    rx.py               # grid-regex subset -> parse tree
+    nfa.py              # Thompson byte-NFAs + terminal-accept reachability
+    subset.py           # shared subset-construction core (eager + factored paths)
+    factored.py         # per-terminal component DFAs (eager or demand-interned over the component budget) + lazy product (0.3.x #4)
     run.py              # LexerRun: immutable value object (§5 E7)
   trie/
     build.py            # TokenTrie from TokenizerAdapter.token_bytes (final artifact format, §2)

@@ -985,6 +985,22 @@
    "WashingtonPost---wp_96_Normalized",
    "WashingtonPost---wp_98_Normalized",
    "WashingtonPost---wp_9_Normalized"
+  ],
+  "p3_family": [
+   "Github_easy---o47657",
+   "Github_easy---o5195",
+   "Github_hard---o48423",
+   "Github_hard---o83132",
+   "Github_hard---o83133",
+   "Github_hard---o83677",
+   "Github_medium---o33033",
+   "Github_medium---o47656",
+   "Github_medium---o48427",
+   "JsonSchemaStore---io-package",
+   "JsonSchemaStore---strmprivacy.api.entities.v1.BatchJob",
+   "JsonSchemaStore---strmprivacy.api.entities.v1.DataConnector",
+   "JsonSchemaStore---strmprivacy.api.entities.v1.DataContract",
+   "JsonSchemaStore---strmprivacy.api.entities.v1.Stream"
   ]
  }
 }

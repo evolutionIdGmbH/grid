@@ -36,6 +36,7 @@ import warnings
 from functools import lru_cache
 from pathlib import Path
 
+from grid import perf_flags
 from grid.grammar.projection import RoleProjection
 from grid.grammar.spec import DialectGrammar
 from grid.lalr.compile import LALRTables, compile_tables
@@ -66,7 +67,7 @@ _tmp_counter = itertools.count()
 
 
 def enabled() -> bool:
-    return os.environ.get("GRID_PERF_ARTIFACT_STORE", "0") != "0"
+    return perf_flags.artifact_store_enabled()
 
 
 def root() -> Path:

@@ -4,14 +4,15 @@ Two constructions, selected per call (LALR(1) is uniquely defined, so both
 produce equal LALRTables — action/goto content, conflict set, and, by the
 numbering argument at _lr0_automaton, state ids):
 
-- "lr1_merge" (default): canonical LR(1) item sets, then merge states with
-  equal cores. Correctness-first; item counts scale with lookahead splits,
-  quadratic-plus on shared-core/divergent-lookahead grammars (2^R member
-  chains).
-- "dp" (GRID_PERF_LALR_DP=1): LR(0) automaton over (prod, dot) cores plus
-  exact lookaheads via the DeRemer-Pennello DR/reads/includes/lookback
-  relations (TOPLAS 1982) closed by the digraph algorithm; near-linear in
-  LR(0) transitions.
+- "dp" (default; GRID_PERF_LALR_DP unset or "1"): LR(0) automaton over
+  (prod, dot) cores plus exact lookaheads via the DeRemer-Pennello
+  DR/reads/includes/lookback relations (TOPLAS 1982) closed by the digraph
+  algorithm; near-linear in LR(0) transitions.
+- "lr1_merge" (GRID_PERF_LALR_DP=0, the kill switch — kept as the
+  construction-independent oracle): canonical LR(1) item sets, then merge
+  states with equal cores. Correctness-first; item counts scale with
+  lookahead splits, quadratic-plus on shared-core/divergent-lookahead
+  grammars (2^R member chains).
 
 Conflicts raise LALRConflictError with a report of (state, terminal, actions).
 
@@ -26,9 +27,9 @@ Tables retain per-state item cores (``state_items``) — the reserve computation
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 
+from grid import perf_flags
 from grid.errors import LALRConflictError
 from grid.grammar.projection import RoleProjection
 
@@ -358,7 +359,7 @@ def compile_tables(
     if proj.state != "CACHED":
         raise ValueError("compile_tables requires a CACHED (built) RoleProjection")
     if algorithm is None:
-        algorithm = "dp" if os.environ.get("GRID_PERF_LALR_DP", "0") == "1" else "lr1_merge"
+        algorithm = perf_flags.lalr_algorithm()
     if algorithm not in ("lr1_merge", "dp"):
         raise ValueError(f"unknown LALR algorithm: {algorithm!r}")
 

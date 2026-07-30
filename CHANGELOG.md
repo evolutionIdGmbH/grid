@@ -4,6 +4,75 @@ Versions in the 0.2.x line are **correctness-only** (the coverage epoch,
 DESIGN-JSON-COVERAGE.md): error metrics are the headline; timings are
 recorded, not optimized (kernel frozen at v7). Speed work is the 0.3.x epoch.
 
+## Unreleased
+
+0.3.x flag disposition (E3): the epoch's measured winners become the
+shipped defaults, gated on the v0.3.0 full-corpus run
+(bench/RESULTS-jsonschemabench-v0.3.0rc2.md; outcome movement vs v0.2.5
+fully adjudicated there).
+
+- Defaults flipped ON, each with an env kill switch restoring the legacy
+  path: `GRID_PERF_FACTORED_SCANNER` (`=0` restores the eager union
+  builder, kept as the exactness oracle), `GRID_PERF_LALR_DP` (`=0`
+  restores canonical `lr1_merge`, kept as the construction-independent
+  oracle), `GRID_PERF_HASHCONS` (unset now means `norm,dedupe` — the exact
+  measured configuration; `=0` disables, comma lists still select
+  components). Value grammars are unchanged; only unset defaults moved.
+- Deleted: `GRID_PERF_NFA_LIVE` and the legacy live-set implementations it
+  selected — `_live_fixpoint` + verify branch (dfa.py), `_graph_co_acc` /
+  `_live_mode` + verify branch (factored.py) — sanctioned by the 11.3k
+  zero-divergence verify pass on v0.3.0rc1. Live sets now have exactly one
+  implementation (NFA terminal-reach); the factored component memo key
+  drops its mode dimension `(pattern, is_literal, live_mode)` ->
+  `(pattern, is_literal)`. Independent gates kept: forward-BFS oracle in
+  tests/lexer/test_live_sets.py + the eager-vs-factored byte-identical
+  differential.
+- `GRID_PERF_ARTIFACT_STORE` stays default-off by design: BAKEOFF F2
+  measured +5-7ms cold schema_compile per fast build; default-on is
+  deferred to a serving-epoch warm-hit measurement.
+- Default-visible outcome changes (all adjudicated in the rc2 results):
+  5 former 120s-caps now compile, the 4-schema frontend family declares
+  Unsupported in 0.03-0.5s, wp_105 compiles via the LALR-conflict retry;
+  residual known tails: substring-union scanner family x5, helm-testsuite,
+  o27148 (retry pushes it over the limit).
+
+Scanner-build dedup (E2, structural, zero behavior change): the
+subset-construction core that build_scanner and factored._build_component
+ran as duplicated code now lives once in grid/lexer/subset.py (eps-closure
+memoization, byte-class refinement, per-class edge index, FIFO subset loop);
+the regex parser and NFA layers split into grid/lexer/rx.py + nfa.py, with
+dfa.py kept as the stable import facade (ScannerDFA, build_scanner, and the
+historically-imported privates re-exported — importers unchanged). Gated by
+the new bench/perfbench/diff_scanner_digest.py byte-identity harness:
+241-unit corpus (stratified_200 + ttfm_capped + in-repo floor), digests of
+both flag arms plus every per-terminal component bit-equal pre/post,
+GrammarInvalid message text included. factored.py gains the type-only
+ScannerComponent Protocol — the seam a COUNTING_WINDOWS component type
+plugs into beside TerminalDFA without touching the product.
+
+Per-component state budget (P3, `GRID_PERF_COMPONENT_BUDGET`, default
+16384): the substring-union terminal family (13-17 unanchored keywords in
+one JSON-string terminal, BAKEOFF.md F1) keeps a per-keyword matched bit
+alive, so its eager per-terminal subset construction discovers ~2^k states
+(o83132: 268,803 / ~87s / 2.2GB; o5195: >200k with the frontier open) while
+a walk demands at most one new subset per scanned byte. Components that
+breach the budget come back as demand-interned LazyTerminalDFAs — exact
+same subsets/annotations as the eager build (accepting = accept-in-subset,
+co_acc = NFA terminal-reach over the subset), consumed through a
+step(state, cls) facade on ScannerComponent — and the scanner skips product
+materialization (the union DFA is at least component-sized, so the product
+budget would abort it anyway); the lazy product keeps its existing
+kernel/genN/T2/reserve gates. Default fixed by a manifest-set sweep (853
+schemas, 21,223 unique patterns: largest terminating non-family component
+7,210; largest inside a dense-today build 15,865 — strmprivacy Stream —
+which must stay byte-identical; every 2^k member breaches in 1.8-11.9s).
+Outcome changes, all in the family: 5 compile timeouts (o5195, o48423,
+o47656, o47657, o48427) become lazy compiles; o83132 (~87s), o83133,
+o33033, and the >16384-state components of strmprivacy
+BatchJob/DataConnector build lazily (same lazy-product outcome class as
+before, seconds instead of tens of seconds). `=0` restores the eager
+component builds byte-identically (digest-gated), family hang included.
+
 ## 0.3.0 - 2026-07-30
 
 The performance epoch: compile-time (TTFM) tail work, selected by measured

@@ -1,7 +1,12 @@
 """Terminal regexes -> combined scanner DFA (DESIGN.md SS3 lexer/, E7).
 
-Pipeline: grid-regex subset -> NFA (Thompson) -> combined NFA (one tagged accept
-per terminal) -> subset-construction DFA over bytes.
+Pipeline: grid-regex subset (rx.py) -> NFA (Thompson, nfa.py) -> combined NFA
+(one tagged accept per terminal) -> subset-construction DFA over bytes
+(shared core in subset.py). This module holds the ScannerDFA artifact and the
+build_scanner entry point (+ the factored-path dispatch), and re-exports the
+pipeline's historically-public names (DEAD, _parse_regex, _literal_node,
+_NFABuilder, _terminal_reach) — importers treat dfa.py as the lexer's stable
+facade; keep it that way.
 
 Scanner DFA state knowledge:
 - ``accept[state]``: the winning terminal if the scan stopped here (maximal munch
@@ -10,8 +15,10 @@ Scanner DFA state knowledge:
 - ``live[state]``: the set of terminals still reachable from this state — the
   lexer hypothesis set (E7). INV-LEX1's H_max is the max |live| over states,
   computed at build time from NFA terminal-reachability accumulated per subset
-  state (GRID_PERF_NFA_LIVE: "0" = legacy DFA-graph fixpoint, "verify" = both,
-  cross-checked; L3 identifier categories add at most +1 hypothesis by
+  state (_terminal_reach; the legacy DFA-graph fixpoint and its env flag were
+  deleted after the 11.3k zero-divergence verify pass on v0.3.0rc1, see
+  CHANGELOG — tests/lexer/test_live_sets.py keeps an independent forward-BFS
+  oracle; L3 identifier categories add at most +1 hypothesis by
   construction).
 
 All automata operate on BYTES: patterns are encoded latin-1; multi-byte UTF-8
@@ -20,305 +27,26 @@ in identifiers enters through byte classes (e.g. [\\x80-\\xff]).
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from grid import perf_flags
 from grid.errors import GrammarInvalid
 from grid.grammar.spec import Terminal
+from grid.lexer.nfa import _NFA, _NFABuilder, _terminal_reach  # noqa: F401  (re-export)
+from grid.lexer.rx import _literal_node, _Node, _parse_regex
+from grid.lexer.subset import (
+    DEAD,
+    byte_classes,
+    edges_by_class,
+    eps_closure_fn,
+    subset_construct,
+)
 
 if TYPE_CHECKING:
-    # guard is mandatory: factored.py imports this module's privates at
+    # guard is mandatory: factored.py imports ScannerDFA from this module at
     # runtime, so an unguarded import would cycle
     from grid.lexer.factored import LazyProductDFA
-
-# ---------------------------------------------------------------- regex parser
-
-_ESCAPES = {"n": ord("\n"), "t": ord("\t"), "r": ord("\r"), "0": 0}
-_MAX_REPEAT = 8192      # {m,n} bound cap: expansion is linear in n
-
-
-def _expand_repeat(node: _Node, m: int, n: int | None) -> _Node:
-    """{m,n} -> m copies + (n-m) optionals ({m,} -> m copies + a star tail).
-    Expansion happens at parse time; the NFA builder is unchanged and shared
-    subtrees are safe (construction walks per visit)."""
-    kids: list[_Node] = [node] * m
-    if n is None:
-        kids.append(_Node("star", kids=(node,)))
-    else:
-        kids.extend([_Node("opt", kids=(node,))] * (n - m))
-    if not kids:
-        return _Node("eps")
-    return kids[0] if len(kids) == 1 else _Node("cat", kids=tuple(kids))
-
-
-@dataclass
-class _Node:
-    kind: str                      # char|class|any|cat|alt|star|plus|opt|eps
-    chars: frozenset[int] = frozenset()
-    kids: tuple[_Node, ...] = ()
-
-
-def _parse_regex(pattern: str) -> _Node:
-    pos = 0
-
-    def peek() -> str | None:
-        return pattern[pos] if pos < len(pattern) else None
-
-    def take() -> str:
-        nonlocal pos
-        ch = pattern[pos]
-        pos += 1
-        return ch
-
-    def parse_alt() -> _Node:
-        branches = [parse_cat()]
-        while peek() == "|":
-            take()
-            branches.append(parse_cat())
-        return branches[0] if len(branches) == 1 else _Node("alt", kids=tuple(branches))
-
-    def parse_cat() -> _Node:
-        items: list[_Node] = []
-        while peek() not in (None, "|", ")"):
-            items.append(parse_post())
-        if not items:
-            return _Node("eps")
-        return items[0] if len(items) == 1 else _Node("cat", kids=tuple(items))
-
-    def parse_post() -> _Node:
-        node = parse_atom()
-        while True:
-            c = peek()
-            if c in ("*", "+", "?"):
-                op = take()
-                node = _Node({"*": "star", "+": "plus", "?": "opt"}[op], kids=(node,))
-            elif c == "{":
-                rep = try_parse_repeat()
-                if rep is None:
-                    break               # literal '{' consumed by parse_atom later
-                m, n = rep
-                node = _expand_repeat(node, m, n)
-            else:
-                break
-        return node
-
-    def try_parse_repeat():
-        """Parse {m} / {m,} / {m,n} after an atom; None (no input consumed)
-        when the braces are not a valid quantifier — the '{' then reads as a
-        literal, matching the ECMA convention."""
-        nonlocal pos
-        save = pos
-        take()                          # '{'
-        digits = ""
-        while peek() is not None and peek().isdigit():
-            digits += take()
-        if not digits:
-            pos = save
-            return None
-        m = int(digits)
-        n: int | None = m
-        if peek() == ",":
-            take()
-            digits = ""
-            while peek() is not None and peek().isdigit():
-                digits += take()
-            n = int(digits) if digits else None
-        if peek() != "}":
-            pos = save
-            return None
-        take()                          # '}'
-        if n is not None and n < m:
-            raise GrammarInvalid(f"bad repetition {{{m},{n}}} in regex {pattern!r}")
-        if m > _MAX_REPEAT or (n is not None and n > _MAX_REPEAT):
-            raise GrammarInvalid(
-                f"repetition bound over {_MAX_REPEAT} in regex {pattern!r}")
-        return m, n
-
-    def parse_atom() -> _Node:
-        ch = take()
-        if ch == "(":
-            node = parse_alt()
-            if peek() != ")":
-                raise GrammarInvalid(f"unclosed group in regex {pattern!r}")
-            take()
-            return node
-        if ch == "[":
-            return parse_class()
-        if ch == ".":
-            return _Node("class", chars=frozenset(range(256)) - {ord("\n")})
-        if ch == "\\":
-            esc = take()
-            if esc in _ESCAPES:
-                return _Node("char", chars=frozenset({_ESCAPES[esc]}))
-            if esc == "x":
-                hexs = take() + take()
-                return _Node("char", chars=frozenset({int(hexs, 16)}))
-            return _Node("char", chars=frozenset({ord(esc)}))
-        return _Node("char", chars=frozenset({ord(ch)}))
-
-    def parse_class() -> _Node:
-        negate = False
-        if peek() == "^":
-            take()
-            negate = True
-        chars: set[int] = set()
-        first = True
-        while peek() != "]" or first:
-            if peek() is None:
-                raise GrammarInvalid(f"unclosed class in regex {pattern!r}")
-            first = False
-            ch = take()
-            if ch == "\\":
-                esc = take()
-                if esc == "x":
-                    code = int(take() + take(), 16)
-                else:
-                    code = _ESCAPES.get(esc, ord(esc))
-            else:
-                code = ord(ch)
-            if peek() == "-" and pos + 1 < len(pattern) and pattern[pos + 1] != "]":
-                take()
-                hi_ch = take()
-                if hi_ch == "\\":
-                    esc = take()
-                    hi = int(take() + take(), 16) if esc == "x" else _ESCAPES.get(esc, ord(esc))
-                else:
-                    hi = ord(hi_ch)
-                chars.update(range(code, hi + 1))
-            else:
-                chars.add(code)
-        take()  # ']'
-        if negate:
-            chars = set(range(256)) - chars
-        return _Node("class", chars=frozenset(chars))
-
-    node = parse_alt()
-    if pos != len(pattern):
-        raise GrammarInvalid(f"trailing regex input at {pattern[pos:]!r}")
-    return node
-
-
-# ---------------------------------------------------------------- NFA
-
-@dataclass
-class _NFA:
-    """Byte-labelled NFA with epsilon edges; single (start, accept) pair."""
-
-    start: int
-    accept: int
-    eps: dict[int, list[int]]
-    edges: dict[int, list[tuple[frozenset[int], int]]]
-
-
-class _NFABuilder:
-    def __init__(self) -> None:
-        self.n = 0
-        self.eps: dict[int, list[int]] = {}
-        self.edges: dict[int, list[tuple[frozenset[int], int]]] = {}
-
-    def new(self) -> int:
-        self.n += 1
-        return self.n - 1
-
-    def add_eps(self, a: int, b: int) -> None:
-        self.eps.setdefault(a, []).append(b)
-
-    def add_edge(self, a: int, chars: frozenset[int], b: int) -> None:
-        self.edges.setdefault(a, []).append((chars, b))
-
-    def build(self, node: _Node) -> tuple[int, int]:
-        s, a = self.new(), self.new()
-        if node.kind in ("char", "class"):
-            self.add_edge(s, node.chars, a)
-        elif node.kind == "eps":
-            self.add_eps(s, a)
-        elif node.kind == "cat":
-            prev = s
-            for kid in node.kids:
-                ks, ka = self.build(kid)
-                self.add_eps(prev, ks)
-                prev = ka
-            self.add_eps(prev, a)
-        elif node.kind == "alt":
-            for kid in node.kids:
-                ks, ka = self.build(kid)
-                self.add_eps(s, ks)
-                self.add_eps(ka, a)
-        elif node.kind == "star":
-            ks, ka = self.build(node.kids[0])
-            self.add_eps(s, ks)
-            self.add_eps(s, a)
-            self.add_eps(ka, ks)
-            self.add_eps(ka, a)
-        elif node.kind == "plus":
-            ks, ka = self.build(node.kids[0])
-            self.add_eps(s, ks)
-            self.add_eps(ka, ks)
-            self.add_eps(ka, a)
-        elif node.kind == "opt":
-            ks, ka = self.build(node.kids[0])
-            self.add_eps(s, ks)
-            self.add_eps(s, a)
-            self.add_eps(ka, a)
-        else:  # pragma: no cover
-            raise AssertionError(node.kind)
-        return s, a
-
-
-# ---------------------------------------------------------------- scanner DFA
-
-DEAD = -1
-
-
-def _live_fixpoint(trans: list[list[int]], accepts_all: list[frozenset[int]]) -> list[frozenset[int]]:
-    """live[s] = union of accepts_all over states reachable from s (incl. s itself),
-    by a while-changed fixpoint over the DFA graph. States iterate in forward
-    discovery order while liveness flows backward from accept states, so deep
-    window DFAs need O(depth) full passes — kept as the GRID_PERF_NFA_LIVE=0
-    rollback path and the =verify oracle until the epoch's full-corpus run."""
-    n = len(trans)
-    succ: list[frozenset[int]] = [frozenset(t for t in row if t != DEAD) for row in trans]
-    live_sets: list[set[int]] = [set(acc) for acc in accepts_all]
-    changed = True
-    while changed:
-        changed = False
-        for s in range(n):
-            before = len(live_sets[s])
-            for nx in succ[s]:
-                live_sets[s] |= live_sets[nx]
-            if len(live_sets[s]) != before:
-                changed = True
-    return [frozenset(s) for s in live_sets]
-
-
-def _terminal_reach(b: _NFABuilder, accept_terminal: dict[int, int]) -> list[int]:
-    """term_reach[q] = bitmask of terminals whose accept state is reachable from
-    NFA state q via eps/byte edges (>= 0 bytes). One reverse DFS per accept
-    state; per-terminal sub-NFAs are disjoint (fresh states per build call), so
-    total work is O(NFA edges). Empty byte classes (e.g. [^\\x00-\\xff]) produce
-    edges the DFA can never take — following them in reverse would over-report
-    live terminals, so they are skipped."""
-    rev: list[list[int]] = [[] for _ in range(b.n)]
-    for src, dsts in b.eps.items():
-        for dst in dsts:
-            rev[dst].append(src)
-    for src, edges in b.edges.items():
-        for chars, dst in edges:
-            if not chars:
-                continue
-            rev[dst].append(src)
-    reach: list[int] = [0] * b.n
-    for acc, tid in accept_terminal.items():
-        bit = 1 << tid
-        stack = [acc]
-        while stack:
-            q = stack.pop()
-            if reach[q] & bit:
-                continue
-            reach[q] |= bit
-            stack.extend(rev[q])
-    return reach
 
 
 @dataclass(frozen=True)
@@ -376,38 +104,31 @@ class ScannerDFA:
         return st, length, p
 
 
-def _literal_node(pattern: str) -> _Node:
-    """Literal terminal text -> concatenation of single-byte char nodes."""
-    if len(pattern) > 1:
-        return _Node(
-            "cat",
-            kids=tuple(_Node("char", chars=frozenset({c})) for c in pattern.encode("latin-1")),
-        )
-    return _Node("char", chars=frozenset({ord(pattern)}))
-
-
 def build_scanner(
     terminals: dict[str, Terminal],
     terminal_order: tuple[str, ...],
     *,
     factored: bool | None = None,
-) -> "ScannerDFA | LazyProductDFA":
+) -> ScannerDFA | LazyProductDFA:
     """Combined NFA over all terminals -> subset-construction byte DFA.
 
-    ``factored`` (None = read GRID_PERF_FACTORED_SCANNER) selects the 0.3.x
-    per-terminal-DFA product path (grid/lexer/factored.py), which may return a
-    ScannerDFA-protocol lazy facade instead of an eager ScannerDFA when the
-    product exceeds its state budget. Both paths honor GRID_PERF_NFA_LIVE for
-    live-set computation: the factored path derives each component's
-    co-accessibility from the same NFA terminal-reach (see factored.py). The
-    default path below is byte-identical with both flags off."""
+    ``factored`` (None = read GRID_PERF_FACTORED_SCANNER, default ON since
+    the v0.3.0 full-corpus run) selects the per-terminal-DFA product path
+    (grid/lexer/factored.py), which may return a ScannerDFA-protocol lazy
+    facade instead of an eager ScannerDFA when the product exceeds its state
+    budget — or immediately when a single terminal exceeds the per-component
+    budget (GRID_PERF_COMPONENT_BUDGET, the substring-union family). GRID_PERF_FACTORED_SCANNER=0 restores the eager union builder
+    below — kept as the factored path's exactness oracle (LazyProductDFA.
+    materialize reproduces it exactly, numbering included). Live sets on
+    both paths come from the one NFA terminal-reach computation
+    (_terminal_reach; per component on the factored path — see
+    factored.py)."""
     if factored is None:
-        factored = os.environ.get("GRID_PERF_FACTORED_SCANNER", "0") == "1"
+        factored = perf_flags.factored_scanner_enabled()
     if factored:
         from grid.lexer.factored import build_factored_scanner
 
         return build_factored_scanner(terminals, terminal_order)
-    mode = os.environ.get("GRID_PERF_NFA_LIVE", "1")
     b = _NFABuilder()
     root = b.new()
     accept_terminal: dict[int, int] = {}  # NFA accept state -> terminal id
@@ -421,110 +142,51 @@ def build_scanner(
         b.add_eps(root, s)
         accept_terminal[a] = tid
 
-    term_reach = _terminal_reach(b, accept_terminal) if mode != "0" else None
-
-    # eps-closure distributes over union: precompute the per-state closure once
-    # (graph reachability over eps edges), then closure(S) = union of eps_star[s].
-    eps_star: dict[int, frozenset[int]] = {}
-
-    def _star(s0: int) -> frozenset[int]:
-        got = eps_star.get(s0)
-        if got is None:
-            stack, seen = [s0], {s0}
-            while stack:
-                st = stack.pop()
-                for nxt in b.eps.get(st, ()):
-                    if nxt not in seen:
-                        seen.add(nxt)
-                        stack.append(nxt)
-            got = eps_star[s0] = frozenset(seen)
-        return got
-
-    def eps_closure(states) -> frozenset[int]:
-        out: frozenset[int] = frozenset()
-        for s in states:
-            out |= _star(s)
-        return out
-
+    term_reach = _terminal_reach(b, accept_terminal)
     prio = {tid: terminals[name].priority for tid, name in enumerate(terminal_order)}
 
-    # Alphabet compression: partition the 256 byte values into equivalence
-    # classes over the distinct edge charsets (JSON/SQL grammars have ~10-30
-    # classes), run the subset construction per CLASS, and expand to 256-wide
-    # rows at the end. Same DFA modulo state numbering; the dominant TTFM cost
-    # (the per-byte inner loop) drops by the compression factor.
-    distinct_charsets = {chars for edges in b.edges.values() for chars, _dst in edges}
-    blocks: list[set[int]] = [set(range(256))]
-    for chars in distinct_charsets:
-        nxt_blocks: list[set[int]] = []
-        for blk in blocks:
-            inside = blk & chars
-            outside = blk - chars
-            if inside:
-                nxt_blocks.append(inside)
-            if outside:
-                nxt_blocks.append(outside)
-        blocks = nxt_blocks
-    blocks.sort(key=min)  # deterministic class order (stable across processes)
-    class_of = [0] * 256
-    for ci_, blk in enumerate(blocks):
-        for c in blk:
-            class_of[c] = ci_
+    # shared subset-construction core (grid/lexer/subset.py): eps-closure
+    # memoization, byte-class alphabet compression, per-class edge index,
+    # FIFO subset loop over class-compressed rows — the same helpers behind
+    # factored._build_component.
+    eps_closure = eps_closure_fn(b.eps)
+    blocks, class_of = byte_classes(b.edges)
     n_classes = len(blocks)
-    # per NFA state: class -> destination set (edges evaluated once, per class)
-    edge_by_class: dict[int, list[list[int] | None]] = {}
-    for st, edges in b.edges.items():
-        per = edge_by_class[st] = [None] * n_classes
-        for chars, dst in edges:
-            seen_cls: set[int] = set()
-            for c in chars:
-                cl = class_of[c]
-                if cl in seen_cls:
-                    continue
-                seen_cls.add(cl)
-                lst = per[cl]
-                if lst is None:
-                    per[cl] = [dst]
-                else:
-                    lst.append(dst)
+    order, class_rows = subset_construct(
+        eps_closure(frozenset({root})),
+        edges_by_class(b.edges, class_of, n_classes),
+        eps_closure,
+        n_classes,
+    )
 
-    start_set = eps_closure(frozenset({root}))
-    ids: dict[frozenset[int], int] = {start_set: 0}
-    order = [start_set]
+    # post-passes over the discovery order (each depends only on the subset
+    # order[i], so the lists are positionally identical to the legacy in-loop
+    # annotation):
+    # - 256-wide rows: c in blocks[cl] exactly when class_of[c] == cl, so
+    #   writing each non-DEAD class over a DEAD-filled row reproduces the
+    #   legacy sparse per-byte writes row-for-row (and measures ~flat where a
+    #   256-wide class_of indexing comp cost +4% eager build time);
+    # - live(S) = OR of term_reach over S: the subset state after a word is
+    #   exactly the NFA states reachable via it (Rabin-Scott), so terminal-
+    #   accept reachability distributes over the union;
+    # - accepts_all[i] = the tagged accept states inside order[i].
     trans: list[list[int]] = []
+    for crow in class_rows:
+        row = [DEAD] * 256
+        for cl, dst in enumerate(crow):
+            if dst != DEAD:
+                for c in blocks[cl]:
+                    row[c] = dst
+        trans.append(row)
     accepts_all: list[frozenset[int]] = []
     live_masks: list[int] = []
-    i = 0
-    while i < len(order):
-        cur = order[i]
-        i += 1
-        if term_reach is not None:
-            # live(S) = OR of term_reach over S: the subset state after a word is
-            # exactly the NFA states reachable via it (Rabin-Scott), so terminal-
-            # accept reachability distributes over the union.
-            mask = 0
-            for st in cur:
-                mask |= term_reach[st]
-            live_masks.append(mask)
-        by_class: dict[int, set[int]] = {}
+    for cur in order:
+        accepts_all.append(
+            frozenset(accept_terminal[st] for st in cur if st in accept_terminal))
+        mask = 0
         for st in cur:
-            per = edge_by_class.get(st)
-            if per is None:
-                continue
-            for cl, dsts in enumerate(per):
-                if dsts is not None:
-                    by_class.setdefault(cl, set()).update(dsts)
-        row = [DEAD] * 256
-        for cl, dsts in sorted(by_class.items()):
-            nxt = eps_closure(frozenset(dsts))
-            if nxt not in ids:
-                ids[nxt] = len(order)
-                order.append(nxt)
-            dst_id = ids[nxt]
-            for c in blocks[cl]:
-                row[c] = dst_id
-        trans.append(row)
-        accepts_all.append(frozenset(accept_terminal[st] for st in cur if st in accept_terminal))
+            mask |= term_reach[st]
+        live_masks.append(mask)
 
     if accepts_all[0]:
         bad = ", ".join(terminal_order[t] for t in accepts_all[0])
@@ -532,31 +194,20 @@ def build_scanner(
 
     accepts = [min(acc, key=lambda t: prio[t]) if acc else -1 for acc in accepts_all]
 
-    lives: list[frozenset[int]]
-    if term_reach is None:
-        lives = _live_fixpoint(trans, accepts_all)
-    else:
-        # equal masks share one frozenset (deep window chains repeat one live set)
-        by_mask: dict[int, frozenset[int]] = {}
-        lives = []
-        for m in live_masks:
-            got = by_mask.get(m)
-            if got is None:
-                tids: list[int] = []
-                r = m
-                while r:
-                    low = r & -r
-                    tids.append(low.bit_length() - 1)
-                    r ^= low
-                got = by_mask[m] = frozenset(tids)
-            lives.append(got)
-        if mode == "verify":
-            for s, old in enumerate(_live_fixpoint(trans, accepts_all)):
-                if lives[s] != old:
-                    diff = ", ".join(sorted(terminal_order[t] for t in lives[s] ^ old))
-                    raise AssertionError(
-                        f"GRID_PERF_NFA_LIVE=verify: live[{s}] diverges from the "
-                        f"fixpoint (symmetric difference: {diff})")
+    # equal masks share one frozenset (deep window chains repeat one live set)
+    by_mask: dict[int, frozenset[int]] = {}
+    lives: list[frozenset[int]] = []
+    for m in live_masks:
+        got = by_mask.get(m)
+        if got is None:
+            tids: list[int] = []
+            r = m
+            while r:
+                low = r & -r
+                tids.append(low.bit_length() - 1)
+                r ^= low
+            got = by_mask[m] = frozenset(tids)
+        lives.append(got)
     h_max = max((len(s) for s in lives), default=0)
     return ScannerDFA(
         start=0,
