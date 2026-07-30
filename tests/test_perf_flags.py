@@ -201,6 +201,22 @@ def test_hashcons_debug_oracle(monkeypatch, raw):
     assert perf_flags.hashcons_debug_enabled() == oracle
 
 
+@pytest.mark.parametrize("raw", RAW_VALUES)
+def test_jump_oracle(monkeypatch, raw):
+    _setenv(monkeypatch, "GRID_JUMP", raw)
+    # S1 serving jump-forward lever, born as a perf_flags reader (post-E1
+    # discipline): strict == "1", default off — "" / "true" / "2" are OFF
+    oracle = os.environ.get("GRID_JUMP", "0") == "1"
+    assert perf_flags.jump_enabled() == oracle
+    if raw in ("", "true", "2", "00", "0", None):
+        assert perf_flags.jump_enabled() is False
+
+
+def test_jump_default_is_off(monkeypatch):
+    monkeypatch.delenv("GRID_JUMP", raising=False)
+    assert perf_flags.jump_enabled() is False
+
+
 # ------------------------------------------------------- call-time reads
 
 
@@ -241,6 +257,11 @@ def test_every_reader_is_call_time(monkeypatch):
     assert perf_flags.hashcons_debug_enabled() is True
     monkeypatch.setenv("GRID_PERF_HASHCONS_DEBUG", "0")
     assert perf_flags.hashcons_debug_enabled() is False
+
+    monkeypatch.setenv("GRID_JUMP", "1")
+    assert perf_flags.jump_enabled() is True
+    monkeypatch.setenv("GRID_JUMP", "0")
+    assert perf_flags.jump_enabled() is False
 
 
 # ------------------------------------------------------- leaf import
