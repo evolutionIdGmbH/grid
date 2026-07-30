@@ -6,28 +6,6 @@ recorded, not optimized (kernel frozen at v7). Speed work is the 0.3.x epoch.
 
 ## Unreleased
 
-Tokenizer slicer (S2, `GRID_PERF_SLICER`, default OFF pending the H100
-serving stamp): the flat ~7ms string-interior cold-walk mode (76.3% of
-pooled mask time in the 1-8ms band) is a full 275,348-node trie DFS whose
-answer is knowable upfront for 96.24% of the Llama-3.1 vocab. With the flag
-on, `build_trie` partitions the vocabulary by the JSON-string-safe byte
-class (`[^"\\\x00-\x1f]`, exactly STRING_RX's body class) into a sorted
-alias-complete slice-id array plus a 10,415-node rest-trie (`TrieSlices`);
-at walk time the kernel (and the Python spec walk, mirrored) proves slice
-containment structurally from the seeded state — closure BFS over the class
-bytes, cap 64 states, every transition non-DEAD (no emission can fire inside
-a sliced token), every reachable state live for A|ignored and disjoint from
-lexicon-constrained terminals (the audited genN lexicon-inertness guard) —
-and on success walks only the rest-trie, sorted-merging the slice ids into
-ci. Output is BYTE-IDENTICAL to the full walk (ci bytes, CD group order,
-v7 blob, entry_id) because both tries enumerate tokens in the same byte-lex
-DFS order and the proof is all-or-nothing; proof failure (maxLength/pattern
-windows, boundary states, identifier positions, lazy factored DFAs) is
-today's full walk byte-for-byte. Measured on the real trie: string-interior
-cold walks 6.83ms -> 0.269ms (25.3x); warm paths untouched. Differential +
-containment-refusal suite in tests/trie/test_slicer.py; real-config fuzz
-byte-identity over corpus schemas (kernel + >512-terminal spec paths).
-
 0.3.x flag disposition (E3): the epoch's measured winners become the
 shipped defaults, gated on the v0.3.0 full-corpus run
 (bench/RESULTS-jsonschemabench-v0.3.0rc2.md; outcome movement vs v0.2.5
@@ -144,6 +122,28 @@ configurations (the 30k-rule chain: 139.8s -> 0.019s); serving is
 untouched (`vllm_processor` receives grammar TEXT in the request spec).
 Artifact-store schema_src entries remain text; store hits load text in
 both flag states.
+
+Tokenizer slicer (S2, `GRID_PERF_SLICER`, default OFF pending the H100
+serving stamp): the flat ~7ms string-interior cold-walk mode (76.3% of
+pooled mask time in the 1-8ms band) is a full 275,348-node trie DFS whose
+answer is knowable upfront for 96.24% of the Llama-3.1 vocab. With the flag
+on, `build_trie` partitions the vocabulary by the JSON-string-safe byte
+class (`[^"\\\x00-\x1f]`, exactly STRING_RX's body class) into a sorted
+alias-complete slice-id array plus a 10,415-node rest-trie (`TrieSlices`);
+at walk time the kernel (and the Python spec walk, mirrored) proves slice
+containment structurally from the seeded state — closure BFS over the class
+bytes, cap 64 states, every transition non-DEAD (no emission can fire inside
+a sliced token), every reachable state live for A|ignored and disjoint from
+lexicon-constrained terminals (the audited genN lexicon-inertness guard) —
+and on success walks only the rest-trie, sorted-merging the slice ids into
+ci. Output is BYTE-IDENTICAL to the full walk (ci bytes, CD group order,
+v7 blob, entry_id) because both tries enumerate tokens in the same byte-lex
+DFS order and the proof is all-or-nothing; proof failure (maxLength/pattern
+windows, boundary states, identifier positions, lazy factored DFAs) is
+today's full walk byte-for-byte. Measured on the real trie: string-interior
+cold walks 6.83ms -> 0.269ms (25.3x); warm paths untouched. Differential +
+containment-refusal suite in tests/trie/test_slicer.py; real-config fuzz
+byte-identity over corpus schemas (kernel + >512-terminal spec paths).
 
 Serving jump-forward (S1, `GRID_JUMP`, default OFF — parity-gated, not yet
 box-validated): forced token runs (singleton-mask chains, the §4.5
