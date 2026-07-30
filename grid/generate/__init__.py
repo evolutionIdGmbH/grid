@@ -13,8 +13,11 @@ from grid.lalr.reserve import ReserveTable
 from grid.models.mock import MockModel
 from grid.processors import GridLogitsProcessor
 from grid.samplers import multinomial
-from grid.serving.artifact_store import load_or_build_scanner, load_or_compile_tables
-from grid.trie.build import build_trie
+from grid.serving.artifact_store import (
+    load_or_build_scanner,
+    load_or_build_trie,
+    load_or_compile_tables,
+)
 
 
 def build_guide(
@@ -32,7 +35,7 @@ def build_guide(
     proj = projection if projection is not None else RoleProjection.full(grammar).build()
     tables = load_or_compile_tables(proj, identifier_terminals if lexicons is not None else frozenset())
     dfa = load_or_build_scanner(grammar)
-    trie = build_trie(adapter)
+    trie = load_or_build_trie(adapter)
     reserve = ReserveTable(tables=tables, dfa=dfa, adapter=adapter, lexicons=lexicons)
     return GridGuide(
         tables=tables, dfa=dfa, trie=trie, adapter=adapter,
@@ -65,7 +68,7 @@ def _sql_impl(model, grammar_source: str, policy=None, schema=None, sampler=None
     tables = load_or_compile_tables(proj, frozenset({"TABLE_NAME", "COLUMN_NAME"}))
     lexicons = schema.lexicons(tables, policy) if schema is not None else None
     dfa = load_or_build_scanner(grammar)
-    trie = build_trie(model.tokenizer)
+    trie = load_or_build_trie(model.tokenizer)
     reserve = ReserveTable(tables=tables, dfa=dfa, adapter=model.tokenizer, lexicons=lexicons)
     guide = GridGuide(
         tables=tables, dfa=dfa, trie=trie, adapter=model.tokenizer,

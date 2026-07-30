@@ -238,6 +238,36 @@ def load_or_build_component(pattern: str, is_literal: bool, budget: int | None):
     return comp
 
 
+def load_or_build_trie(adapter):
+    """Drop-in for ``build_trie(adapter)`` (grid/trie/build.py).
+
+    Namespace ``trie`` keyed by the tokenizer fingerprint. The fingerprint is
+    computed from the (token bytes, id) table — the trie's SOLE input — via
+    the same single pass a cold build consumes, so a hit costs one
+    token_bytes iteration + unpickle and a miss never iterates twice. The
+    pure-Python DFS build this skips measured 178 ms on gpt2/50k vocab and
+    runs once per process on the first-request path."""
+    from grid.trie.build import (
+        TokenTrie,
+        _build_from_entries,
+        _entries_fingerprint,
+        _token_entries,
+    )
+
+    if not (enabled() and perf_flags.store_trie_enabled()):
+        from grid.trie.build import build_trie
+
+        return build_trie(adapter)
+    entries = _token_entries(adapter)
+    fp = _entries_fingerprint(entries)
+    hit = get("trie", fp)
+    if isinstance(hit, TokenTrie) and hit.tokenizer_fingerprint == fp:
+        return hit
+    trie = _build_from_entries(entries)
+    put("trie", fp, trie)
+    return trie
+
+
 def load_or_compile_tables(
     proj: RoleProjection, identifier_terminals: frozenset[str] = frozenset()
 ) -> LALRTables:

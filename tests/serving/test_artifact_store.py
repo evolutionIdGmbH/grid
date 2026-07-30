@@ -361,6 +361,67 @@ def test_empty_match_error_parity_with_warm_store(cache, fresh_memo):
     assert str(warm.value) == str(cold.value)
 
 
+# ------------------------------------------------------ trie namespace (S3)
+
+
+def test_trie_roundtrip_and_warm_hit(cache, sql_tokenizer, monkeypatch):
+    import numpy as np
+
+    from grid.trie import build as tbuild
+
+    cold = store.load_or_build_trie(sql_tokenizer)
+    assert [p.parent.name for p in _bins(cache)] == ["trie"]
+    # warm: the DFS build must never run (the fingerprint pass still does)
+    monkeypatch.setattr(tbuild, "_build_from_entries", _boom)
+    warm = store.load_or_build_trie(sql_tokenizer)
+    assert np.array_equal(warm.nodes, cold.nodes)
+    assert warm.aliases == cold.aliases
+    assert warm.n_tokens == cold.n_tokens
+    assert warm.tokenizer_fingerprint == cold.tokenizer_fingerprint
+
+
+def test_trie_kill_switch_and_flag_off(cache, sql_tokenizer, monkeypatch):
+    from grid.trie.build import build_trie
+
+    monkeypatch.setenv("GRID_PERF_STORE_TRIE", "0")
+    trie = store.load_or_build_trie(sql_tokenizer)
+    assert _bins(cache) == []
+    import numpy as np
+
+    assert np.array_equal(trie.nodes, build_trie(sql_tokenizer).nodes)
+
+
+def test_trie_fingerprint_key_separates_tokenizers(cache, sql_tokenizer,
+                                                   toy_tokenizer):
+    t1 = store.load_or_build_trie(sql_tokenizer)
+    t2 = store.load_or_build_trie(toy_tokenizer)
+    assert t1.tokenizer_fingerprint != t2.tokenizer_fingerprint
+    assert len([p for p in _bins(cache) if p.parent.name == "trie"]) == 2
+
+
+def test_trie_warm_mask_parity(cache, sql_source, sql_tokenizer, monkeypatch):
+    """Masks are pure functions of (tables, dfa, trie): a store-warm trie must
+    yield token-for-token identical instructions to a flag-off build along a
+    driven prefix (exercises the kernel walker when grid_core is present)."""
+    from grid.generate import build_guide
+
+    store.load_or_build_trie(sql_tokenizer)  # populate the namespace
+    warm_guide = build_guide(sql_source, sql_tokenizer)
+    monkeypatch.setenv("GRID_PERF_ARTIFACT_STORE", "0")
+    off_guide = build_guide(sql_source, sql_tokenizer)
+
+    sw, so = warm_guide.initial_state, off_guide.initial_state
+    for _ in range(6):
+        iw = warm_guide.get_next_instruction(sw)
+        io = off_guide.get_next_instruction(so)
+        assert list(iw.tokens) == list(io.tokens)
+        if not len(io.tokens):
+            break
+        t = int(io.tokens[0])
+        sw = warm_guide.get_next_state(sw, t)
+        so = off_guide.get_next_state(so, t)
+
+
 def test_scanner_put_skipped_for_lazy_facade(cache, fresh_memo, toy_grammar,
                                              monkeypatch):
     """Over-budget factored products are unpicklable facades: the scanner

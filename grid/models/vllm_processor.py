@@ -62,10 +62,10 @@ class _GuideRegistry:
 
     def __init__(self, adapter) -> None:
         from grid.serving import SingleFlight
-        from grid.trie.build import build_trie
+        from grid.serving.artifact_store import load_or_build_trie
 
         self.adapter = adapter
-        self.trie = build_trie(adapter)
+        self.trie = load_or_build_trie(adapter)
         self._flight = SingleFlight(failed_ttl_s=30.0)
         # T2 pools (DESIGN §E10), one per dialect: templates of DIFFERENT
         # schemas/roles over one grammar share schema-independent entries —

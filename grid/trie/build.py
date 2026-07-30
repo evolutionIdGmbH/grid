@@ -38,8 +38,11 @@ class TokenTrie:
         return self.aliases.get(token_id, (token_id,))
 
 
-def build_trie(adapter) -> TokenTrie:
-    """Build from TokenizerAdapter.token_bytes exclusively (E5)."""
+def _token_entries(adapter) -> list[tuple[bytes, int]]:
+    """The (token bytes, id) table from TokenizerAdapter.token_bytes (E5) —
+    the trie's sole input and the fingerprint's sole input, split out so the
+    artifact-store loader can fingerprint WITHOUT building (and build from
+    the same pass on a miss, never iterating token_bytes twice)."""
     special = getattr(adapter, "special_token_ids", frozenset())
     entries: list[tuple[bytes, int]] = []
     for tid in sorted(set(adapter.vocabulary.values())):
@@ -53,7 +56,26 @@ def build_trie(adapter) -> TokenTrie:
         entries.append((bs, tid))
     if not entries:
         raise TrieBuildError("empty vocabulary after excluding special tokens")
+    return entries
 
+
+def _entries_fingerprint(entries: list[tuple[bytes, int]]) -> str:
+    import hashlib
+
+    h = hashlib.blake2b(digest_size=16)
+    for bs, tid in entries:
+        h.update(tid.to_bytes(4, "little"))
+        h.update(len(bs).to_bytes(2, "little"))
+        h.update(bs)
+    return h.hexdigest()
+
+
+def build_trie(adapter) -> TokenTrie:
+    """Build from TokenizerAdapter.token_bytes exclusively (E5)."""
+    return _build_from_entries(_token_entries(adapter))
+
+
+def _build_from_entries(entries: list[tuple[bytes, int]]) -> TokenTrie:
     # group byte-identical spellings; the trie node carries the smallest id
     by_bytes: dict[bytes, list[int]] = {}
     for bs, tid in entries:
@@ -87,16 +109,9 @@ def build_trie(adapter) -> TokenTrie:
     for b in sorted(root):
         emit(b, root[b])
 
-    import hashlib
-
-    h = hashlib.blake2b(digest_size=16)
-    for bs, tid in entries:
-        h.update(tid.to_bytes(4, "little"))
-        h.update(len(bs).to_bytes(2, "little"))
-        h.update(bs)
     return TokenTrie(
         nodes=np.array(words, dtype=np.uint64),
         n_tokens=len(entries),
-        tokenizer_fingerprint=h.hexdigest(),
+        tokenizer_fingerprint=_entries_fingerprint(entries),
         aliases=aliases,
     )
