@@ -73,6 +73,35 @@ BatchJob/DataConnector build lazily (same lazy-product outcome class as
 before, seconds instead of tens of seconds). `=0` restores the eager
 component builds byte-identically (digest-gated), family hang included.
 
+Direct grammar-object emission (P2, `GRID_PERF_DIRECT_EMIT`, default on):
+the schema compiler now produces a `GrammarParts` manifest
+(`grid/grammar/parts.py`); `compile_json_schema_grammar` builds the
+`DialectGrammar` straight from it (`DialectGrammar.from_parts` +
+`RoleProjection.full_built`), skipping the `.grid` render and the regex
+re-parse that made spec_load ~49% of front-end compile time. `render_text`
+over the same manifest IS the legacy text emitter (byte-identical over all
+11,306 corpus schemas, PYTHONHASHSEED pinned) and stays the debug/audit
+path; validate()/freeze() run unchanged on the object path, so
+GrammarInvalid outcomes (the unproductive-recursion family), L-REC01
+warnings, and terminal numbering are shared code. Gates:
+bench/perfbench/diff_direct_emit.py corpus differential (11,306 schemas,
+zero flips; terminal_order tuple equality is the primary assertion —
+fingerprint hashes sorted names and cannot see a numbering bug), --tables
+leg (role_shape_hash + LALRTables.fingerprint equal over 309 set schemas),
+sampled mask-walk differential (25 stratified schemas x 2,000 steps,
+equal), reduction-worklist set-equality (307 grammars + 6,140 random
+projections + 2,000 synthetic), and a live render+reload oracle
+(`GRID_PERF_DIRECT_EMIT_CHECK=1`, CI leg). Measured (profile sets,
+ttfm_capped + stratified_200): spec_load+projection totals 1.01s -> 0.54s;
+front-end on the 12 most expensive grammars -50.3% (127 -> 61ms on
+o87865); full-pipeline p50 8.03 -> 7.68ms (p90 scanner-bound, unchanged).
+`=0` restores text -> `spec.load`. The reduction primitives
+(`grid/grammar/reduction.py`) are now linear worklists in ALL
+configurations (the 30k-rule chain: 139.8s -> 0.019s); serving is
+untouched (`vllm_processor` receives grammar TEXT in the request spec).
+Artifact-store schema_src entries remain text; store hits load text in
+both flag states.
+
 ## 0.3.0 - 2026-07-30
 
 The performance epoch: compile-time (TTFM) tail work, selected by measured

@@ -138,7 +138,7 @@ class DialectGrammar:
                 raise   # identical outcome; propagate the object-path error
             raise AssertionError(
                 f"direct-emit check: text path invalid ({text_err}) "
-                "but object path validated")
+                "but object path validated") from text_err
         try:
             self.validate()
         except GrammarInvalid as obj_err:

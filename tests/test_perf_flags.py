@@ -204,13 +204,16 @@ def test_hashcons_debug_oracle(monkeypatch, raw):
 @pytest.mark.parametrize("raw", RAW_VALUES)
 def test_direct_emit_oracle(monkeypatch, raw):
     _setenv(monkeypatch, "GRID_PERF_DIRECT_EMIT", raw)
-    oracle = os.environ.get("GRID_PERF_DIRECT_EMIT", "0") == "1"
+    oracle = os.environ.get("GRID_PERF_DIRECT_EMIT", "1") == "1"
     assert perf_flags.direct_emit_enabled() == oracle
 
 
-def test_direct_emit_default_is_off(monkeypatch):
-    """P2 bake-off pending: unset must stay the text-path pipeline."""
+def test_direct_emit_default_is_on(monkeypatch):
+    """Default ON since the P2 bake-off; "0" is the kill switch restoring
+    text -> spec.load."""
     monkeypatch.delenv("GRID_PERF_DIRECT_EMIT", raising=False)
+    assert perf_flags.direct_emit_enabled() is True
+    monkeypatch.setenv("GRID_PERF_DIRECT_EMIT", "0")
     assert perf_flags.direct_emit_enabled() is False
 
 

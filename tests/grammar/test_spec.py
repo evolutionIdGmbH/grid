@@ -179,7 +179,11 @@ def test_from_parts_duplicate_terminal_rejected():
         spec.DialectGrammar.from_parts(parts)
 
 
-def test_from_parts_lrec01_warning_parity():
+def test_from_parts_lrec01_warning_parity(monkeypatch):
+    # count parity is only meaningful without the render+reload oracle
+    # (check mode validates twice by design; the CI check leg sets it
+    # suite-wide)
+    monkeypatch.setenv("GRID_PERF_DIRECT_EMIT_CHECK", "0")
     parts = GrammarParts(
         terminal_defs=(("WS", r"[ \t\n\r]+"), ("X", "x")),
         start_target="r0",

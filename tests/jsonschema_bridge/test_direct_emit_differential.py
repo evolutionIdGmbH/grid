@@ -72,6 +72,11 @@ def _load_case(name: str) -> dict:
 
 def _arm(schema, monkeypatch, flag: str):
     monkeypatch.setenv("GRID_PERF_DIRECT_EMIT", flag)
+    # arm comparisons must pin check mode OFF: the render+reload oracle
+    # validates twice by design, doubling L-REC01 counts (the CI check leg
+    # exports GRID_PERF_DIRECT_EMIT_CHECK=1 suite-wide; the dedicated
+    # check-mode test below re-enables it explicitly)
+    monkeypatch.setenv("GRID_PERF_DIRECT_EMIT_CHECK", "0")
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         try:
