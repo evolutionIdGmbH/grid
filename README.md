@@ -1,4 +1,4 @@
-# GRID — Grammar-Railed Decoding
+# GRID: Grammar-Railed Decoding
 
 [![CI](https://github.com/evolutionIdGmbH/grid/actions/workflows/ci.yml/badge.svg)](https://github.com/evolutionIdGmbH/grid/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/grid-guardrail)](https://pypi.org/project/grid-guardrail/)
