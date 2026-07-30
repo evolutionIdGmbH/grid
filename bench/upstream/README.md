@@ -21,5 +21,6 @@ Contents of the intended PR:
 Run: `python -m maskbench.runner --grid --tokenizer <model> data/`
 
 Numbers to accompany the PR (full 11,306-schema set, one machine,
-llguidance 1.7.6 / XGrammar 0.2.3 / GRID 0.2.5):
-see `bench/RESULTS-jsonschemabench-v0.2.4-full.md` in the GRID repo.
+llguidance 1.7.6 / XGrammar 0.2.3 / GRID 0.4.0 - zero timeouts,
+passing 10,159, TTFM avg 66ms):
+see `bench/RESULTS-jsonschemabench-v0.4.0rc1.md` in the GRID repo.
