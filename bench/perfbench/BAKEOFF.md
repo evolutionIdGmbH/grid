@@ -29,6 +29,9 @@ partial records as sub-second fixes — and no replacement union number is
 published: it is PENDING the outcome-aware re-run (the HASHCONS leg has not
 been audited for the same artifact). RUST drags o47656/o47657 under the 120s
 cap (74s/99s) by constant factor but not near 1s.
+[Resolved: the replacement accounting is published in the E4 postscript
+below — 10 compiled / 5 declared / 1 timeout at wave-A HEAD, classifier-
+gated, with both TTFM definitions.]
 
 Never fixed by any candidate: `o5195, o48423, o48427` (substring-union
 scanner family, same asymptotics under the lazy product), `helm-testsuite`
@@ -202,3 +205,192 @@ any exact cap pays it once per breaching pattern per process; and the
 whose product fits the product budget) degrades gracefully to the lazy
 product with identical masks, restorable via GRID_PERF_COMPONENT_BUDGET=0.
 helm-testsuite LALR is now the only known compile-cap family.
+
+## Postscript: E4 honest metrics (post-v0.3.0, wave B) — dual-column TTFM + outcome-aware republish
+
+Two dishonesty sources closed. (1) TTFM blind spot: under the wave-A
+defaults, over-budget schemas return a LazyProductDFA facade whose product
+construction is deferred past every compile phase; the kernel walker and
+genN cache exclude lazy DFAs, so the deferred cost is paid as pure-Python
+cold trie walks — previously measured NOWHERE. (2) Published counts had no
+classifier: the F1 retraction (unmarked partial records read as sub-second
+fixes) was a tooling failure mode, not a one-off.
+
+**Definitions (permanent; DESIGN.md ground rule).** *TTFM compile-only* =
+the five compile phases + GridGuide construction — maskbench
+compile_grammar semantics, the definition behind every published
+RESULTS-*.md number; name and meaning unchanged. *TTFM
+first-mask-included* = compile-only + the first compute_mask at the
+initial state. Every table labels its column; publishing either number
+unlabeled is a publication error from here on. The per-child tokenizer +
+trie build (~2.4-2.5s, maskbench's per-engine constant) is its own
+excluded phase in both columns.
+
+**Tooling.** profile_phases.py --first-mask appends trie / guide /
+first_mask / prefix_masks phases (flush-streamed, so timeouts attribute);
+the child writes stats.ttfm_compile_us / stats.ttfm_first_us.
+bench/perfbench/outcomes.py is the classifier behind every count here:
+ok | declared:<class> | timeout@<phase> | crash | incomplete | malformed,
+where incomplete (running != null, unmarked) is never ok, and a completed
+--first-mask record missing its phases is malformed, not ok. Unit-gated
+against the full real corpora: mb-grid-final = 668 declared / 16 timeout /
+10,622 ok of 11,306 (ok+timeout == the manifest's 10,638 ranked);
+mb-grid-v030rc2 = 635 / 7 / 10,664.
+
+**Census (step 1).** Under wave-A defaults, 9 of the 45 headline-leg
+schemas build LAZY scanners: the substring-union five (o5195, o48423,
+o48427, o47656, o47657 — component-budget breaches, P3), o83132/o83133
+(same family), and strmprivacy BatchJob/DataConnector (their breaching
+substring-union terminals skip the product to lazy). The plan's zero-lazy
+risk did not materialize: the deferred cost is live in exactly the
+headline schemas.
+
+**Protocol.** One session, --jobs 1, 120s cap, flag-ON/OFF interleaved per
+schema (the F2 rule), --first-mask, tokenizer
+unsloth/Meta-Llama-3.1-8B-Instruct offline, flags snapshot in every
+record. ON = wave-A defaults; OFF = kill switches
+(GRID_PERF_FACTORED_SCANNER=0, GRID_PERF_LALR_DP=0, GRID_PERF_HASHCONS=0).
+Records: tmp/e4-legs/{on,off}; canonical prefix = first valid test
+instance, capped 64 tokens.
+
+**Parity gates.** OFF leg vs v0.2.5 (mb-grid-final), strict identity:
+45/45 unchanged — all 16 caps reproduce as timeouts in their historical
+phases (10 scanner, 5 schema_compile, 1 lalr), all 29 stratified ok. ON
+leg vs v0.2.5, oracle rule: 30 unchanged + 15 improved, every improvement
+in the sanctioned timeout -> terminating direction, zero gate failures,
+zero incomplete/malformed records, zero prefix-walk rejections on either
+leg (the grammar-drift tripwire).
+
+### capped-16 at wave-A HEAD (ON leg): the replacement accounting
+
+**10 compiled / 5 declared / 1 timeout** — supersedes both the withdrawn
+"10/16 fixed" union number and the pre-P3 "5 compiled / 5 declared / 6
+timeout" Combined-run accounting (P3 moved the five family caps into
+compiles). The first-mask-included definition flips NO bucket: every
+compiling cap also served its first mask and 64-token prefix inside the
+cap.
+
+| schema | scanner | TTFM compile-only | TTFM first-mask-incl | prefix walk (n tok, worst) |
+|---|---|---|---|---|
+| o79409 | dense | 1.43s | 1.44s | 64, 9.6ms |
+| o83133 | lazy | 2.48s | 2.49s | (no tests) |
+| o47656 | lazy | 3.00s | 3.01s | (no tests) |
+| o47657 | lazy | 3.08s | 3.09s | 64, 251ms |
+| o83132 | lazy | 3.30s | 3.31s | 64, 249ms |
+| o48427 | lazy | 5.33s | 5.33s | 64, 252ms |
+| o5195 | lazy | 5.35s | 5.36s | 31, 239ms |
+| BatchJob | lazy | 10.72s | 10.72s | 64, 298ms |
+| DataConnector | lazy | 11.66s | 11.66s | 64, 295ms |
+| o48423 | lazy | 13.12s | 13.12s | 64, 288ms |
+| o12175, o11667, o39217, cloudify | — | declared Unsupported <=0.1s | — | — |
+| wp_105 | — | declared LALRConflictError 0.6s | — | (single-shot: profile_phases has no conflict retry; the maskbench runner's retry compiles it, rc2) |
+| helm-testsuite | — | timeout@lalr (both legs, both constructions) | — | — |
+
+OFF leg: all 16 time out at the 120s cap (same in-flight phases as
+v0.2.5). The honest speedup statement is therefore ">=120s ->
+1.4-13.1s or a fast declared outcome", not a sub-second claim.
+
+### The measured deferred cost (the number that was asserted-not-measured)
+
+The first mask at the INITIAL state is cheap even on lazy products
+(1.6-8.0ms across the nine: the JSON-structure start position wakes few
+component states) — which is why the two TTFM columns differ by only
+~1-10ms here and the blind spot never showed in aggregate columns. The
+deferred product construction is actually paid MID-INSTANCE, when the
+pathological terminal goes live inside a constrained string: on the seven
+lazy schemas with test instances, the worst prefix token costs
+239-298ms (a tight band; dense-path worst on the same legs: 7.7-9.6ms,
+the known cold-walk band — the lazy pure-Python regime is ~30x that), and
+the full 64-token cold prefix costs 1.6-11.8s. On the worst two the cold
+prefix is the same order as the entire compile (DataConnector 11.77s walk
+vs 11.66s compile; BatchJob 9.78s vs 10.72s). MaskBench's pooled TBM p50
+for these schemas (165-181us, P3 gate) is warm-dominated and hides this
+window; the prefix lens is the cold-start truth. This distribution is the
+recorded go/no-go input for P1 (kernel-lazy residence): ~0.25s/cold-token
+x instance-length exposure is the cost of NOT doing P1, and the
+RUST_SCANNER size-gated-dispatch fallback stays unneeded for compile (the
+certification cost dominates) but unresolved for serving until P1.
+
+Caveat: o83133 and o47656 carry no test instances, so their mid-instance
+cost is extrapolated from the family band, not measured; and prefix_masks
+walks the FIRST instance only — a 64-token cap on a lens, not a bound on
+the cost.
+
+### stratified-29 (fast set), both columns, interleaved
+
+| leg | compile-only p50 / p90 / max | first-mask-incl p50 / p90 / max |
+|---|---|---|
+| ON (defaults) | 9.1ms / 184.5ms / 449.6ms | 10.2ms / 185.6ms / 479.6ms |
+| OFF (kill switches) | 8.2ms / 210.2ms / 1947.2ms | 9.3ms / 221.4ms / 1976.3ms |
+
+Per-schema ON/OFF ratio (compile-only): p50 1.09, p90 1.29 — the first
+interleaved same-session measurement of the shipped-defaults median cost
+(what F2's protocol rule was written for). The defaults pay ~0.9ms at the
+fast-set median and win the set's own tail (max 1.95s -> 0.45s); within
+the decision rule's 10% p50 envelope, and the first-mask increment on
+dense schemas is ~1.1ms (one cold walk).
+
+### Cross-engine caveat (standing)
+
+llguidance's published TTFM p50 0.38ms is compile-only semantics on a
+fully lazy engine; its first-mask-included number does not exist in our
+records. Any future cross-engine TTFM claim uses first-mask-included on
+BOTH sides or is not made; a same-definition llguidance reference leg is
+an explicit follow-on (ROADMAP non-goal until requested), never smuggled
+into a GRID-only republish.
+
+## Postscript: P2 direct emission (post-v0.3.0, wave B)
+
+The spec_load re-parse is gone from the default schema->mask compile
+pipeline. Baseline held up under the step-1 freeze (ttfm_capped +
+stratified_200, 216 schemas, jobs 4, .venv-bench dev box): spec_load median
+49.1% of front-end (schema_compile+spec_load+projection), spec_load +
+projection 83.2% — the CANDIDATES id-10 probe shares reproduced on the full
+profile sets.
+
+Change (grid/grammar/parts.py, spec.py, projection.py, reduction.py,
+grid/jsonschema/): compile_parts() emits a GrammarParts manifest; the text
+emitter is render_text over that same manifest (compile() unchanged,
+byte-identical over all 11,306 corpus schemas with PYTHONHASHSEED pinned —
+the sweep surfaced pre-existing seed-sensitive emission on 8/11,306
+schemas, out of P2 scope, noted in the step-2 commit);
+DialectGrammar.from_parts replays only the _parse_source contract and runs
+validate()/freeze() verbatim; RoleProjection.full_built registers the full
+projection without the compose/reduce/verify rebuild; the reduction
+fixpoints are linear worklists in all configurations (30k-rule chain:
+139.8s -> 0.019s; corpus/projection/synthetic set-equality gated).
+GRID_PERF_DIRECT_EMIT default ON after the gates; =0 restores text ->
+spec.load; GRID_PERF_DIRECT_EMIT_CHECK=1 is the permanent render+reload
+oracle (CI leg).
+
+Gates run: (a) Gate A byte-identity 11,306/11,306 (114 status-equal
+declared outcomes). (b) diff_direct_emit full corpus: 0 flips — 11,191
+equal grammars (terminal_order tuple primary), 106 equal_unsupported, 8
+equal_RxUnsupported, 1 equal_grammar_invalid (the unproductive-recursion
+family occurs once in corpus and matches). (c) --tables leg over
+ttfm_capped+ttfm_tail_1pct+stratified_200+tbm_tail_100 (309): 303 equal
+incl. role_shape_hash + LALRTables.fingerprint + action/goto, 1
+equal_LALRConflictError, 4 equal_unsupported, helm both-arms-timeout (no
+oracle). (d) mask-level walk differential: 25 stratified schemas x 2 seeds
+x 40 steps over one MockTokenizer trie, 2,000 allowed-id sets equal.
+(e) full pytest on three legs: defaults, kill-switch, check-oracle.
+
+Measured (same profile sets, flag-off vs flag-on on the post-change tree):
+
+| metric | flag-off | flag-on |
+|---|---|---|
+| spec_load p50 / p90 / total | 1.30ms / 3.22ms / 0.65s | 1.12ms / 1.95ms / 0.39s |
+| projection p50 / p90 / total | 0.83ms / 1.82ms / 0.36s | 0.66ms / 0.77ms / 0.15s |
+| front-end, 12 costliest grammars | 693ms | 344ms (-50.3%; o87865 127->61ms) |
+| terminals>=60 band spec_load+projection p50 | 3.83ms | 2.32ms |
+| full pipeline p50 / p90 | 8.03ms / 239ms | 7.68ms / 238ms |
+
+p90+ of the whole pipeline stays scanner-bound (P3's residual analysis
+unchanged); completion/timeout structure identical across legs (210
+complete; 4 declared-slow schema_compile + 2 helm-family lalr). Absolute
+numbers are dev-box; shares are the durable claim (the plan's step-8
+standard-host rerun remains open alongside the S1 GPU-box items).
+
+Residual: store schema_src remains text (hits re-parse; the optional
+'grammar' pickle namespace is the recorded follow-on), and the DP-LALR
+int-id handoff (CANDIDATES id 6) now has a clean seam via GrammarParts.

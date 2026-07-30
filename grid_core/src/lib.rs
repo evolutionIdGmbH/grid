@@ -35,11 +35,20 @@
 //! v7-reachable RustVerdicts method is `&self`: the entry store and the v6
 //! session tables live behind RwLocks (lock order: sessions -> mem ->
 //! entries; the session-tables lock nests inside sessions/mem only).
+//!
+//! S2 slicer: `RustWalker` optionally carries slice tables (JSON-string-safe
+//! vocabulary partition, grid/trie/build.py TrieSlices). `walk_auto` first
+//! runs `slice_contained` — a memoized structural proof that every sliced
+//! token is CI in this configuration — and on success walks only the
+//! rest-trie, merging the precomputed slice ids into ci (byte-identical
+//! output to the full walk by construction; proof failure falls back to the
+//! full walk untouched). tests/trie/test_slicer.py binds on/off bit-for-bit.
 
 use blake2::digest::consts::U16;
 use blake2::{Blake2b, Digest};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::collections::{HashMap, HashSet};
 
@@ -205,6 +214,24 @@ fn walk_pool(threads: usize) -> Option<Arc<rayon::ThreadPool>> {
 
 // ------------------------------------------------------------------ walker
 
+// S2 slicer bounds: the containment closure gives up past this many reachable
+// states (bounded {m,n}/maxLength counting chains fall back to the full walk),
+// and the (q, A-words) proof memo clears at the cap (the _MEMO_CAP pattern —
+// a pathological grammar cycling A sets degrades to recomputed proofs/full
+// walks, never to wrong masks).
+const SLICE_CLOSURE_CAP: usize = 64;
+const SLICE_MEMO_CAP: usize = 8192;
+
+/// S2 slice tables (grid/trie/build.py TrieSlices, kernel form): the walk may
+/// skip every token spelled inside the byte class once `slice_contained`
+/// proves them all CI for the configuration; `ids` (sorted, alias-complete)
+/// then merge into the rest-trie walk's ci.
+struct SliceTables {
+    class_bytes: Vec<u8>, // materialized byte class (closure alphabet)
+    ids: Vec<u32>,        // sorted, alias-complete slice token ids
+    rest_nodes: Vec<u64>, // DFS trie over the non-sliced tokens only
+}
+
 struct RustWalkerImpl<const W: usize> {
     nodes: Vec<u64>,
     trans: Vec<i32>, // [state * 256 + byte]
@@ -217,6 +244,11 @@ struct RustWalkerImpl<const W: usize> {
     lex_allowed: Option<HashMap<u32, HashSet<Vec<u8>>>>,
     lex_prefixes: Option<HashMap<u32, HashSet<Vec<u8>>>>,
     aliases: HashMap<u32, Vec<u32>>,
+    slices: Option<SliceTables>,
+    lex_live_mask: [u64; W], // lexicon-constrained terminal ids (lex_allowed keys)
+    slice_memo: Mutex<HashMap<(i32, [u64; W]), bool>>, // (q, A-words) -> proof
+    slice_walks: AtomicU64,     // walks served via the slice skip
+    slice_fallbacks: AtomicU64, // walks where the proof failed (full walk)
 }
 
 struct Frame {
@@ -331,16 +363,110 @@ impl<const W: usize> RustWalkerImpl<W> {
         (cur, last_len, last_state)
     }
 
+    /// S2 containment proof at seeded state `q` (memoized per (q, A-words)):
+    /// true means EVERY slice token is provably CI in this configuration.
+    /// Closure BFS over the slice byte class requiring, for every reachable
+    /// state (q included): every class-byte transition non-DEAD (emission
+    /// events fire only on DEAD transitions, so no event can occur inside an
+    /// all-class token and the walk state stays in the closure), live &
+    /// (A|ignored) != 0 (the zero-emission verdict's partial_viable — no
+    /// subtree prune), live disjoint from lexicon-constrained terminals
+    /// (prefix_ok vacuous on every viability witness; the genN guard's
+    /// lexicon-inertness condition), |closure| <= SLICE_CLOSURE_CAP. Exact
+    /// transcription of grid/trie/walk.py _slice_contained.
+    fn slice_contained(&self, sl: &SliceTables, q: i32, a_mask: &[u64; W]) -> bool {
+        if let Some(&ok) = self.slice_memo.lock().unwrap().get(&(q, *a_mask)) {
+            return ok;
+        }
+        let mut a_or_ign = *a_mask;
+        for i in 0..W {
+            a_or_ign[i] |= self.ignored[i];
+        }
+        let mut ok = true;
+        let mut r: Vec<i32> = Vec::with_capacity(8);
+        r.push(q);
+        let mut i = 0usize;
+        'bfs: while i < r.len() {
+            let s = r[i];
+            i += 1;
+            let lv = &self.live[s as usize];
+            if !m_and_any(lv, &a_or_ign) || m_and_any(lv, &self.lex_live_mask) {
+                ok = false;
+                break;
+            }
+            for &b in sl.class_bytes.iter() {
+                let nx = self.tr(s, b);
+                if nx == DEAD {
+                    ok = false;
+                    break 'bfs;
+                }
+                if !r.contains(&nx) {
+                    if r.len() >= SLICE_CLOSURE_CAP {
+                        ok = false;
+                        break 'bfs;
+                    }
+                    r.push(nx);
+                }
+            }
+        }
+        let mut memo = self.slice_memo.lock().unwrap();
+        if memo.len() >= SLICE_MEMO_CAP {
+            memo.clear();
+        }
+        memo.insert((q, *a_mask), ok);
+        ok
+    }
+
+    /// S2 sliced walk: Some((ci, groups)) when slice tables exist AND the
+    /// containment proof passes — ci is the sorted merge of the precomputed
+    /// alias-complete slice ids with the rest-trie walk's ci (disjoint id
+    /// sets: the partition is by spelling), groups come from the rest-trie
+    /// only. Byte-identical to the full walk by the proof: every slice token
+    /// is CI there, unsafe tokens keep their relative DFS order (both tries
+    /// emit children in ascending byte order), so ci bytes, group order,
+    /// representatives and id append order all coincide. None -> caller runs
+    /// the full walk, byte-for-byte today's path.
+    fn walk_sliced(&self, remainder: &[u8], a_mask: &[u64; W]) -> Option<(Vec<u32>, WalkGroupsRaw)> {
+        let sl = self.slices.as_ref()?;
+        let (q, _len, _last) = self.seed(remainder);
+        if !self.slice_contained(sl, q, a_mask) {
+            self.slice_fallbacks.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
+        self.slice_walks.fetch_add(1, Ordering::Relaxed);
+        let (rest_ci, groups) = self.walk_nodes(&sl.rest_nodes, remainder, a_mask);
+        let mut ci: Vec<u32> = Vec::with_capacity(sl.ids.len() + rest_ci.len());
+        let (mut i, mut j) = (0usize, 0usize);
+        while i < sl.ids.len() && j < rest_ci.len() {
+            if sl.ids[i] < rest_ci[j] {
+                ci.push(sl.ids[i]);
+                i += 1;
+            } else {
+                ci.push(rest_ci[j]);
+                j += 1;
+            }
+        }
+        ci.extend_from_slice(&sl.ids[i..]);
+        ci.extend_from_slice(&rest_ci[j..]);
+        Some((ci, groups))
+    }
+
     /// -> (ci, groups): identical semantics to kernel v1/v2; masks are [u64; W].
     /// GIL-free (kernel v4): callers detach() around this so ms-scale cold
     /// walks overlap Python work (SS6 batch scheduling contract); PyBytes
     /// wrapping happens after reattach.
+    fn walk_raw(&self, remainder: &[u8], a_mask: &[u64; W]) -> (Vec<u32>, WalkGroupsRaw) {
+        self.walk_nodes(&self.nodes, remainder, a_mask)
+    }
+
+    /// The sequential DFS body over an explicit node array — `self.nodes`
+    /// (walk_raw) or the S2 rest-trie (walk_sliced).
     ///
     /// W8: `walk_range` below is a lockstep transcript of this per-node body
     /// (the rayon path). Any change here MUST land there too —
     /// tests/trie/test_walk_threads.py binds the two bit-for-bit.
-    fn walk_raw(&self, remainder: &[u8], a_mask: &[u64; W]) -> (Vec<u32>, WalkGroupsRaw) {
-        let n = self.nodes.len();
+    fn walk_nodes(&self, nodes: &[u64], remainder: &[u8], a_mask: &[u64; W]) -> (Vec<u32>, WalkGroupsRaw) {
+        let n = nodes.len();
         let mut ci: Vec<u32> = Vec::new();
         let lex_sensitive = self.lex_allowed.is_some();
         let mut group_ix: HashMap<Vec<u8>, usize> = HashMap::new();
@@ -382,7 +508,7 @@ impl<const W: usize> RustWalkerImpl<W> {
                 events.truncate(f.events_len);
                 path.truncate(f.seg_start + f.seg_len);
             }
-            let word = self.nodes[i];
+            let word = nodes[i];
             let byte = (word & 0xFF) as u8;
             let tid_raw = ((word >> 8) & 0xFF_FFFF) as i64 - 1;
             let size = (word >> 32) as usize;
@@ -604,7 +730,12 @@ impl<const W: usize> RustWalkerImpl<W> {
     /// Env-gated dispatch (W8): the sequential `walk_raw` (GRID_WALK_THREADS
     /// unset/0/1 — the kill switch — or a sub-threshold trie or pool failure)
     /// or the rayon `walk_raw_par`. Output is bit-identical either way.
+    /// S2: a passing slice-containment proof short-circuits BOTH — the
+    /// rest-trie is small (3.8% of nodes on Llama-3.1), walked serially.
     fn walk_auto(&self, remainder: &[u8], a_mask: &[u64; W]) -> (Vec<u32>, WalkGroupsRaw) {
+        if let Some(out) = self.walk_sliced(remainder, a_mask) {
+            return out;
+        }
         let threads = env_usize("GRID_WALK_THREADS", 0);
         if threads >= 2 {
             let par_min = env_usize("GRID_WALK_PAR_MIN", WALK_PAR_MIN_DEFAULT).max(1);
@@ -1224,6 +1355,44 @@ struct RustWalker {
     width: usize,
 }
 
+/// S2 slice tables from the FFI triple (class bitmap as 4 u64 words,
+/// alias-complete slice ids as i32-le bytes SORTED ascending, rest-trie
+/// nodes as u64-le bytes). Shape errors are construction-time hard errors.
+fn parse_slices(
+    raw: Option<(Vec<u64>, Vec<u8>, Vec<u8>)>,
+) -> PyResult<Option<SliceTables>> {
+    let Some((class_words, ids_le, rest_le)) = raw else {
+        return Ok(None);
+    };
+    if class_words.len() != 4 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "slice class bitmap must be 4 u64 words (256 bits)",
+        ));
+    }
+    let mut class_bytes: Vec<u8> = Vec::new();
+    for b in 0..256usize {
+        if (class_words[b >> 6] >> (b & 63)) & 1 == 1 {
+            class_bytes.push(b as u8);
+        }
+    }
+    let ids: Vec<u32> = ids_from_le(&ids_le)?.iter().map(|t| *t as u32).collect();
+    if ids.windows(2).any(|p| p[0] >= p[1]) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "slice ids must be strictly ascending (sorted-merge contract)",
+        ));
+    }
+    if rest_le.len() % 8 != 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "rest-trie byte buffer length must be a multiple of 8 (u64-le nodes)",
+        ));
+    }
+    let rest_nodes: Vec<u64> = rest_le
+        .chunks_exact(8)
+        .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    Ok(Some(SliceTables { class_bytes, ids, rest_nodes }))
+}
+
 fn build_walker<const W: usize>(
     node_words: Vec<u64>,
     trans_v: Vec<i32>,
@@ -1235,7 +1404,14 @@ fn build_walker<const W: usize>(
     literal: Vec<u64>,
     lex: (Option<HashMap<u32, HashSet<Vec<u8>>>>, Option<HashMap<u32, HashSet<Vec<u8>>>>),
     aliases: HashMap<u32, Vec<u32>>,
+    slices: Option<SliceTables>,
 ) -> RustWalkerImpl<W> {
+    let mut lex_live_mask = [0u64; W];
+    if let Some(m) = &lex.0 {
+        for t in m.keys() {
+            m_set(&mut lex_live_mask, *t);
+        }
+    }
     RustWalkerImpl {
         nodes: node_words,
         trans: trans_v,
@@ -1248,6 +1424,11 @@ fn build_walker<const W: usize>(
         lex_allowed: lex.0,
         lex_prefixes: lex.1,
         aliases,
+        slices,
+        lex_live_mask,
+        slice_memo: Mutex::new(HashMap::new()),
+        slice_walks: AtomicU64::new(0),
+        slice_fallbacks: AtomicU64::new(0),
     }
 }
 
@@ -1255,7 +1436,7 @@ fn build_walker<const W: usize>(
 impl RustWalker {
     #[new]
     #[pyo3(signature = (nodes, trans, accept, n_terminals, accepts_all, live, dfa_start,
-                        ignored_mask, literal_mask, lexicon=None, aliases=None))]
+                        ignored_mask, literal_mask, lexicon=None, aliases=None, slices=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         nodes: &Bound<'_, PyBytes>,
@@ -1269,6 +1450,7 @@ impl RustWalker {
         literal_mask: Vec<u64>,
         lexicon: Option<&Bound<'_, PyDict>>,
         aliases: Option<HashMap<u32, Vec<u32>>>,
+        slices: Option<(Vec<u64>, Vec<u8>, Vec<u8>)>,
     ) -> PyResult<Self> {
         let nb = nodes.as_bytes();
         let mut node_words = Vec::with_capacity(nb.len() / 8);
@@ -1287,16 +1469,17 @@ impl RustWalker {
         }
         let lex = parse_lexicon(lexicon)?;
         let aliases = aliases.unwrap_or_default();
+        let slices = parse_slices(slices)?;
         let width = width_for(n_terminals).ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err(format!(
                 "{n_terminals} terminals exceeds the 512-terminal kernel bound"
             ))
         })?;
         let inner = match width {
-            1 => WalkerAny::W1(build_walker::<1>(node_words, trans_v, accept_v, accepts_all, live, dfa_start, ignored_mask, literal_mask, lex, aliases)),
-            2 => WalkerAny::W2(build_walker::<2>(node_words, trans_v, accept_v, accepts_all, live, dfa_start, ignored_mask, literal_mask, lex, aliases)),
-            4 => WalkerAny::W4(build_walker::<4>(node_words, trans_v, accept_v, accepts_all, live, dfa_start, ignored_mask, literal_mask, lex, aliases)),
-            _ => WalkerAny::W8(build_walker::<8>(node_words, trans_v, accept_v, accepts_all, live, dfa_start, ignored_mask, literal_mask, lex, aliases)),
+            1 => WalkerAny::W1(build_walker::<1>(node_words, trans_v, accept_v, accepts_all, live, dfa_start, ignored_mask, literal_mask, lex, aliases, slices)),
+            2 => WalkerAny::W2(build_walker::<2>(node_words, trans_v, accept_v, accepts_all, live, dfa_start, ignored_mask, literal_mask, lex, aliases, slices)),
+            4 => WalkerAny::W4(build_walker::<4>(node_words, trans_v, accept_v, accepts_all, live, dfa_start, ignored_mask, literal_mask, lex, aliases, slices)),
+            _ => WalkerAny::W8(build_walker::<8>(node_words, trans_v, accept_v, accepts_all, live, dfa_start, ignored_mask, literal_mask, lex, aliases, slices)),
         };
         Ok(RustWalker { inner, width })
     }
@@ -1304,6 +1487,17 @@ impl RustWalker {
     #[getter]
     fn width(&self) -> usize {
         self.width
+    }
+
+    /// S2 telemetry AND the Python feature probe (grid/trie/walk.py passes
+    /// the slices kwarg only when this attribute exists): (sliced walks,
+    /// proof-failed fallback walks). Both zero when no slice tables were
+    /// given; walks on a slice-free walker count in neither.
+    fn slice_stats(&self) -> (u64, u64) {
+        walker_dispatch!(self, w, (
+            w.slice_walks.load(Ordering::Relaxed),
+            w.slice_fallbacks.load(Ordering::Relaxed),
+        ))
     }
 
     /// -> (ci, groups): group event masks are little-endian u64 word lists.

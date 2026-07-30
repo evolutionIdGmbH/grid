@@ -18,7 +18,9 @@ bounded ~8ms cold-miss tail; on mb-grid-v030rc1 (3.47M masks) the 1-8ms
 cold-walk band is 6.4% of masks but 76.3% of pooled mask time. Outcome
 accounting on the 16 formerly-capped schemas: 5 compiled, 5 terminate
 deterministically, 6 still time out (the old "10/16 fixed" union number is
-withdrawn; its replacement is PENDING the outcome-aware republish, item E4).
+withdrawn; E4 has since published the replacement at wave-A HEAD:
+10 compiled / 5 declared / 1 timeout, classifier-gated, both TTFM columns —
+BAKEOFF.md E4 postscript).
 Two structural tail families remain: the substring-union scanner family
 (5 timeouts: o5195, o48423, o48427, o47656, o47657; plus slow compiles
 o83132 89.3s, o83133 5.8s, DataConnector 13.4s, BatchJob 11.9s; root cause
@@ -678,6 +680,33 @@ a scope-creep hazard (M -> L); containment memo growth bounded by the
 existing cap pattern, degrading to full walks, never wrong masks;
 low-coverage tokenizers (non-JSON grammars) get little benefit, coverage
 logged at build time with a skip threshold.
+
+POSTSCRIPT (Wave B, landed; local macOS measurements — H100 transfer check
+still owed): shipped as `GRID_PERF_SLICER` (perf_flags reader, default OFF
+pending the H100 serving stamp). Step-1 sizing re-pinned on the Wave-A
+baseline: coverage 96.24% (123,430/128,253 tokens), rest-trie 10,415/275,348
+nodes (3.78%), giant-|ci| cold misses 76/119 with 97.1% of pooled cold-walk
+time — the plan's numbers transfer. Microbench (real Llama-3.1 trie,
+Kubernetes kb_0 grammar, string-interior configs): cold walk_payload 6.83ms
+-> 0.269ms median (25.3x; plan projected 15-26x), payload bytes identical.
+Real-config fuzz: 176 captured cold configurations off 4 corpus schemas —
+135 kernel configs byte-identical on walk() AND walk_payload() (108 with CD
+groups), 41 >512-terminal spec configs identical, slicer engaged on ~half
+(the string-interior class). maskbench sample=8 seed=0 (168 schemas, 21
+splits, 37,021 masks, on/off arms): outcome parity ZERO deltas per file;
+TBM p50/p75/p90 unchanged (30/37/280us — warm path untouched), p95 7,694 ->
+911us (gate <=1ms PASS), pooled mask time -66%; band movement 1-8ms:
+1,632 -> 688 masks (11,994 -> 3,445ms), >=8ms: 1,419 -> 230 (12,180 ->
+2,080ms). p99 gate (<= 1.5ms) NOT met on this sample: 8,667 -> 7,655us —
+the residual is the declared out-of-scope proof-refusing class
+(pattern/enum-state and literal-interior giants), 0.62% of masks on this
+cold-heavy sample vs the 0.2% full-corpus sizing; the full-corpus rerun
+(warm-dominated, 3.47M masks) and the H100 stamp remain follow-ups before
+any default flip. Suites: full pytest green under both flag values with the
+rebuilt kernel; tests/trie/test_slicer.py adds the on/off differential
+(kernel + spec, both genN regimes) and the containment-refusal battery
+(boundary states, bounded windows, non-viable live sets, lexicon-live
+states, low-coverage skip).
 
 ### P4-counting-component (performance, L, Wave C)
 

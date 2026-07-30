@@ -73,6 +73,98 @@ BatchJob/DataConnector build lazily (same lazy-product outcome class as
 before, seconds instead of tens of seconds). `=0` restores the eager
 component builds byte-identically (digest-gated), family hang included.
 
+Honest metrics (E4, bench/ only — no runtime change): TTFM is now published
+as two labeled columns, *compile-only* (maskbench compile_grammar
+semantics; the historical definition, name unchanged) and
+*first-mask-included* (+ the first compute_mask, which for lazy factored
+scanners is the first real payment of the deferred product construction —
+previously measured nowhere). profile_phases.py grows `--first-mask`
+(trie/guide/first_mask/prefix_masks phases, child-written
+ttfm_compile_us/ttfm_first_us stats) and `--leg` (interleaved env legs);
+new bench/perfbench/outcomes.py classifies records
+(ok/declared/timeout@phase/crash/incomplete/malformed; incomplete is never
+ok — the F1-retraction guard) and gates cross-leg compares by the oracle
+rule. Regenerated capped+fast legs at wave-A HEAD (BAKEOFF.md E4
+postscript): capped-16 accounting is 10 compiled / 5 declared / 1 timeout
+(replaces the withdrawn "10/16"), OFF-leg strict identity 45/45 vs v0.2.5;
+measured deferred cost on lazy schemas: initial mask 1.6-8.0ms but
+mid-instance cold tokens 239-298ms worst (dense band: ~8ms), 64-token cold
+prefix 1.6-11.8s — the recorded P1 go/no-go input. maskbench_grid.py now
+clears engine extras per schema (stale-write fix, informational fields
+only); frozen status dirs keep the artifact and outcomes.extras() defends
+them at read time.
+
+Direct grammar-object emission (P2, `GRID_PERF_DIRECT_EMIT`, default on):
+the schema compiler now produces a `GrammarParts` manifest
+(`grid/grammar/parts.py`); `compile_json_schema_grammar` builds the
+`DialectGrammar` straight from it (`DialectGrammar.from_parts` +
+`RoleProjection.full_built`), skipping the `.grid` render and the regex
+re-parse that made spec_load ~49% of front-end compile time. `render_text`
+over the same manifest IS the legacy text emitter (byte-identical over all
+11,306 corpus schemas, PYTHONHASHSEED pinned) and stays the debug/audit
+path; validate()/freeze() run unchanged on the object path, so
+GrammarInvalid outcomes (the unproductive-recursion family), L-REC01
+warnings, and terminal numbering are shared code. Gates:
+bench/perfbench/diff_direct_emit.py corpus differential (11,306 schemas,
+zero flips; terminal_order tuple equality is the primary assertion —
+fingerprint hashes sorted names and cannot see a numbering bug), --tables
+leg (role_shape_hash + LALRTables.fingerprint equal over 309 set schemas),
+sampled mask-walk differential (25 stratified schemas x 2,000 steps,
+equal), reduction-worklist set-equality (307 grammars + 6,140 random
+projections + 2,000 synthetic), and a live render+reload oracle
+(`GRID_PERF_DIRECT_EMIT_CHECK=1`, CI leg). Measured (profile sets,
+ttfm_capped + stratified_200): spec_load+projection totals 1.01s -> 0.54s;
+front-end on the 12 most expensive grammars -50.3% (127 -> 61ms on
+o87865); full-pipeline p50 8.03 -> 7.68ms (p90 scanner-bound, unchanged).
+`=0` restores text -> `spec.load`. The reduction primitives
+(`grid/grammar/reduction.py`) are now linear worklists in ALL
+configurations (the 30k-rule chain: 139.8s -> 0.019s); serving is
+untouched (`vllm_processor` receives grammar TEXT in the request spec).
+Artifact-store schema_src entries remain text; store hits load text in
+both flag states.
+
+Tokenizer slicer (S2, `GRID_PERF_SLICER`, default OFF pending the H100
+serving stamp): the flat ~7ms string-interior cold-walk mode (76.3% of
+pooled mask time in the 1-8ms band) is a full 275,348-node trie DFS whose
+answer is knowable upfront for 96.24% of the Llama-3.1 vocab. With the flag
+on, `build_trie` partitions the vocabulary by the JSON-string-safe byte
+class (`[^"\\\x00-\x1f]`, exactly STRING_RX's body class) into a sorted
+alias-complete slice-id array plus a 10,415-node rest-trie (`TrieSlices`);
+at walk time the kernel (and the Python spec walk, mirrored) proves slice
+containment structurally from the seeded state — closure BFS over the class
+bytes, cap 64 states, every transition non-DEAD (no emission can fire inside
+a sliced token), every reachable state live for A|ignored and disjoint from
+lexicon-constrained terminals (the audited genN lexicon-inertness guard) —
+and on success walks only the rest-trie, sorted-merging the slice ids into
+ci. Output is BYTE-IDENTICAL to the full walk (ci bytes, CD group order,
+v7 blob, entry_id) because both tries enumerate tokens in the same byte-lex
+DFS order and the proof is all-or-nothing; proof failure (maxLength/pattern
+windows, boundary states, identifier positions, lazy factored DFAs) is
+today's full walk byte-for-byte. Measured on the real trie: string-interior
+cold walks 6.83ms -> 0.269ms (25.3x); warm paths untouched. Differential +
+containment-refusal suite in tests/trie/test_slicer.py; real-config fuzz
+byte-identity over corpus schemas (kernel + >512-terminal spec paths).
+
+Serving jump-forward (S1, `GRID_JUMP`, default OFF — parity-gated, not yet
+box-validated): forced token runs (singleton-mask chains, the §4.5
+mechanism mode 1 already jumps) delivered to the vLLM scheduler-side
+backend as draft tokens. `GridGuide.forced_run` (public pure-query span
+surface) + `GridGrammarSession.jump_tokens()` — state-neutral, v5 guide
+path and v6 kernel path (warm-only chaining via session_fill/accept +
+rollback; cold successors end the jump, never walk) — + patch site 5
+(spec_token_ids injection after accept_tokens; drafter proposals keep
+winning) + the upstream-shaped vllm_upstream_jump_tokens.patch. At a
+forced position the bitmask admits exactly one token, so draft acceptance
+is certain under any sampler: greedy token parity off-vs-on is the flip
+gate (bench/vllm_serving_bench.py --jump-probe, vllm_sched_accept.py
+--jump — both pending the next GPU session, as is the step-3 probe of
+0.24's SO+spec interplay/bonus-token mechanics). Measured stage-0 density
+(bench/RESULTS-jf-density.md, JSB replay, gpt2): forced steps 2.3%
+overall, 8-13% on rigid function-call-style splits, runs ~all length-1 —
+the realistic saving rides on bonus tokens; byte-level JF (~10x the mass)
+stays the recorded v2 deferral. Mode-2 logits-processor route untouched
+(§4.5 rule 3: singleton-degrade, never a unioned span mask).
+
 ## 0.3.0 - 2026-07-30
 
 The performance epoch: compile-time (TTFM) tail work, selected by measured

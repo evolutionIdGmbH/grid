@@ -38,6 +38,19 @@ Flag table:
                                                             unset =
                                                             "norm,dedupe")
     GRID_PERF_HASHCONS_DEBUG    hashcons_debug_enabled()    == "1"
+    GRID_PERF_DIRECT_EMIT       direct_emit_enabled()       == "1" (default
+                                                            on: unset = "1";
+                                                            "0" = text ->
+                                                            spec.load)
+    GRID_PERF_DIRECT_EMIT_CHECK direct_emit_check_enabled() == "1"
+    GRID_PERF_SLICER            slicer_enabled()            == "1" (default
+                                                            off until the
+                                                            H100 serving
+                                                            stamp)
+    GRID_JUMP                   jump_enabled()              == "1" (default
+                                                            off: serving
+                                                            jump-forward
+                                                            draft injection)
 
 Contract (enforced by tests/test_perf_flags.py):
 
@@ -49,9 +62,13 @@ Contract (enforced by tests/test_perf_flags.py):
   lru_cache, no module-level snapshot): tests monkeypatch these flags
   between calls, and long-lived serving processes may flip them.
 
-Non-GRID_PERF flags (GRID_CACHE_DIR, GRID_ADMIT_WARM, GRID_DEFER, ...) are
-out of scope: they are not performance-path selectors and keep their
-existing read sites.
+Pre-existing non-GRID_PERF flags (GRID_CACHE_DIR, GRID_ADMIT_WARM,
+GRID_DEFER, ...) are out of scope: they are not performance-path selectors
+and keep their existing read sites. NEW performance levers are born here
+regardless of prefix (the post-E1 discipline) — GRID_JUMP, the serving
+jump-forward lever, is the first: it keeps the serving-flag GRID_ prefix
+(it selects scheduler-side behavior like GRID_DEFER, not a compile path)
+but reads through this module so its grammar is oracle-tested.
 """
 
 import os
@@ -137,3 +154,54 @@ def hashcons_debug_enabled() -> bool:
     """GRID_PERF_HASHCONS_DEBUG=1: re-digest every memoized node at the end
     of a normalize() run to catch in-place mutation of shared subtrees."""
     return os.environ.get("GRID_PERF_HASHCONS_DEBUG", "0") == "1"
+
+
+def direct_emit_enabled() -> bool:
+    """GRID_PERF_DIRECT_EMIT: build DialectGrammar objects straight from the
+    compiler's GrammarParts manifest (spec.DialectGrammar.from_parts) in
+    grid.jsonschema.compile_json_schema_grammar, skipping the .grid text
+    render + regex re-parse on schema->grammar compiles. Default ON since
+    the P2 bake-off (zero-flip 11.3k differential + tables/mask gates;
+    spec_load+projection totals -47% on the profile sets); "0" (or any
+    other value) is the kill switch restoring text -> spec.load. Text
+    emission stays the permanent debug/audit path and the differential
+    oracle; artifact-store schema_src HITS keep text -> spec.load
+    regardless of this flag."""
+    return os.environ.get("GRID_PERF_DIRECT_EMIT", "1") == "1"
+
+
+def direct_emit_check_enabled() -> bool:
+    """GRID_PERF_DIRECT_EMIT_CHECK=1: from_parts additionally renders the
+    manifest to text, spec.load()s it, and asserts both paths agree — full
+    grammar identity (start/ignored/terminals/productions/terminal_order/
+    fingerprint) for valid manifests, GrammarInvalid message parity
+    otherwise. The permanent CI oracle against renderer/object-builder
+    drift."""
+    return os.environ.get("GRID_PERF_DIRECT_EMIT_CHECK", "0") == "1"
+
+
+def slicer_enabled() -> bool:
+    """GRID_PERF_SLICER: tokenizer slicer (S2) — build_trie additionally
+    partitions the vocabulary by the JSON-string-safe byte class into a
+    precomputed slice-id array + rest-trie (grid/trie/build.py TrieSlices),
+    and the walk (kernel walk_auto / spec _walk_py) skips the sliced 96% of
+    the trie whenever the containment proof passes. Read at BUILD sites
+    (build_trie; the tables are structural), so a flip affects tries built
+    after it — walkers over a slice-carrying trie keep slicing. Default OFF
+    pending the H100 serving stamp (the GRID_V7 flip precedent); only "1"
+    enables, anything else is the kill switch restoring today's full-trie
+    walk byte-for-byte."""
+    return os.environ.get("GRID_PERF_SLICER", "0") == "1"
+
+
+def jump_enabled() -> bool:
+    """GRID_JUMP: serving jump-forward (S1). When "1",
+    GridGrammarSession.jump_tokens() emits the forced (singleton-mask)
+    token run from the session's current position as draft tokens for
+    scheduler-side injection (bench/vllm_grid_patch.py site 5); the next
+    engine step verifies the whole run under per-position bitmasks in one
+    forward pass. Default OFF for the first epoch; any other value —
+    including "" — is the kill switch: jump_tokens() returns [] without
+    touching the kernel session (the GRID_DEFER=0 byte-identical-no-op
+    shape). Read at session construction, one session per request."""
+    return os.environ.get("GRID_JUMP", "0") == "1"

@@ -262,6 +262,8 @@ Once per PROCESS per tokenizer (amortized across every request, unlike all per-s
 **Composes with:** Counting-set scanner states for {m,n} windows (containment vs counter intervals); Kernel-resident lazy scanner (lazy determinization in grid_core v8); Per-terminal DFA library with lazy product combination; Persistent T2/ContextJournal warm-set restore (slicer fills what warmup misses)
 **Prior art:** llguidance's slicer (llg-go-brrr post; shipped in llguidance, used by vLLM's guidance backend): tokens assigned to regex-defined slices, per-slice tries, precomputed masks OR'd in when the slice is contained in the currently allowed lexemes.
 
+**STATUS (Wave B): scoped v1 LANDED** as S2-slicer (`GRID_PERF_SLICER`, default off pending the H100 stamp): ONE vocab-wide unbounded JSON-string-safe slice + rest-trie, containment proved by closure BFS in the walk (kernel + Python spec), all-or-nothing per configuration so output stays byte-identical (blob + entry_id included). Measured: string-interior cold walks 6.83ms -> 0.269ms (25.3x); maskbench sample p95 7.7ms -> 0.9ms, pooled -66%, zero outcome deltas. The length-capped slices ({1,10}/{1,30} vs maxLength windows, needing a group-order canonicalization decision) and lazy-DFA slicing stay follow-on — see ROADMAP.md S2 postscript.
+
 ## 20. Persistent T2/ContextJournal warm-set restore  `[M]`
 
 **Target:** runtime TBM tail (first-mask and cold-walk latency of tail schemas on redeployment)
