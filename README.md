@@ -62,7 +62,7 @@ the official JSON-Schema-Test-Suite runs in CI under that contract.
 </picture>
 
 Honest in both directions. llguidance's lazy lexer makes it the compile-time
-(TTFM) reference point; nothing else is close and we say so. GRID's compile
+(TTFM) reference point; nothing else is close. GRID's compile
 average dropped 419ms -> 66ms across the 0.3/0.4 epochs (p50 7.4ms, p99
 1.16s), and — unique among the three on this run — **zero schemas fail to
 terminate**: every one of 11,306 compiles, declares, or budget-declines
