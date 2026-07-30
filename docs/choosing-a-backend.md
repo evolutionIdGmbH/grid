@@ -45,26 +45,13 @@ store never fakes a first compile).
 ## Pick the default (XGrammar) when
 
 - Your schemas are a small curated set you have already verified compile and
-  behave correctly — coverage is XGrammar's strength (10,212 passing, the
-  highest), and on a fixed set you can test your way past both silent-accept
+  behave correctly and on a fixed set you can test your way past both silent-accept
   risks.
 - You need the absolute fastest median compile on huge schema churn and
   llguidance's declare-rate (16% of this corpus) is acceptable — then
   llguidance, not GRID or XGrammar, is the right pick; its 0.7ms average
   TTFM is the reference point we openly chase.
 
-## The honest costs of picking GRID
-
-- Compile average 66ms (p50 7.4ms, p99 1.16s) vs llguidance's 0.7ms; the
-  0.4.x tail work closed most of the gap to XGrammar (334ms avg) but
-  llguidance's lazy lexer remains ahead. Roadmapped, not disputed.
-- Warm per-token masking is 25µs p50 through the Rust kernel; first-visit
-  states pay cold trie walks (bounded ~8ms p99.9) that amortize under a
-  serving write-back cache but exist.
-- 876 corpus schemas accept some invalid instances — every one carries the
-  recorded names of the constraints involved (the honesty contract), but if
-  you need hard enforcement of those keywords today, check
-  `grid/jsonschema/SUPPORT.md` first.
 
 ## Integration status
 
