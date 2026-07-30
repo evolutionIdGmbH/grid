@@ -16,6 +16,22 @@ numbering argument at _lr0_automaton, state ids):
 
 Conflicts raise LALRConflictError with a report of (state, terminal, actions).
 
+Construction budget (P5): both constructions count items materialized (sum
+of closure sizes at state creation — input-derived, machine-independent,
+memory-proportional) and states, checked on every new state (two int
+compares). Crossing either cap raises the declared LALRBudgetExceeded
+instead of building on: grammars whose LR(0) core itself diverges
+(helm-testsuite: 62.7M items and still growing at 60s) or whose conflicts
+sit behind a ~48M-item automaton (o27148) terminate deterministically in
+seconds. Default _DEFAULT_ITEM_BUDGET items with the state cap derived as
+budget // _STATE_BUDGET_DIVISOR; GRID_LALR_BUDGET overrides the item budget
+("0" disables both caps — the audit/oracle escape hatch), read call-time via
+perf_flags.lalr_budget. The dp path (GRID_PERF_LALR_DP default) defines
+SHIPPED outcomes; lr1_merge stays the differential oracle and may fire the
+budget where dp completes (LR(1) materializes >= LR(0) items), so
+differential gates assert table equality for under-budget grammars and
+declared-class equality for over-budget ones.
+
 Symbol numbering:
 - terminal ids: the grammar's canonical terminal order, 0..T-1 (E11 requirement)
 - END (``$end``): id T
@@ -30,10 +46,33 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from grid import perf_flags
-from grid.errors import LALRConflictError
+from grid.errors import LALRBudgetExceeded, LALRConflictError
 from grid.grammar.projection import RoleProjection
 
 SHIFT, REDUCE, ACCEPT = 0, 1, 2
+
+# Item budget default, calibrated on the full 11,306-schema corpus (P5
+# sweep, both maskbench build legs per schema — initial + conflict-retry;
+# outcome census reconciles with tmp/mb-grid-v030rc2 exactly). The largest
+# COMPLETING dp construction is the conflict-family completer o21112 at
+# 20,094,330 items / 926,457 states (~54s per leg, a declared
+# LALRConflictError today); the largest ok-bucket completer is pkg_schema
+# at 1,950,817 items, and the completer p99 is 228k items. The smallest
+# hang this budget exists to declare is o27148 at 48.17M LR(0) items —
+# only 2.4x the largest completer — so the roadmap's "8M default, >=4x
+# headroom" is unsatisfiable on the items axis: 8M would fire on the
+# o21112/o21108 completers, and >=4x (80M+) would never fire on o27148 at
+# all. 32M is the log-midpoint of the measured gap (1.59x above the
+# largest completer, 1.51x below the smallest target), and the completer
+# side is additionally self-limiting: a hypothetical completer near 32M
+# items (~90s+ per leg, two legs per compile) could not have finished
+# inside the 120s corpus cap that defines today's completer set. The state
+# cap rides the same knob at budget // 8 (default 4M states, 4.3x the
+# largest completer's 926k — the >=4x headroom rule holds on the states
+# axis). GRID_LALR_BUDGET overrides both (e.g. 50M lets o27148 build far
+# enough to report its actual conflicts at ~132s; "0" disables).
+_DEFAULT_ITEM_BUDGET = 32_000_000
+_STATE_BUDGET_DIVISOR = 8
 
 
 @dataclass(frozen=True)
@@ -91,6 +130,9 @@ def _build_lr1_merged(
     n_term: int,
     end_id: int,
     stats: dict | None = None,
+    *,
+    item_budget: int | None = None,
+    state_budget: int | None = None,
 ) -> tuple[list[dict[int, int]], list[set[tuple[int, int, int]]], int]:
     """Canonical LR(1) item sets merged by core -> (trans, items, start_state).
 
@@ -100,7 +142,9 @@ def _build_lr1_merged(
     ``stats`` (out-param) receives the construction size counters on
     completion: lr1_states / lr1_items (canonical states materialized and the
     sum of their closure sizes — memory-proportional, input-derived) plus
-    lalr_states after the core merge.
+    lalr_states after the core merge. ``item_budget``/``state_budget``
+    (module docstring) raise the declared LALRBudgetExceeded — checked at
+    state insertion, so the fire point is BFS-deterministic.
     """
     is_terminal = lambda s: s < n_term  # noqa: E731
 
@@ -139,6 +183,8 @@ def _build_lr1_merged(
     lr1_states: dict[frozenset, int] = {start: 0}
     order = [start]
     items = len(start)  # items materialized: closure sizes at state insertion
+    if item_budget is not None and items > item_budget:
+        raise LALRBudgetExceeded(1, items, item_budget, state_budget)
     lr1_trans: list[dict[int, int]] = []
     i = 0
     while i < len(order):
@@ -155,6 +201,11 @@ def _build_lr1_merged(
                 lr1_states[nxt] = len(order)
                 order.append(nxt)
                 items += len(nxt)
+                if item_budget is not None and (
+                    items > item_budget or len(order) > state_budget
+                ):
+                    raise LALRBudgetExceeded(
+                        len(order), items, item_budget, state_budget)
             row[s] = lr1_states[nxt]
         lr1_trans.append(row)
 
@@ -190,6 +241,9 @@ def _lr0_automaton(
     prods_by_lhs: dict[int, list[int]],
     n_term: int,
     stats: dict | None = None,
+    *,
+    item_budget: int | None = None,
+    state_budget: int | None = None,
 ) -> tuple[list[frozenset[tuple[int, int]]], list[dict[int, int]]]:
     """LR(0) automaton over (prod, dot) items -> (closures, trans).
 
@@ -208,6 +262,9 @@ def _lr0_automaton(
     ``stats`` (out-param) receives the construction size counters on
     completion: lr0_states / lr0_items (states materialized and the sum of
     their closure sizes — memory-proportional, input-derived).
+    ``item_budget``/``state_budget`` (module docstring) raise the declared
+    LALRBudgetExceeded — checked at state creation, so the fire point is
+    BFS-deterministic.
     """
     def closure0(kernel: frozenset[tuple[int, int]]) -> frozenset[tuple[int, int]]:
         out = set(kernel)
@@ -227,6 +284,8 @@ def _lr0_automaton(
     states: dict[frozenset[tuple[int, int]], int] = {start_kernel: 0}
     closures = [closure0(start_kernel)]
     items = len(closures[0])  # items materialized: closure sizes at creation
+    if item_budget is not None and items > item_budget:
+        raise LALRBudgetExceeded(1, items, item_budget, state_budget)
     trans: list[dict[int, int]] = []
     i = 0
     while i < len(closures):
@@ -244,6 +303,11 @@ def _lr0_automaton(
                 c = closure0(kernel)
                 closures.append(c)
                 items += len(c)
+                if item_budget is not None and (
+                    items > item_budget or len(closures) > state_budget
+                ):
+                    raise LALRBudgetExceeded(
+                        len(closures), items, item_budget, state_budget)
             row[s] = nxt
         trans.append(row)
     if stats is not None:
@@ -390,6 +454,10 @@ def compile_tables(
     after construction). Deliberately NOT stored on LALRTables: the two
     algorithms count different constructions, and the dp differential
     compares tables field-by-field.
+
+    Raises LALRBudgetExceeded when the construction crosses the
+    GRID_LALR_BUDGET item/state caps before completing (module docstring;
+    stats stays unfilled — the fire counts ride the exception).
     """
     g = proj.base
     if proj.state != "CACHED":
@@ -425,8 +493,16 @@ def compile_tables(
     for i, (lhs, _rhs) in enumerate(prods):
         prods_by_lhs.setdefault(lhs, []).append(i)
 
+    item_budget = perf_flags.lalr_budget(_DEFAULT_ITEM_BUDGET)
+    state_budget = (
+        None if item_budget is None
+        else max(1, item_budget // _STATE_BUDGET_DIVISOR)
+    )
+
     if algorithm == "dp":
-        state_closures, trans = _lr0_automaton(prods, prods_by_lhs, n_term, stats)
+        state_closures, trans = _lr0_automaton(
+            prods, prods_by_lhs, n_term, stats,
+            item_budget=item_budget, state_budget=state_budget)
         n_states = len(trans)
         start_state = 0
         la_sets = _dp_lookaheads(
@@ -444,7 +520,8 @@ def compile_tables(
                         yield p, la
     else:
         trans, merged_items, start_state = _build_lr1_merged(
-            prods, prods_by_lhs, first, nullable, n_term, end_id, stats
+            prods, prods_by_lhs, first, nullable, n_term, end_id, stats,
+            item_budget=item_budget, state_budget=state_budget,
         )
         n_states = len(trans)
         state_closures = [

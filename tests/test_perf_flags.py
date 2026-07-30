@@ -149,6 +149,34 @@ def test_lalr_algorithm_default_is_dp(monkeypatch):
     assert perf_flags.lalr_algorithm() == "dp"
 
 
+@pytest.mark.parametrize("raw", [None, "3", "1000000", "8000000", "-1"])
+@pytest.mark.parametrize("default", [8_000_000, 7])
+def test_lalr_budget_oracle(monkeypatch, raw, default):
+    _setenv(monkeypatch, "GRID_LALR_BUDGET", raw)
+    # int() with injected default and a "0"-disables special case — the
+    # component_budget grammar (P5 is the parser-side sibling of P3's cap)
+    oracle = int(os.environ.get("GRID_LALR_BUDGET", str(default)))
+    assert perf_flags.lalr_budget(default) == oracle
+    if raw is None:
+        assert perf_flags.lalr_budget(default) == default
+
+
+def test_lalr_budget_zero_disables(monkeypatch):
+    # "0" is the kill switch: None = caps disabled = unbounded construction
+    # (the audit/oracle escape hatch)
+    monkeypatch.setenv("GRID_LALR_BUDGET", "0")
+    assert perf_flags.lalr_budget(8_000_000) is None
+    monkeypatch.delenv("GRID_LALR_BUDGET", raising=False)
+    assert perf_flags.lalr_budget(0) is None  # a 0 default disables too
+
+
+@pytest.mark.parametrize("raw", ["abc", "", " ", "1.5", "0x10"])
+def test_lalr_budget_garbage_raises(monkeypatch, raw):
+    monkeypatch.setenv("GRID_LALR_BUDGET", raw)
+    with pytest.raises(ValueError):
+        perf_flags.lalr_budget(8_000_000)
+
+
 _HC = frozenset({"norm", "dedupe"})
 
 
@@ -286,6 +314,11 @@ def test_every_reader_is_call_time(monkeypatch):
     assert perf_flags.lalr_algorithm() == "dp"
     monkeypatch.setenv("GRID_PERF_LALR_DP", "0")
     assert perf_flags.lalr_algorithm() == "lr1_merge"
+
+    monkeypatch.setenv("GRID_LALR_BUDGET", "3")
+    assert perf_flags.lalr_budget(8_000_000) == 3
+    monkeypatch.setenv("GRID_LALR_BUDGET", "0")
+    assert perf_flags.lalr_budget(8_000_000) is None
 
     monkeypatch.setenv("GRID_PERF_HASHCONS", "norm")
     assert perf_flags.hashcons_components() == frozenset({"norm"})

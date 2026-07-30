@@ -16,8 +16,13 @@ work unit).
 Per-schema results:
     equal             both built, LALRTables field-by-field equal
     conflict_parity   both raised LALRConflictError, equal normalized sets
+    budget_parity     both raised LALRBudgetExceeded (class equality only:
+                      fire counts differ by construction)
+    budget_legacy_only  sanctioned asymmetry — the lr1_merge oracle fired
+                      where dp completed (dp defines shipped outcomes)
     skip:<Error>      pipeline failed before compile_tables (both paths moot)
-    MISMATCH:<fields> / CONFLICT_MISMATCH / CLASS_MISMATCH:...   gate failures
+    MISMATCH:<fields> / CONFLICT_MISMATCH / CLASS_MISMATCH:... /
+    BUDGET_MISMATCH:... (dp fired, legacy did not)   gate failures
 
 Counts mode (--counts) swaps in a dp-only child that replays the SHIPPED
 maskbench build sequence — compile_json_schema_grammar, RoleProjection,
@@ -49,6 +54,11 @@ import time
 
 MANIFEST = os.path.join(os.path.dirname(__file__), "manifest.json")
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "tmp", "jsb-src", "data")
+# the flat maskbench checkout: ALL 11,306 corpus ids as <id>.json, including
+# the split-less ones (BFCL_*, JME_*, MCPspec_*, Synthesized_*) that have no
+# file under DATA_DIR's <split>/<name> layout
+MB_DATA_DIR = os.path.join(
+    os.path.dirname(__file__), "..", "..", "tmp", "jsb-src", "maskbench", "data")
 
 
 def _norm_conflicts(report: list) -> set:
@@ -75,7 +85,7 @@ def child(schema_file: str, out_file: str) -> None:
     if isinstance(schema, dict) and "schema" in schema and "tests" in schema:
         schema = schema["schema"]  # wrapped maskbench layout
 
-    from grid.errors import LALRConflictError
+    from grid.errors import LALRBudgetExceeded, LALRConflictError
     from grid.grammar import spec
     from grid.grammar.projection import RoleProjection
     from grid.jsonschema import compile_json_schema
@@ -95,18 +105,22 @@ def child(schema_file: str, out_file: str) -> None:
         stats: dict = {}
         try:
             result = compile_tables(proj, algorithm=algorithm, stats=stats), None
-        except LALRConflictError as e:
+        except (LALRBudgetExceeded, LALRConflictError) as e:
             result = None, e
         # counters land in the record before the next flush (the following
         # phase's start-flush), so a parent kill during the legacy build
         # still leaves the finished dp counts on disk
         rec.setdefault("lalr", {})[algorithm] = stats
+        if isinstance(result[1], LALRBudgetExceeded):
+            stats["budget_fire"] = {"states": result[1].states, "items": result[1].items}
         return result
 
     dp_tables, dp_err = phase("lalr_dp", lambda: build("dp"))
     legacy_tables, legacy_err = phase("lalr_legacy", lambda: build("lr1_merge"))
     rec["running"] = None
 
+    dp_budget = isinstance(dp_err, LALRBudgetExceeded)
+    legacy_budget = isinstance(legacy_err, LALRBudgetExceeded)
     if dp_tables is not None and legacy_tables is not None:
         diffs = [
             f.name for f in dataclasses.fields(legacy_tables)
@@ -114,6 +128,17 @@ def child(schema_file: str, out_file: str) -> None:
         ]
         rec["result"] = "equal" if not diffs else f"MISMATCH:{','.join(diffs)}"
         rec["states"] = len(legacy_tables.action)
+    elif dp_budget and legacy_budget:
+        # over-budget scoping: class equality only (fire counts differ by
+        # construction — LR(1) materializes >= LR(0) items)
+        rec["result"] = "budget_parity"
+    elif legacy_budget and not dp_budget:
+        # sanctioned asymmetry: the oracle may fire where dp completes; dp
+        # defines shipped outcomes (grid/lalr/compile.py module docstring)
+        rec["result"] = "budget_legacy_only"
+    elif dp_budget:
+        # LR(1) >= LR(0) items makes this impossible; a gate failure if seen
+        rec["result"] = "BUDGET_MISMATCH:dp_fired_legacy_did_not"
     elif dp_err is not None and legacy_err is not None:
         same = _norm_conflicts(dp_err.report) == _norm_conflicts(legacy_err.report)
         rec["result"] = "conflict_parity" if same else "CONFLICT_MISMATCH"
@@ -190,12 +215,15 @@ def counts_child(schema_file: str, out_file: str) -> None:
 
 
 def schema_path(schema_id: str) -> str | None:
-    # manifest ids without a split prefix (BFCL_*, JME_*) have no file in the
-    # jsb-src checkout; callers skip those rather than fail the run
-    if "---" not in schema_id:
-        return None
-    split, name = schema_id.split("---", 1)
-    path = os.path.join(DATA_DIR, split, name + ".json")
+    # split-form ids resolve through the historical <split>/<name> layout
+    # first (unchanged resolution for every id earlier runs covered), then
+    # any id falls back to the flat maskbench checkout
+    if "---" in schema_id:
+        split, name = schema_id.split("---", 1)
+        path = os.path.join(DATA_DIR, split, name + ".json")
+        if os.path.exists(path):
+            return path
+    path = os.path.join(MB_DATA_DIR, schema_id + ".json")
     return path if os.path.exists(path) else None
 
 
@@ -301,7 +329,7 @@ def summarize(out_dir: str) -> None:
                 result = f"timeout_in:{rec.get('running')}"
         key = result.split(":")[0]
         counts[key] = counts.get(key, 0) + 1
-        if key in ("MISMATCH", "CONFLICT_MISMATCH", "CLASS_MISMATCH"):
+        if key in ("MISMATCH", "CONFLICT_MISMATCH", "CLASS_MISMATCH", "BUDGET_MISMATCH"):
             mismatches.append(f"{os.path.basename(f)}: {result}")
         elif key == "timeout_in":
             unverified.append(f"{os.path.basename(f)}: {result}")

@@ -161,3 +161,20 @@ def test_env_flag_selects_dp(monkeypatch, toy_grammar):
 def test_unknown_algorithm_rejected(toy_grammar):
     with pytest.raises(ValueError, match="unknown LALR algorithm"):
         compile_tables(RoleProjection.full(toy_grammar).build(), algorithm="slr")
+
+
+def test_budget_scoping_of_the_differential(monkeypatch):
+    """P5 scoping rule: table equality holds for under-budget grammars; an
+    over-budget grammar raises the declared LALRBudgetExceeded under BOTH
+    algorithms (fire counts may differ: LR(1) materializes >= LR(0) items,
+    so the oracle can fire where dp completes — dp defines shipped
+    outcomes). tests/lalr/test_budget.py holds the budget's own gates."""
+    from grid.errors import LALRBudgetExceeded
+
+    g = spec.load(ADVERSARIAL["left_right_lists"])
+    monkeypatch.setenv("GRID_LALR_BUDGET", "0")
+    _assert_tables_equal(*_both(g))
+    monkeypatch.setenv("GRID_LALR_BUDGET", "4")
+    for algorithm in ("lr1_merge", "dp"):
+        with pytest.raises(LALRBudgetExceeded):
+            compile_tables(RoleProjection.full(g).build(), algorithm=algorithm)
