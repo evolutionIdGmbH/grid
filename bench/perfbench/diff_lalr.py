@@ -8,16 +8,33 @@ moment it finishes, so a parent kill during the legacy build still leaves a
 comparable DP timing ("legacy-incomparable": the candidate's win condition,
 not a failure). Ship gate: zero mismatches.
 
+Both childs record the construction size counters (compile_tables
+stats out-param: dp lr0_states/lr0_items, legacy lr1_states/lr1_items) —
+the P5 LALR-budget calibration data (items materialized is the budget's
+work unit).
+
 Per-schema results:
     equal             both built, LALRTables field-by-field equal
     conflict_parity   both raised LALRConflictError, equal normalized sets
     skip:<Error>      pipeline failed before compile_tables (both paths moot)
     MISMATCH:<fields> / CONFLICT_MISMATCH / CLASS_MISMATCH:...   gate failures
 
+Counts mode (--counts) swaps in a dp-only child that replays the SHIPPED
+maskbench build sequence — compile_json_schema_grammar, RoleProjection,
+compile_tables(dp), LALR-conflict retry with unify_string_values=True —
+recording per-leg counters and outcome (ok | conflict | declared:<cls> |
+skip:<cls>). This is the corpus-wide budget-calibration sweep: every leg it
+reports "ok"/"conflict" for is a build the budget must never fire on.
+--ids-from-dir <status_dir> takes the schema list from an existing
+maskbench status dir (e.g. tmp/mb-grid-v030rc2) instead of manifest groups.
+
 Usage:
     python bench/perfbench/diff_lalr.py \
         --group ttfm_capped:120 --group stratified_200:60 \
         --jobs 4 --out tmp/perfbench-diff-lalr
+    python bench/perfbench/diff_lalr.py --counts \
+        --ids-from-dir tmp/mb-grid-v030rc2 --timeout 120 \
+        --jobs 10 --out tmp/perfbench-lalr-counts
 """
 
 from __future__ import annotations
@@ -75,10 +92,16 @@ def child(schema_file: str, out_file: str) -> None:
         return
 
     def build(algorithm: str):
+        stats: dict = {}
         try:
-            return compile_tables(proj, algorithm=algorithm), None
+            result = compile_tables(proj, algorithm=algorithm, stats=stats), None
         except LALRConflictError as e:
-            return None, e
+            result = None, e
+        # counters land in the record before the next flush (the following
+        # phase's start-flush), so a parent kill during the legacy build
+        # still leaves the finished dp counts on disk
+        rec.setdefault("lalr", {})[algorithm] = stats
+        return result
 
     dp_tables, dp_err = phase("lalr_dp", lambda: build("dp"))
     legacy_tables, legacy_err = phase("lalr_legacy", lambda: build("lr1_merge"))
@@ -99,6 +122,73 @@ def child(schema_file: str, out_file: str) -> None:
     flush()
 
 
+def counts_child(schema_file: str, out_file: str) -> None:
+    """dp-only calibration child: the SHIPPED maskbench build sequence
+    (initial build, then the LALR-conflict retry with
+    unify_string_values=True), construction counters per leg."""
+    rec: dict = {"file": schema_file, "mode": "counts", "legs": [], "result": None}
+
+    def flush() -> None:
+        with open(out_file, "w") as f:
+            f.write(json.dumps(rec, indent=1))
+
+    with open(schema_file) as f:
+        schema = json.load(f)
+    if isinstance(schema, dict) and "schema" in schema and "tests" in schema:
+        schema = schema["schema"]  # wrapped maskbench layout
+
+    from grid import perf_flags
+    from grid.errors import LALRConflictError
+    from grid.grammar.projection import RoleProjection
+    from grid.jsonschema import compile_json_schema_grammar
+    from grid.lalr.compile import compile_tables
+
+    def leg(unify: bool) -> str:
+        entry: dict = {"unify": unify}
+        rec["legs"].append(entry)
+        rec["running"] = f"leg_unify{int(unify)}"
+        flush()
+        stats: dict = {}
+        entry["stats"] = stats
+        t0 = time.monotonic()
+        try:
+            grammar, _recorded = compile_json_schema_grammar(
+                schema, unify_string_values=unify)
+            proj = (RoleProjection.full_built(grammar)
+                    if perf_flags.direct_emit_enabled()
+                    else RoleProjection.full(grammar).build())
+        except Exception as e:  # upstream of compile_tables: both legs moot
+            entry["outcome"] = f"skip:{type(e).__name__}"
+            entry["front_us"] = round((time.monotonic() - t0) * 1e6)
+            return entry["outcome"]
+        entry["front_us"] = round((time.monotonic() - t0) * 1e6)
+        t1 = time.monotonic()
+        try:
+            compile_tables(proj, algorithm="dp", stats=stats)
+            entry["outcome"] = "ok"
+        except LALRConflictError:
+            # stats is already populated: conflicts are a fill-stage outcome,
+            # after construction — a completed build the budget must respect
+            entry["outcome"] = "conflict"
+        except Exception as e:  # declared decline (LALRBudgetExceeded, ...)
+            entry["outcome"] = f"declared:{type(e).__name__}"
+            for k in ("states", "items"):
+                v = getattr(e, k, None)
+                if isinstance(v, int):
+                    entry[f"declared_{k}"] = v
+        entry["lalr_us"] = round((time.monotonic() - t1) * 1e6)
+        return entry["outcome"]
+
+    out = leg(False)
+    if out == "conflict":
+        # maskbench GridEngine's conflict retry, once; a second "conflict" is
+        # the honest final outcome (rc2's declared:LALRConflictError bucket)
+        out = leg(True)
+    rec["running"] = None
+    rec["result"] = out
+    flush()
+
+
 def schema_path(schema_id: str) -> str | None:
     # manifest ids without a split prefix (BFCL_*, JME_*) have no file in the
     # jsb-src checkout; callers skip those rather than fail the run
@@ -109,19 +199,36 @@ def schema_path(schema_id: str) -> str | None:
     return path if os.path.exists(path) else None
 
 
-def parent(groups: list[str], jobs: int, out_dir: str) -> None:
-    with open(MANIFEST) as f:
-        sets = json.load(f)["sets"]
-    os.makedirs(out_dir, exist_ok=True)
-
+def build_work(groups: list[str], ids_from_dir: str | None, timeout: int) -> list[tuple[str, int]]:
     work: list[tuple[str, int]] = []
     seen: set[str] = set()
-    for g in groups:
-        name, timeout_s = g.split(":")
-        for sid in sets[name]:
+    if groups:
+        with open(MANIFEST) as f:
+            sets = json.load(f)["sets"]
+        for g in groups:
+            name, timeout_s = g.split(":")
+            for sid in sets[name]:
+                if sid not in seen:
+                    seen.add(sid)
+                    work.append((sid, int(timeout_s)))
+    if ids_from_dir:
+        import glob
+
+        for f in sorted(glob.glob(os.path.join(ids_from_dir, "*.json"))):
+            base = os.path.basename(f)
+            if base == "_meta.json":
+                continue
+            sid = base[: -len(".json")]
             if sid not in seen:
                 seen.add(sid)
-                work.append((sid, int(timeout_s)))
+                work.append((sid, timeout))
+    return work
+
+
+def parent(work: list[tuple[str, int]], jobs: int, out_dir: str, counts: bool = False) -> None:
+    os.makedirs(out_dir, exist_ok=True)
+    suffix = ".counts.json" if counts else ".diff.json"
+    child_flag = "--counts-child" if counts else "--child"
 
     print(f"{len(work)} schemas queued, jobs={jobs}", flush=True)
     running: list[tuple[subprocess.Popen, str, float, int]] = []
@@ -129,7 +236,7 @@ def parent(groups: list[str], jobs: int, out_dir: str) -> None:
     done = 0
 
     def out_path(sid: str) -> str:
-        return os.path.join(out_dir, sid + ".diff.json")
+        return os.path.join(out_dir, sid + suffix)
 
     while queue or running:
         while queue and len(running) < jobs:
@@ -144,7 +251,7 @@ def parent(groups: list[str], jobs: int, out_dir: str) -> None:
                     f.write(json.dumps({"file": None, "phases": {}, "result": "skip:missing_data"}))
                 continue
             p = subprocess.Popen(
-                [sys.executable, __file__, "--child", spath, out_path(sid)],
+                [sys.executable, __file__, child_flag, spath, out_path(sid)],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
@@ -172,7 +279,7 @@ def parent(groups: list[str], jobs: int, out_dir: str) -> None:
                 still.append((p, sid, t0, timeout_s))
         running = still
 
-    summarize(out_dir)
+    (summarize_counts if counts else summarize)(out_dir)
 
 
 def summarize(out_dir: str) -> None:
@@ -215,20 +322,88 @@ def summarize(out_dir: str) -> None:
     print("gate: zero mismatches")
 
 
+def summarize_counts(out_dir: str) -> None:
+    """Calibration digest: every completed dp construction (ok or conflict —
+    builds the budget must never fire on), items/states distribution, top
+    completers, declared fires, and killed/incomplete records (never counted
+    as completers — the F1 lesson)."""
+    import glob
+
+    results: dict[str, int] = {}
+    completed: list[tuple[int, int, int, str, str, bool]] = []
+    declines: list[str] = []
+    killed: list[str] = []
+    for f in sorted(glob.glob(os.path.join(out_dir, "*.counts.json"))):
+        sid = os.path.basename(f)[: -len(".counts.json")]
+        with open(f) as fh:
+            rec = json.load(fh)
+        if "timeout_s" in rec or rec.get("running"):
+            killed.append(f"{sid}: killed in {rec.get('running')}")
+            results["timeout"] = results.get("timeout", 0) + 1
+            continue
+        result = rec.get("result") or "malformed"
+        key = result.split(":")[0]
+        results[key] = results.get(key, 0) + 1
+        for entry in rec.get("legs", []):
+            out = entry.get("outcome", "")
+            st = entry.get("stats") or {}
+            if out in ("ok", "conflict") and "lr0_items" in st:
+                completed.append((st["lr0_items"], st["lr0_states"],
+                                  entry.get("lalr_us", 0), sid, out,
+                                  bool(entry.get("unify"))))
+            elif out.startswith("declared:"):
+                declines.append(
+                    f"{sid} unify={int(bool(entry.get('unify')))}: {out} "
+                    f"items={entry.get('declared_items')} "
+                    f"states={entry.get('declared_states')}")
+    print(f"\nresults: {results}")
+    print(f"completed dp constructions (budget must never fire on these): {len(completed)}")
+    if completed:
+        completed.sort(reverse=True)
+        items = sorted(c[0] for c in completed)
+
+        def pct(p: float) -> int:
+            return items[min(len(items) - 1, int(p / 100 * len(items)))]
+
+        print(f"lr0_items p50={pct(50):,} p99={pct(99):,} max={items[-1]:,}")
+        print("top completers by lr0_items:")
+        for it, stt, us, sid, out, unify in completed[:12]:
+            print(f"  {it:>10,} items {stt:>9,} states {us / 1e6:7.2f}s "
+                  f"{out:8s} unify={int(unify)} {sid}")
+    if declines:
+        print(f"declared declines ({len(declines)}):")
+        for line in declines:
+            print(" ", line)
+    if killed:
+        print(f"killed/incomplete ({len(killed)}):")
+        for line in killed[:12]:
+            print(" ", line)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--child", nargs=2, metavar=("SCHEMA", "OUT"))
+    ap.add_argument("--counts-child", nargs=2, metavar=("SCHEMA", "OUT"))
+    ap.add_argument("--counts", action="store_true",
+                    help="dp-only maskbench-sequence calibration sweep")
     ap.add_argument("--group", action="append", default=[], help="set_name:timeout_s")
+    ap.add_argument("--ids-from-dir", default=None,
+                    help="derive schema ids from a maskbench status dir")
+    ap.add_argument("--timeout", type=int, default=120,
+                    help="per-schema timeout for --ids-from-dir entries")
     ap.add_argument("--jobs", type=int, default=1)
     ap.add_argument("--out", default="tmp/perfbench-diff-lalr")
     ap.add_argument("--summarize-only", action="store_true")
     args = ap.parse_args()
     if args.child:
         child(*args.child)
+    elif args.counts_child:
+        counts_child(*args.counts_child)
     elif args.summarize_only:
-        summarize(args.out)
+        (summarize_counts if args.counts else summarize)(args.out)
     else:
-        parent(args.group, args.jobs, args.out)
+        work = build_work(args.group, args.ids_from_dir, args.timeout)
+        parent(work, args.jobs, args.out, counts=args.counts)
 
 
 if __name__ == "__main__":

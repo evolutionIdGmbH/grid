@@ -90,11 +90,17 @@ def _build_lr1_merged(
     nullable: set[int],
     n_term: int,
     end_id: int,
+    stats: dict | None = None,
 ) -> tuple[list[dict[int, int]], list[set[tuple[int, int, int]]], int]:
     """Canonical LR(1) item sets merged by core -> (trans, items, start_state).
 
     LALR state ids are assigned by first occurrence of each core in the LR(1)
     BFS order; items are the merged (prod, dot, lookahead) sets per state.
+
+    ``stats`` (out-param) receives the construction size counters on
+    completion: lr1_states / lr1_items (canonical states materialized and the
+    sum of their closure sizes — memory-proportional, input-derived) plus
+    lalr_states after the core merge.
     """
     is_terminal = lambda s: s < n_term  # noqa: E731
 
@@ -132,6 +138,7 @@ def _build_lr1_merged(
     start = closure(frozenset({(0, 0, end_id)}))
     lr1_states: dict[frozenset, int] = {start: 0}
     order = [start]
+    items = len(start)  # items materialized: closure sizes at state insertion
     lr1_trans: list[dict[int, int]] = []
     i = 0
     while i < len(order):
@@ -147,6 +154,7 @@ def _build_lr1_merged(
             if nxt not in lr1_states:
                 lr1_states[nxt] = len(order)
                 order.append(nxt)
+                items += len(nxt)
             row[s] = lr1_states[nxt]
         lr1_trans.append(row)
 
@@ -170,6 +178,10 @@ def _build_lr1_merged(
             assert prev is None or prev == merged_of[dst], "core merge produced inconsistent goto"
             merged_trans[m][sym] = merged_of[dst]
 
+    if stats is not None:
+        stats["lr1_states"] = len(order)
+        stats["lr1_items"] = items
+        stats["lalr_states"] = n_states
     return merged_trans, merged_items, merged_of[0]
 
 
@@ -177,6 +189,7 @@ def _lr0_automaton(
     prods: list[tuple[int, tuple[int, ...]]],
     prods_by_lhs: dict[int, list[int]],
     n_term: int,
+    stats: dict | None = None,
 ) -> tuple[list[frozenset[tuple[int, int]]], list[dict[int, int]]]:
     """LR(0) automaton over (prod, dot) items -> (closures, trans).
 
@@ -191,6 +204,10 @@ def _lr0_automaton(
     core discovers exactly the new cores this BFS discovers from that core,
     in the same sorted-symbol order, and later same-core LR(1) states
     discover none.
+
+    ``stats`` (out-param) receives the construction size counters on
+    completion: lr0_states / lr0_items (states materialized and the sum of
+    their closure sizes — memory-proportional, input-derived).
     """
     def closure0(kernel: frozenset[tuple[int, int]]) -> frozenset[tuple[int, int]]:
         out = set(kernel)
@@ -209,6 +226,7 @@ def _lr0_automaton(
     start_kernel = frozenset({(0, 0)})
     states: dict[frozenset[tuple[int, int]], int] = {start_kernel: 0}
     closures = [closure0(start_kernel)]
+    items = len(closures[0])  # items materialized: closure sizes at creation
     trans: list[dict[int, int]] = []
     i = 0
     while i < len(closures):
@@ -223,9 +241,14 @@ def _lr0_automaton(
             nxt = states.get(kernel)
             if nxt is None:
                 nxt = states[kernel] = len(closures)
-                closures.append(closure0(kernel))
+                c = closure0(kernel)
+                closures.append(c)
+                items += len(c)
             row[s] = nxt
         trans.append(row)
+    if stats is not None:
+        stats["lr0_states"] = len(closures)
+        stats["lr0_items"] = items
     return closures, trans
 
 
@@ -354,7 +377,20 @@ def compile_tables(
     identifier_terminals: frozenset[str] = frozenset(),
     *,
     algorithm: str | None = None,
+    stats: dict | None = None,
 ) -> LALRTables:
+    """Build LALRTables for a CACHED projection (module docstring for the
+    algorithm selection).
+
+    ``stats`` (optional out-param, calibration/audit): filled in place with
+    the selected construction's size counters (dp: lr0_states/lr0_items;
+    lr1_merge: lr1_states/lr1_items/lalr_states). The dict is mutated during
+    construction, so it is populated even when this function subsequently
+    raises LALRConflictError (conflicts are detected in the fill stage,
+    after construction). Deliberately NOT stored on LALRTables: the two
+    algorithms count different constructions, and the dp differential
+    compares tables field-by-field.
+    """
     g = proj.base
     if proj.state != "CACHED":
         raise ValueError("compile_tables requires a CACHED (built) RoleProjection")
@@ -390,7 +426,7 @@ def compile_tables(
         prods_by_lhs.setdefault(lhs, []).append(i)
 
     if algorithm == "dp":
-        state_closures, trans = _lr0_automaton(prods, prods_by_lhs, n_term)
+        state_closures, trans = _lr0_automaton(prods, prods_by_lhs, n_term, stats)
         n_states = len(trans)
         start_state = 0
         la_sets = _dp_lookaheads(
@@ -408,7 +444,7 @@ def compile_tables(
                         yield p, la
     else:
         trans, merged_items, start_state = _build_lr1_merged(
-            prods, prods_by_lhs, first, nullable, n_term, end_id
+            prods, prods_by_lhs, first, nullable, n_term, end_id, stats
         )
         n_states = len(trans)
         state_closures = [
