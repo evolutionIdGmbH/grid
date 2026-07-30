@@ -167,6 +167,16 @@ def load_or_build_scanner(grammar: DialectGrammar) -> ScannerDFA:
     if isinstance(hit, ScannerDFA):
         return hit
     dfa = build_scanner(grammar.terminals, grammar.terminal_order)
+    if getattr(dfa, "lazy", False):
+        # store law (P1): persist deterministic artifacts only, never
+        # product-interner state — a LazyProductDFA's states/annotations are
+        # instance-local demand-order (and its locks don't pickle; the old
+        # behavior was a once-per-process put warning). Post-P3 lazy builds
+        # are seconds, not the 87s+ the store would have amortized; persisting
+        # the underlying per-terminal component artifacts (eager TerminalDFA
+        # arenas + component NFA arenas, both deterministic) is the recorded
+        # S3 follow-on.
+        return dfa
     put("scanner", key, dfa)
     return dfa
 
