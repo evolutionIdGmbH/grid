@@ -176,8 +176,11 @@ Artifact-store redeploy warm set (S3, still under the default-off
   attribution: components 2.1-12.6s vs product <=0.8s per family member;
   the breached component's cost IS the attempt, and its LazyTerminalDFA is
   lock-bearing and unpicklable — markers recover what payloads cannot);
-  `trie` (`GRID_PERF_STORE_TRIE`) — TokenTrie keyed by tokenizer
-  fingerprint, fingerprint computed from the same single token_bytes pass a
+  `trie` (`GRID_PERF_STORE_TRIE`) — TokenTrie keyed by (tokenizer
+  fingerprint, `GRID_PERF_SLICER` variant: S2 bakes TrieSlices into the
+  payload at build time, so the flag states never share an entry and the
+  slicer kill switch keeps its full-walk contract cross-process),
+  fingerprint computed from the same single token_bytes pass a
   cold build consumes; `journal` (`GRID_PERF_STORE_JOURNAL`, CANDIDATES
   #20a) — ContextJournal snapshot/restore (walk-miss keys/contexts only,
   never masks) keyed `blake2b(grammar_src)`, restored in the registry under
@@ -189,9 +192,21 @@ Artifact-store redeploy warm set (S3, still under the default-off
   the one-shot degraded-store warning via pickle TypeError); their redeploy
   warmth comes from the component namespace.
 - `_EPOCH_MODULES` now covers every payload-producing source: factored.py,
-  trie/build.py, and the E2 split modules (nfa/rx/subset) whose sources fed
-  scanner artifacts while only dfa.py was hashed — wholesale invalidation
-  on rollout, by design.
+  trie/build.py, grammar/parts.py (P2's schema_src text renderer), and the
+  E2 split modules (nfa/rx/subset) whose sources fed scanner artifacts
+  while only dfa.py was hashed — wholesale invalidation on rollout, by
+  design. `code_epoch()` LOCATES these sources (sys.modules, else
+  find_spec origin) without executing them — importing grid.trie.build
+  would charge numpy's ~20ms import to the first store access, taxing the
+  warm-hit latency the store exists to remove.
+- Failed-build law, stated precisely: the grammar-keyed namespaces
+  (schema_src/scanner/lalr) never persist anything from a failed build, so
+  error outcomes reproduce from real rebuilds; the component namespace
+  keeps components that built VALIDLY even when a sibling terminal or a
+  scanner-level law (empty-match) fails the parent build — its
+  (kind, budget, pattern) identity is grammar-independent, and the failing
+  check re-runs and re-raises identically over partial warm stores
+  (parity-gated).
 - `kernel_fingerprint()` (blake2b of the grid_core binary) reserved-key
   helper; persisted T2 mask blobs (#20b) and RustWalker arenas stay
   EXPLICIT non-goals (key shapes documented in bench/perfbench/DESIGN.md,

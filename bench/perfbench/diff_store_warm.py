@@ -11,8 +11,10 @@ deterministic guide drive, digested:
   drive     per-step (entry_id, mask id count, boundary ids) along K steps of
             follow-the-first-allowed-token from the initial state (MockTokenizer
             byte-fallback vocab) — the mask entry_id parity arm
-  error     class + message text when any stage raises (error parity: failed
-            builds never put, so warm runs must fail identically)
+  error     class + message text when any stage raises (error parity: the
+            grammar-keyed namespaces never persist from a failed build —
+            valid cross-schema COMPONENTS may, by design — so warm runs
+            must fail identically, over exactly such partial stores)
 
 Three legs, one corpus order, workers scrub GRID_PERF_* then apply leg env:
 
