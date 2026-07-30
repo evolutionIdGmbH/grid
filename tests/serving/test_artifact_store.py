@@ -5,6 +5,7 @@ poisoning the underlying builder, never inferred from timing.
 """
 
 import os
+import pathlib
 
 import pytest
 
@@ -95,6 +96,35 @@ def test_envelope_key_mismatch_rejected(cache):
     assert store.get("scanner", "bbb") is None
     assert not stolen.exists()  # unlinked on mismatch
     assert store.get("scanner", "aaa") == ("payload",)
+
+
+@pytest.mark.parametrize("module", [
+    "grid.lexer.factored",   # component + materialized-scanner payload source
+    "grid.trie.build",       # trie namespace payload source
+    "grid.lexer.subset",     # E2 split: subset construction behind every scanner
+    "grid.lexer.nfa",
+    "grid.lexer.rx",
+])
+def test_source_mutation_changes_epoch(module, tmp_path, monkeypatch):
+    """Every payload-producing module participates in code_epoch: mutating its
+    source must roll the epoch (= a fresh store directory, wholesale miss)."""
+    import importlib
+
+    mod = importlib.import_module(module)
+    assert module in store._EPOCH_MODULES
+    store.code_epoch.cache_clear()
+    try:
+        before = store.code_epoch()
+        mutated = tmp_path / "mutated.py"
+        mutated.write_bytes(pathlib.Path(mod.__file__).read_bytes() + b"\n# mutated\n")
+        monkeypatch.setattr(mod, "__file__", str(mutated))
+        store.code_epoch.cache_clear()
+        assert store.code_epoch() != before
+    finally:
+        # never leak a mutated epoch into other tests (lru_cache outlives
+        # monkeypatch teardown)
+        monkeypatch.undo()
+        store.code_epoch.cache_clear()
 
 
 def test_epoch_change_misses(cache, toy_grammar, monkeypatch):

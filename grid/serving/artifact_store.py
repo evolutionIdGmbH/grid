@@ -49,10 +49,20 @@ from grid.lexer.dfa import ScannerDFA, build_scanner
 FORMAT = 2
 
 # Every module whose source participates in producing a stored artifact —
-# broader than the three writer call sites: Terminal.priority and
-# role_shape_hash semantics live in spec.py/projection.py.
+# broader than the writer call sites: Terminal.priority and role_shape_hash
+# semantics live in spec.py/projection.py. factored.py produces stored
+# payloads two ways (ScannerDFA arrays under GRID_PERF_FACTORED_SCANNER via
+# materialize, and the per-terminal component namespace), trie/build.py the
+# trie namespace; rx/nfa/subset are the E2 split of dfa.py — their sources
+# feed every scanner and component payload just as when they lived inside
+# dfa.py. The epoch is a directory name, so adding a module here
+# wholesale-invalidates without a FORMAT bump.
 _EPOCH_MODULES = (
     "grid.lexer.dfa",
+    "grid.lexer.factored",
+    "grid.lexer.nfa",
+    "grid.lexer.rx",
+    "grid.lexer.subset",
     "grid.lalr.compile",
     "grid.jsonschema.compiler",
     "grid.jsonschema.normalize",
@@ -60,6 +70,7 @@ _EPOCH_MODULES = (
     "grid.grammar.spec",
     "grid.grammar.projection",
     "grid.grammar.reduction",
+    "grid.trie.build",
 )
 
 _put_warned = False
