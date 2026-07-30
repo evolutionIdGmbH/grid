@@ -201,6 +201,26 @@ def test_hashcons_debug_oracle(monkeypatch, raw):
     assert perf_flags.hashcons_debug_enabled() == oracle
 
 
+@pytest.mark.parametrize("raw", RAW_VALUES)
+def test_direct_emit_oracle(monkeypatch, raw):
+    _setenv(monkeypatch, "GRID_PERF_DIRECT_EMIT", raw)
+    oracle = os.environ.get("GRID_PERF_DIRECT_EMIT", "0") == "1"
+    assert perf_flags.direct_emit_enabled() == oracle
+
+
+def test_direct_emit_default_is_off(monkeypatch):
+    """P2 bake-off pending: unset must stay the text-path pipeline."""
+    monkeypatch.delenv("GRID_PERF_DIRECT_EMIT", raising=False)
+    assert perf_flags.direct_emit_enabled() is False
+
+
+@pytest.mark.parametrize("raw", RAW_VALUES)
+def test_direct_emit_check_oracle(monkeypatch, raw):
+    _setenv(monkeypatch, "GRID_PERF_DIRECT_EMIT_CHECK", raw)
+    oracle = os.environ.get("GRID_PERF_DIRECT_EMIT_CHECK", "0") == "1"
+    assert perf_flags.direct_emit_check_enabled() == oracle
+
+
 # ------------------------------------------------------- call-time reads
 
 
@@ -241,6 +261,16 @@ def test_every_reader_is_call_time(monkeypatch):
     assert perf_flags.hashcons_debug_enabled() is True
     monkeypatch.setenv("GRID_PERF_HASHCONS_DEBUG", "0")
     assert perf_flags.hashcons_debug_enabled() is False
+
+    monkeypatch.setenv("GRID_PERF_DIRECT_EMIT", "1")
+    assert perf_flags.direct_emit_enabled() is True
+    monkeypatch.setenv("GRID_PERF_DIRECT_EMIT", "0")
+    assert perf_flags.direct_emit_enabled() is False
+
+    monkeypatch.setenv("GRID_PERF_DIRECT_EMIT_CHECK", "1")
+    assert perf_flags.direct_emit_check_enabled() is True
+    monkeypatch.setenv("GRID_PERF_DIRECT_EMIT_CHECK", "0")
+    assert perf_flags.direct_emit_check_enabled() is False
 
 
 # ------------------------------------------------------- leaf import

@@ -38,6 +38,10 @@ Flag table:
                                                             unset =
                                                             "norm,dedupe")
     GRID_PERF_HASHCONS_DEBUG    hashcons_debug_enabled()    == "1"
+    GRID_PERF_DIRECT_EMIT       direct_emit_enabled()       == "1" (default
+                                                            off; P2 bake-off
+                                                            pending)
+    GRID_PERF_DIRECT_EMIT_CHECK direct_emit_check_enabled() == "1"
 
 Contract (enforced by tests/test_perf_flags.py):
 
@@ -137,3 +141,24 @@ def hashcons_debug_enabled() -> bool:
     """GRID_PERF_HASHCONS_DEBUG=1: re-digest every memoized node at the end
     of a normalize() run to catch in-place mutation of shared subtrees."""
     return os.environ.get("GRID_PERF_HASHCONS_DEBUG", "0") == "1"
+
+
+def direct_emit_enabled() -> bool:
+    """GRID_PERF_DIRECT_EMIT: build DialectGrammar objects straight from the
+    compiler's GrammarParts manifest (spec.DialectGrammar.from_parts) in
+    grid.jsonschema.compile_json_schema_grammar, skipping the .grid text
+    render + regex re-parse on schema->grammar compiles. Default off (P2
+    bake-off pending); only "1" enables. Text emission stays the permanent
+    debug/audit path and the differential oracle; artifact-store schema_src
+    HITS keep text -> spec.load regardless of this flag."""
+    return os.environ.get("GRID_PERF_DIRECT_EMIT", "0") == "1"
+
+
+def direct_emit_check_enabled() -> bool:
+    """GRID_PERF_DIRECT_EMIT_CHECK=1: from_parts additionally renders the
+    manifest to text, spec.load()s it, and asserts both paths agree — full
+    grammar identity (start/ignored/terminals/productions/terminal_order/
+    fingerprint) for valid manifests, GrammarInvalid message parity
+    otherwise. The permanent CI oracle against renderer/object-builder
+    drift."""
+    return os.environ.get("GRID_PERF_DIRECT_EMIT_CHECK", "0") == "1"
