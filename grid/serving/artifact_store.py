@@ -238,6 +238,37 @@ def load_or_build_component(pattern: str, is_literal: bool, budget: int | None):
     return comp
 
 
+def journal_key(grammar_src: str) -> str:
+    """The dialect identity: blake2b of the grammar source — the same scope
+    as the registry's T2 pools and journals (one journal per dialect)."""
+    return hashlib.blake2b(grammar_src.encode(), digest_size=16).hexdigest()
+
+
+def load_or_restore_journal(grammar_src: str):
+    """ContextJournal for this dialect, restored from the ``journal``
+    namespace and bound for self-flush when the store + sub-flag are on;
+    otherwise exactly today's fresh in-memory journal. Only ever called from
+    the GRID_ADMIT_WARM=1 wiring (_GuideRegistry._build), so restore is
+    additionally inert without that switch. Payloads are keys/contexts only
+    (tier-i generic/genN tuples, tier-ii ident frozensets) — a restored entry
+    can warm an entry nobody consults, never serve a wrong mask: tier-i only
+    feeds T2-donor adoption and tier-ii feeds exact walks."""
+    from grid.serving.journal import ContextJournal
+
+    journal = ContextJournal()
+    if not (enabled() and perf_flags.store_journal_enabled()):
+        return journal
+    key = journal_key(grammar_src)
+    try:  # warm-hint only: a corrupt payload restores nothing
+        hit = get("journal", key)
+        if hit is not None:
+            journal.restore(hit)
+    except Exception:  # pragma: no cover - defensive
+        pass
+    journal.bind_store(key)
+    return journal
+
+
 def load_or_build_trie(adapter):
     """Drop-in for ``build_trie(adapter)`` (grid/trie/build.py).
 

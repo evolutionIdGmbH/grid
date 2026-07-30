@@ -178,6 +178,11 @@ def admission_warmup(guide, pool, deadline_ms: float | None = None) -> dict:
         done, not_done = wait(critical, timeout=max(0.0, remaining))
         stats["critical_done"] = not not_done
         stats["errors"] = sum(1 for f in done if f.exception() is not None)
+        if journal is not None and hasattr(journal, "flush"):
+            # S3 write-back point: warmup completion is the one lifecycle
+            # moment every admitted template passes through; flush() is a
+            # bound-journal no-op otherwise and never raises
+            journal.flush()
     except Exception as exc:  # blanket guard: warmup must degrade, never raise
         stats["error"] = repr(exc)
     stats["elapsed_ms"] = (time.perf_counter() - t0) * 1e3
@@ -542,6 +547,11 @@ try:  # pragma: no cover - exercised on vllm hosts (next runner session)
             if getattr(self, "_prefetcher", None) is not None:
                 self._prefetcher.shutdown()
                 self._prefetcher = None
+            if getattr(self, "_registry", None) is not None:
+                try:  # S3: persist journals on clean shutdown (best effort)
+                    self._registry.flush_journals()
+                except Exception:
+                    pass
             self._registry = None
 
 except ImportError:  # vllm not installed: the session/core stays importable
