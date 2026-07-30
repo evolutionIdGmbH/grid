@@ -368,6 +368,47 @@ def test_jump_v6_eos_only_mask_and_complete(run_guide, monkeypatch):
     assert s5.jump_tokens() == [] and s6.jump_tokens() == []
 
 
+def test_jump_composes_with_defer_never_blocks(run_guide, monkeypatch):
+    """W6 interplay: with the successor's cold build IN FLIGHT on the
+    prefetch pool, jump_tokens() returns [] promptly (warm-only — the
+    unpublished config peeks cold) without waiting on the build, dropping
+    the prefetch target, or disturbing the defer clock/mask_ready."""
+    import threading
+    import time
+
+    from grid.serving import MaskPrefetcher
+
+    monkeypatch.setenv("GRID_JUMP", "1")
+    monkeypatch.setenv("GRID_DEFER", "1")
+    monkeypatch.setenv("GRID_DEFER_MS", "60000")
+    pf = MaskPrefetcher()
+    s = GridGrammarSession(run_guide, prefetcher=pf)
+    if s._sid is None:
+        pytest.skip("kernel v6 session unavailable (GRID_NO_V6/no kernel)")
+    gate, started = threading.Event(), threading.Event()
+    prod = run_guide.producer
+    orig = prod.prefetch_build
+
+    def gated(w, a):
+        started.set()
+        assert gate.wait(10)
+        return orig(w, a)
+
+    monkeypatch.setattr(prod, "prefetch_build", gated)
+    tok = run_guide.adapter.greedy_tokenize(RUN_LITERAL[:1])
+    assert s.accept_tokens("r", tok) is True and started.wait(10)
+    assert s.mask_ready() is False, "cold build in flight"
+    t0 = time.perf_counter()
+    span = s.jump_tokens()
+    elapsed = time.perf_counter() - t0
+    assert span == [], "unpublished successor must read cold: no jump"
+    assert elapsed < 1.0, "jump must never block on an in-flight build"
+    assert s._pf_target is not None and s.mask_ready() is False, \
+        "jump must not consume the prefetch target or the defer state"
+    gate.set()
+    pf.shutdown()
+
+
 def test_jump_draft_verification_flow(run_guide, monkeypatch):
     """The manager dance, emulated: jump -> per-position fills along the
     span (each row is exactly {span[i]} — the acceptance-rate-1.0 property)
