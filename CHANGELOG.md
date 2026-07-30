@@ -165,7 +165,9 @@ the realistic saving rides on bonus tokens; byte-level JF (~10x the mass)
 stays the recorded v2 deferral. Mode-2 logits-processor route untouched
 (§4.5 rule 3: singleton-degrade, never a unioned span mask).
 
-Kernel-resident lazy scanner (P1, `GRID_PERF_KERNEL_LAZY`, grid_core v8):
+Kernel-resident lazy scanner (P1, `GRID_PERF_KERNEL_LAZY`, default ON with
+a v8+ grid_core — `=0` is the kill switch restoring the wave-B lazy regime
+byte-for-byte; older kernels and `GRID_NO_RUST=1` keep it regardless):
 lazy factored DFAs (the over-budget LazyProductDFA regime P3 created) now
 serve trie walks through the Rust kernel instead of pure-Python `_walk_py`.
 The walker's scanner becomes a backend enum behind the four accessor

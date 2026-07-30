@@ -632,8 +632,9 @@ phase-2 follow-on); per-byte NFA stepping vs dense lookup (memoized rows,
 cap tuning).
 
 POSTSCRIPT (Wave C, landed; local macOS measurements, full-corpus republish
-still owed): shipped as grid_core v8 + `GRID_PERF_KERNEL_LAZY`
-(BAKEOFF.md P1 postscript carries the gate evidence). Step-1 bound held:
+still owed): shipped as grid_core v8 + `GRID_PERF_KERNEL_LAZY`, default ON
+post-gates with `=0` as the kill switch (BAKEOFF.md P1 postscript carries
+the gate evidence). Step-1 bound held:
 71-7,265 touched product states / 26-2,140 component subsets across the
 nine family schemas on full-instance full-vocab walks (predicted 10^3-10^4;
 intern cap 262,144 = ~36x worst observed). Mask parity: per-token digests

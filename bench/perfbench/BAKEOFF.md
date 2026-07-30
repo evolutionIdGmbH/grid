@@ -398,8 +398,9 @@ int-id handoff (CANDIDATES id 6) now has a clean seam via GrammarParts.
 ## Postscript: P1 kernel-resident lazy scanner (post-v0.3.0, wave C) — grid_core v8
 
 The lazy serving gap P3 left is closed: over-budget schemas (LazyProductDFA)
-now walk the kernel under `GRID_PERF_KERNEL_LAZY` with a v8+ grid_core,
-instead of pure-Python `_walk_py`. The scanner behind the walker is a
+now walk the kernel under `GRID_PERF_KERNEL_LAZY` (default ON post-gates,
+`=0` the kill switch; == "1" value grammar per the E3 convention) with a
+v8+ grid_core, instead of pure-Python `_walk_py`. The scanner behind the walker is a
 backend enum at the four accessor touchpoints — `Dense` is v7 verbatim,
 `Lazy` interns sparse (tid, comp-state) product tuples and per-component
 subset bitsets on demand (one build mutex for mutation, lock-free reads via
