@@ -38,7 +38,15 @@ jobs:
       - name: Tests (legacy kill-switch leg — pre-0.3.0 flag-off configuration)
         run: >
           GRID_PERF_FACTORED_SCANNER=0 GRID_PERF_LALR_DP=0 GRID_PERF_HASHCONS=0
+          GRID_PERF_DIRECT_EMIT=0
           pytest tests/ -q
+      - name: Tests (direct-emit render+reload oracle, P2)
+        # every from_parts also renders the manifest and spec.load()s it,
+        # asserting full grammar identity (AssertionError on any renderer/
+        # object-builder drift) — the permanent live oracle
+        run: >
+          GRID_PERF_DIRECT_EMIT_CHECK=1
+          pytest tests/grammar tests/jsonschema_bridge -q
       - name: Tests (factored lazy regime, pure-spec walk)
         # budget 0 forces every scanner onto the LazyProductDFA facade; crossed
         # with GRID_NO_RUST so kernel-only suites skip instead of asserting v7

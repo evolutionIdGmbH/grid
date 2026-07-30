@@ -44,6 +44,33 @@ class RoleProjection:
         keys = frozenset(_prod_key(p) for p in base.productions)
         return RoleProjection(base=base, keep=keys, role_name=role_name)
 
+    @staticmethod
+    def full_built(base: DialectGrammar, role_name: str = "full") -> RoleProjection:
+        """Trusted fast path: full(base).build() without the rebuild.
+
+        For the FULL projection of a validated grammar, compose/reduce/
+        verify are identity operations — spec._validate asserted
+        reducedness (useless_symbols empty, which implies start
+        productivity), and reduce_productions on a reduced grammar returns
+        the production list unchanged — so only register() does real work.
+        role_shape_hash is byte-identical to full(base).build()'s (same
+        base.fingerprint, same production list). The statechart still walks
+        DECLARED -> ... -> CACHED, so compile_tables' state assert holds.
+
+        keep is not materialized (compose is skipped; the projection IS the
+        full production list by construction) — P2 direct-emission callers
+        (grid.jsonschema.compile_json_schema_grammar consumers, bench
+        harnesses under GRID_PERF_DIRECT_EMIT) use this; RBAC subset
+        projections must keep using full()/build()."""
+        if base.state != "FROZEN":
+            raise GrammarInvalid("projection requires a FROZEN dialect grammar")
+        proj = RoleProjection(base=base, keep=frozenset(), role_name=role_name)
+        proj.productions = list(base.productions)
+        proj._sc.fire("compose_ok")
+        proj._sc.fire("reduce_ok")
+        proj._sc.fire("verify_ok")
+        return proj.register()
+
     def compose(self) -> RoleProjection:
         if self.base.state != "FROZEN":
             self._sc.fire("compose_error")

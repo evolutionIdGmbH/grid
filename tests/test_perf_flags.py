@@ -201,6 +201,61 @@ def test_hashcons_debug_oracle(monkeypatch, raw):
     assert perf_flags.hashcons_debug_enabled() == oracle
 
 
+@pytest.mark.parametrize("raw", RAW_VALUES)
+def test_direct_emit_oracle(monkeypatch, raw):
+    _setenv(monkeypatch, "GRID_PERF_DIRECT_EMIT", raw)
+    oracle = os.environ.get("GRID_PERF_DIRECT_EMIT", "1") == "1"
+    assert perf_flags.direct_emit_enabled() == oracle
+
+
+def test_direct_emit_default_is_on(monkeypatch):
+    """Default ON since the P2 bake-off; "0" is the kill switch restoring
+    text -> spec.load."""
+    monkeypatch.delenv("GRID_PERF_DIRECT_EMIT", raising=False)
+    assert perf_flags.direct_emit_enabled() is True
+    monkeypatch.setenv("GRID_PERF_DIRECT_EMIT", "0")
+    assert perf_flags.direct_emit_enabled() is False
+
+
+@pytest.mark.parametrize("raw", RAW_VALUES)
+def test_direct_emit_check_oracle(monkeypatch, raw):
+    _setenv(monkeypatch, "GRID_PERF_DIRECT_EMIT_CHECK", raw)
+    oracle = os.environ.get("GRID_PERF_DIRECT_EMIT_CHECK", "0") == "1"
+    assert perf_flags.direct_emit_check_enabled() == oracle
+
+
+@pytest.mark.parametrize("raw", RAW_VALUES)
+def test_slicer_oracle(monkeypatch, raw):
+    _setenv(monkeypatch, "GRID_PERF_SLICER", raw)
+    # == "1" grammar, default OFF (pre-H100-stamp disposition: the flip to
+    # default-on is a separate, stamped change)
+    oracle = os.environ.get("GRID_PERF_SLICER", "0") == "1"
+    assert perf_flags.slicer_enabled() == oracle
+    if raw in (None, "", "0", "true", "2", "00"):
+        assert perf_flags.slicer_enabled() is False
+
+
+def test_slicer_default_is_off(monkeypatch):
+    monkeypatch.delenv("GRID_PERF_SLICER", raising=False)
+    assert perf_flags.slicer_enabled() is False
+
+
+@pytest.mark.parametrize("raw", RAW_VALUES)
+def test_jump_oracle(monkeypatch, raw):
+    _setenv(monkeypatch, "GRID_JUMP", raw)
+    # S1 serving jump-forward lever, born as a perf_flags reader (post-E1
+    # discipline): strict == "1", default off — "" / "true" / "2" are OFF
+    oracle = os.environ.get("GRID_JUMP", "0") == "1"
+    assert perf_flags.jump_enabled() == oracle
+    if raw in ("", "true", "2", "00", "0", None):
+        assert perf_flags.jump_enabled() is False
+
+
+def test_jump_default_is_off(monkeypatch):
+    monkeypatch.delenv("GRID_JUMP", raising=False)
+    assert perf_flags.jump_enabled() is False
+
+
 @pytest.mark.parametrize("flag,reader", [
     ("GRID_PERF_STORE_COMPONENTS", perf_flags.store_components_enabled),
     ("GRID_PERF_STORE_TRIE", perf_flags.store_trie_enabled),
@@ -274,6 +329,26 @@ def test_every_reader_is_call_time(monkeypatch):
     assert perf_flags.hashcons_debug_enabled() is True
     monkeypatch.setenv("GRID_PERF_HASHCONS_DEBUG", "0")
     assert perf_flags.hashcons_debug_enabled() is False
+
+    monkeypatch.setenv("GRID_PERF_DIRECT_EMIT", "1")
+    assert perf_flags.direct_emit_enabled() is True
+    monkeypatch.setenv("GRID_PERF_DIRECT_EMIT", "0")
+    assert perf_flags.direct_emit_enabled() is False
+
+    monkeypatch.setenv("GRID_PERF_DIRECT_EMIT_CHECK", "1")
+    assert perf_flags.direct_emit_check_enabled() is True
+    monkeypatch.setenv("GRID_PERF_DIRECT_EMIT_CHECK", "0")
+    assert perf_flags.direct_emit_check_enabled() is False
+
+    monkeypatch.setenv("GRID_PERF_SLICER", "1")
+    assert perf_flags.slicer_enabled() is True
+    monkeypatch.setenv("GRID_PERF_SLICER", "0")
+    assert perf_flags.slicer_enabled() is False
+
+    monkeypatch.setenv("GRID_JUMP", "1")
+    assert perf_flags.jump_enabled() is True
+    monkeypatch.setenv("GRID_JUMP", "0")
+    assert perf_flags.jump_enabled() is False
 
     for flag, reader in [
         ("GRID_PERF_STORE_COMPONENTS", perf_flags.store_components_enabled),

@@ -10,8 +10,12 @@ Warm deployments reload compile artifacts instead of rebuilding them:
 - namespace ``component`` (S3): (kind, budget, pattern) -> pickled
   TerminalDFA or a breach marker — CROSS-SCHEMA (patterns recur corpus-wide),
   sub-flag GRID_PERF_STORE_COMPONENTS;
-- namespace ``trie`` (S3): tokenizer fingerprint -> pickled TokenTrie,
-  sub-flag GRID_PERF_STORE_TRIE;
+- namespace ``trie`` (S3): (tokenizer fingerprint, slicer variant) ->
+  pickled TokenTrie, sub-flag GRID_PERF_STORE_TRIE; the S2 slicer flag is a
+  build-time input (TrieSlices are baked into the payload), so each flag
+  state has its own entry — a slice-carrying trie must never leak into a
+  slicer-off process (whose kill-switch contract is the full walk), nor the
+  reverse;
 - namespace ``journal`` (S3): blake2b(grammar_src) -> ContextJournal
   snapshot (walk-miss keys/contexts only, never masks), sub-flag
   GRID_PERF_STORE_JOURNAL; timing-only by construction.
@@ -68,7 +72,9 @@ FORMAT = 2
 # materialize, and the per-terminal component namespace), trie/build.py the
 # trie namespace; rx/nfa/subset are the E2 split of dfa.py — their sources
 # feed every scanner and component payload just as when they lived inside
-# dfa.py. The epoch is a directory name, so adding a module here
+# dfa.py; grammar/parts.py renders the schema_src TEXT payload on P2
+# direct-emission store misses (render_text), so an emitter change must
+# evict stored text. The epoch is a directory name, so adding a module here
 # wholesale-invalidates without a FORMAT bump.
 _EPOCH_MODULES = (
     "grid.lexer.dfa",
@@ -80,6 +86,7 @@ _EPOCH_MODULES = (
     "grid.jsonschema.compiler",
     "grid.jsonschema.normalize",
     "grid.jsonschema.rx",
+    "grid.grammar.parts",
     "grid.grammar.spec",
     "grid.grammar.projection",
     "grid.grammar.reduction",
@@ -315,12 +322,22 @@ def load_or_restore_journal(grammar_src: str):
 def load_or_build_trie(adapter):
     """Drop-in for ``build_trie(adapter)`` (grid/trie/build.py).
 
-    Namespace ``trie`` keyed by the tokenizer fingerprint. The fingerprint is
-    computed from the (token bytes, id) table — the trie's SOLE input — via
-    the same single pass a cold build consumes, so a hit costs one
-    token_bytes iteration + unpickle and a miss never iterates twice. The
-    pure-Python DFS build this skips measured 178 ms on gpt2/50k vocab and
-    runs once per process on the first-request path."""
+    Namespace ``trie`` keyed by (tokenizer fingerprint, slicer variant). The
+    fingerprint is computed from the (token bytes, id) table — the build's
+    SOLE input besides the S2 flag — via the same single pass a cold build
+    consumes, so a hit costs one token_bytes iteration + unpickle and a miss
+    never iterates twice. The pure-Python DFS build this skips measured
+    178 ms on gpt2/50k vocab and runs once per process on the first-request
+    path.
+
+    GRID_PERF_SLICER is read at BUILD time and bakes TrieSlices into the
+    returned object, so the key carries the flag state: without it a
+    slicer-on deployment's entry would hand a slice-carrying trie to a
+    slicer-off process (voiding the kill switch's full-walk contract
+    cross-process), and a slicer-off entry would silently disable a
+    slicer-on deployment. Both variants coexist per fingerprint; within one
+    variant the payload is deterministic (coverage-based slices=None under
+    s1 is a function of the entries, hence of the fingerprint)."""
     from grid.trie.build import (
         TokenTrie,
         _build_from_entries,
@@ -334,11 +351,12 @@ def load_or_build_trie(adapter):
         return build_trie(adapter)
     entries = _token_entries(adapter)
     fp = _entries_fingerprint(entries)
-    hit = get("trie", fp)
+    key = f"{fp}:{'s1' if perf_flags.slicer_enabled() else 's0'}"
+    hit = get("trie", key)
     if isinstance(hit, TokenTrie) and hit.tokenizer_fingerprint == fp:
         return hit
     trie = _build_from_entries(entries)
-    put("trie", fp, trie)
+    put("trie", key, trie)
     return trie
 
 

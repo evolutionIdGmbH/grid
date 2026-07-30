@@ -1,0 +1,93 @@
+From: GRID authors <mohsen.arjmandi@evolutionid.com>
+Subject: [Draft PR] [Core] Structured output: let a grammar contribute
+ forced-continuation draft tokens (jump_tokens hook + scheduler injection)
+
+DRAFT — NOT APPLIED by bench/vllm_grid_patch.py 1:1 (the downstream site 5
+is the minimal-textual-footprint version of the same injection). This is
+the upstream vLLM PR shape that retires patch site 5 ("grid jump-forward").
+Hunks are written against vLLM v0.24.0 and ride the same PR vehicle as
+bench/vllm_upstream_is_ready.patch. RE-VERIFY hunk context on the pinned
+tree before mailing: unlike is_ready (site 4), the update_from_output
+context below has not been dry-run against the 0.24.0 sdist from this
+workstation.
+
+Motivation
+----------
+A structured-output grammar often knows the next k tokens with certainty:
+wherever its token bitmask has cardinality 1, any sampler must emit that
+one token, yet each such token still costs a full engine step. Those
+forced runs (JSON structural keys, SQL keywords/punctuation, closing
+brackets) are exactly the compute shape speculative decoding already
+handles: verify k proposed tokens under per-position bitmasks in one
+forward pass. A grammar-proposed forced run is a draft with GUARANTEED
+acceptance — at each draft position the bitmask admits exactly one token,
+so verification cannot reject it under any sampling configuration
+(temperature, top-p, seeded multinomial). No drafter model is required.
+
+Mechanism
+---------
+1. StructuredOutputGrammar.jump_tokens() -> list[int], default [] (non-
+   abstract: existing backends are unaffected). Contract: the returned ids
+   are, position by position, the ONLY token the grammar's own
+   fill_bitmask would allow after the previous ones; the call is
+   state-neutral (the manager advances/rolls back the grammar itself
+   around per-position fills, exactly as it does for drafter proposals).
+2. Scheduler.update_from_output: after grammar.accept_tokens, install
+   jump_tokens() as request.spec_token_ids. When a drafter proposal
+   exists for the request, the existing validate_tokens assignment below
+   overwrites it — proposer behavior is unchanged.
+3. No new config: backends that do not override jump_tokens keep [] and
+   nothing changes; scheduling/verification of the injected ids reuses the
+   existing spec-token plumbing (scheduled_spec_decode_tokens,
+   per-position bitmask rows, rejection-sampler acceptance).
+
+Soundness: injected ids are verified under the grammar's own per-position
+bitmasks like any draft; a buggy backend span is rejected at verification,
+never emitted. Distribution-exactness at forced positions is trivial (the
+constrained distribution is a point mass).
+---
+ vllm/v1/core/sched/scheduler.py              | 12 ++++++++++++
+ vllm/v1/structured_output/backend_types.py   | 12 ++++++++++++
+ 2 files changed, 24 insertions(+)
+
+diff --git a/vllm/v1/structured_output/backend_types.py b/vllm/v1/structured_output/backend_types.py
+--- a/vllm/v1/structured_output/backend_types.py
++++ b/vllm/v1/structured_output/backend_types.py
+@@ -96,6 +96,18 @@ class StructuredOutputGrammar(ABC):
+         """
+         return True
+
++    def jump_tokens(self) -> list[int]:
++        """Forced continuation from the grammar's current state: token ids
++        that are, position by position, the ONLY id the grammar's bitmask
++        would allow. The scheduler MAY install them as the request's draft
++        tokens (verified like any speculative proposal — acceptance is
++        certain at forced positions, so this is parity-exact under any
++        sampler). Must be state-neutral. Backends that cannot cheaply
++        compute forced runs keep this default.
++        """
++        return []
++
+     @abstractmethod
+     def reset(self):
+         """
+diff --git a/vllm/v1/core/sched/scheduler.py b/vllm/v1/core/sched/scheduler.py
+--- a/vllm/v1/core/sched/scheduler.py
++++ b/vllm/v1/core/sched/scheduler.py
+@@ -1002,6 +1002,18 @@ class Scheduler(SchedulerInterface):
+                 request.structured_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
+                     req_id, new_token_ids)
+
++                # Structured output jump-forward: a grammar's forced
++                # continuation (positions whose bitmask admits exactly one
++                # token) is a draft with guaranteed acceptance — verify the
++                # whole run in one step instead of one step per token. When
++                # a drafter proposal exists, the validate_tokens assignment
++                # below overwrites this one (proposer behavior unchanged);
++                # backends default to [] (no-op).
++                jump = request.structured_output_request.grammar.jump_tokens()  # type: ignore[union-attr]
++                if jump or not self.vllm_config.speculative_config:
++                    request.spec_token_ids = jump
++
+             if num_nans_in_logits is not None and req_id in num_nans_in_logits:
+                 request.num_nans_in_logits = num_nans_in_logits[req_id]

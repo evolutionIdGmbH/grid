@@ -399,6 +399,35 @@ def test_trie_fingerprint_key_separates_tokenizers(cache, sql_tokenizer,
     assert len([p for p in _bins(cache) if p.parent.name == "trie"]) == 2
 
 
+def test_trie_slicer_variant_key_separation(cache, monkeypatch):
+    """S2 interplay: GRID_PERF_SLICER is a BUILD-time input baked into the
+    payload (TrieSlices), so the namespace keys per flag state. A slicer-off
+    process must never be served a slice-carrying trie (its kill switch
+    promises the full walk byte-for-byte), and a slicer-on process must not
+    be silently downgraded by an s0 entry; within a variant, hits stay warm."""
+    from grid.models.tokenizer_adapter import MockTokenizer
+    from grid.trie import build as tbuild
+
+    # mostly JSON-string-safe spellings so the s1 build really carries slices
+    tok = MockTokenizer(extra_tokens=(
+        "foo", "bar", "da", "ta", " ", "zz", "-1", "12",
+        '"', 'a"b', "x\\y", "{", "}", ":", ",",
+    ))
+    monkeypatch.delenv("GRID_PERF_SLICER", raising=False)
+    off = store.load_or_build_trie(tok)
+    assert off.slices is None
+    monkeypatch.setenv("GRID_PERF_SLICER", "1")
+    on = store.load_or_build_trie(tok)  # separate entry, not the s0 hit
+    assert on.slices is not None
+    assert on.tokenizer_fingerprint == off.tokenizer_fingerprint
+    assert len([p for p in _bins(cache) if p.parent.name == "trie"]) == 2
+    # both variants warm now: the builder must not run in either flag state
+    monkeypatch.setattr(tbuild, "_build_from_entries", _boom)
+    assert store.load_or_build_trie(tok).slices is not None
+    monkeypatch.delenv("GRID_PERF_SLICER", raising=False)
+    assert store.load_or_build_trie(tok).slices is None
+
+
 def test_trie_warm_mask_parity(cache, sql_source, sql_tokenizer, monkeypatch):
     """Masks are pure functions of (tables, dfa, trie): a store-warm trie must
     yield token-for-token identical instructions to a flag-off build along a

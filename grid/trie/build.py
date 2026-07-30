@@ -9,6 +9,15 @@ buffer grid_core consumes zero-copy at M4. Node packing (8 bytes)::
 
 The root is virtual: the array is the concatenation of the top-level subtrees.
 Special tokens (E6) are excluded — EOS enters masks only via SS6 step 7's union.
+
+S2 slicer (GRID_PERF_SLICER=1): the vocabulary is additionally partitioned by
+the JSON-string-safe byte class into ``TrieSlices`` — one precomputed sorted
+id array for the tokens spelled entirely inside the class (96% of Llama-3.1)
+plus a rest-trie over the remaining tokens, in the same DFS format. The walk
+(grid/trie/walk.py, grid_core walk_auto) proves slice containment structurally
+per configuration and, on success, skips the sliced tokens' subtrees entirely:
+``ci = merge(slice ids, rest walk)`` with CD groups only from the rest-trie.
+Alias groups land wholly on one side because assignment is by spelling.
 """
 
 from __future__ import annotations
@@ -17,7 +26,49 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from grid import perf_flags
 from grid.errors import TrieBuildError
+
+# The slice byte class: bytes legal inside a JSON string body — everything
+# except '"' (0x22), '\\' (0x5C) and the C0 controls (0x00-0x1F). Exactly the
+# [^"\\\x00-\x1f] class of grid.jsonschema.compiler.STRING_RX, so plain
+# STRING-interior scanner states loop on every class byte and the containment
+# proof can fire; bounded/pattern-constrained string terminals go DEAD on some
+# class byte and fall back to the full walk (proof-or-walk, never wrong).
+JSON_STRING_SAFE = frozenset(
+    b for b in range(256) if b >= 0x20 and b != 0x22 and b != 0x5C
+)
+
+# Slice construction is skipped (slices=None, logged) below this fraction of
+# sliceable tokens: a vocab that mostly fails the spelling test would pay the
+# proof + rest-walk plumbing for no skippable mass (SQL-like grammars still
+# see slices=None per-walk fallback semantics either way).
+MIN_COVERAGE = 0.5
+
+
+@dataclass(frozen=True)
+class TrieSlices:
+    """S2 slicer tables, built once per tokenizer alongside the trie.
+
+    - ``class_bytes``: the slice byte class (spelling test + closure alphabet).
+    - ``class_words``: the same class as a 256-bit bitmap, 4 little-endian u64
+      words (the kernel upload format).
+    - ``min_ids``: sorted node token ids (smallest alias per spelling) of the
+      sliced tokens — the Python-spec walk's ci contribution, mirroring the
+      per-node ids ``_walk_py`` emits (consumers alias-expand downstream).
+    - ``ids``: sorted alias-COMPLETE int32 array of every sliced token id —
+      the kernel's ci contribution (kernel ci is alias-expanded in-kernel).
+    - ``rest_nodes``: DFS uint64 node array over the non-sliced tokens only,
+      exact same packing as TokenTrie.nodes; walked with the standard walk.
+    - ``coverage``: sliced fraction of the vocabulary (build-time log line).
+    """
+
+    class_bytes: frozenset[int]
+    class_words: tuple[int, int, int, int]
+    min_ids: tuple[int, ...]
+    ids: np.ndarray            # int32, sorted, alias-complete
+    rest_nodes: np.ndarray     # uint64, DFS-contiguous
+    coverage: float
 
 
 @dataclass(frozen=True)
@@ -28,6 +79,7 @@ class TokenTrie:
     # tokens with byte-identical spellings: node carries the smallest id; the mask
     # must include every alias (completeness — a mask over ids, not spellings)
     aliases: dict[int, tuple[int, ...]] = None  # type: ignore[assignment]
+    slices: TrieSlices | None = None  # S2 slicer tables (GRID_PERF_SLICER=1)
 
     @staticmethod
     def unpack(word: int) -> tuple[int, int, int]:
@@ -70,19 +122,10 @@ def _entries_fingerprint(entries: list[tuple[bytes, int]]) -> str:
     return h.hexdigest()
 
 
-def build_trie(adapter) -> TokenTrie:
-    """Build from TokenizerAdapter.token_bytes exclusively (E5)."""
-    return _build_from_entries(_token_entries(adapter))
-
-
-def _build_from_entries(entries: list[tuple[bytes, int]]) -> TokenTrie:
-    # group byte-identical spellings; the trie node carries the smallest id
-    by_bytes: dict[bytes, list[int]] = {}
-    for bs, tid in entries:
-        by_bytes.setdefault(bs, []).append(tid)
-    aliases = {min(ids): tuple(sorted(ids)) for ids in by_bytes.values() if len(ids) > 1}
-
-    # nested dict trie: byte -> [token_id, children]
+def _dfs_words(entries: list[tuple[bytes, int]]) -> list[int]:
+    """entries [(spelling, tid)] -> packed DFS node words (the format above).
+    Byte-identical to the historical inline build: nested insert keeping the
+    smallest tid per exact spelling, children emitted in ascending byte order."""
     root: dict[int, list] = {}
     for bs, tid in entries:
         cur = root
@@ -108,10 +151,68 @@ def _build_from_entries(entries: list[tuple[bytes, int]]) -> TokenTrie:
 
     for b in sorted(root):
         emit(b, root[b])
+    return words
+
+
+def _build_slices(entries: list[tuple[bytes, int]]) -> TrieSlices | None:
+    """Partition entries by JSON_STRING_SAFE spelling -> TrieSlices, or None
+    when coverage is too low to be worth the proof machinery (logged) or the
+    partition is degenerate (no rest tokens would mean an empty rest-trie —
+    kept anyway; no sliced tokens means nothing to skip)."""
+    safe: list[tuple[bytes, int]] = []
+    rest: list[tuple[bytes, int]] = []
+    for bs, tid in entries:
+        (safe if all(b in JSON_STRING_SAFE for b in bs) else rest).append((bs, tid))
+    coverage = len(safe) / len(entries)
+    if coverage < MIN_COVERAGE or not safe:
+        import logging
+
+        logging.getLogger("grid.trie").info(
+            "slicer: coverage %.1f%% below %.0f%% - slices skipped",
+            100 * coverage, 100 * MIN_COVERAGE)
+        return None
+    words = [0, 0, 0, 0]
+    for b in JSON_STRING_SAFE:
+        words[b >> 6] |= 1 << (b & 63)
+    # min_ids: the trie-node ids (smallest alias per spelling) — what the
+    # full walk's per-node tid field would emit; ids: every alias, the
+    # kernel's post-expansion form. Both sorted (merge order contract).
+    by_bytes: dict[bytes, int] = {}
+    for bs, tid in safe:
+        cur = by_bytes.get(bs)
+        if cur is None or tid < cur:
+            by_bytes[bs] = tid
+    return TrieSlices(
+        class_bytes=JSON_STRING_SAFE,
+        class_words=tuple(words),
+        min_ids=tuple(sorted(by_bytes.values())),
+        ids=np.array(sorted(tid for _bs, tid in safe), dtype=np.int32),
+        rest_nodes=np.array(_dfs_words(rest), dtype=np.uint64),
+        coverage=coverage,
+    )
+
+
+def build_trie(adapter) -> TokenTrie:
+    """Build from TokenizerAdapter.token_bytes exclusively (E5)."""
+    return _build_from_entries(_token_entries(adapter))
+
+
+def _build_from_entries(entries: list[tuple[bytes, int]]) -> TokenTrie:
+    """The build behind build_trie, from a prepared entries table (the
+    artifact-store loader calls this on a trie-namespace miss, after having
+    fingerprinted the same table). Reads perf_flags.slicer_enabled() at call
+    time: TrieSlices are BAKED INTO the returned object, which is why the
+    store keys the trie namespace per slicer variant."""
+    # group byte-identical spellings; the trie node carries the smallest id
+    by_bytes: dict[bytes, list[int]] = {}
+    for bs, tid in entries:
+        by_bytes.setdefault(bs, []).append(tid)
+    aliases = {min(ids): tuple(sorted(ids)) for ids in by_bytes.values() if len(ids) > 1}
 
     return TokenTrie(
-        nodes=np.array(words, dtype=np.uint64),
+        nodes=np.array(_dfs_words(entries), dtype=np.uint64),
         n_tokens=len(entries),
         tokenizer_fingerprint=_entries_fingerprint(entries),
         aliases=aliases,
+        slices=_build_slices(entries) if perf_flags.slicer_enabled() else None,
     )

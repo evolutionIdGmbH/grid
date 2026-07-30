@@ -370,6 +370,31 @@ class GridGuide:
             cur = self._advance(cur, int(ids[0]), audit=False)
         return span
 
+    def forced_run(self, state: GridState) -> list[int]:
+        """S1 public surface over _forced_span: the maximal forced
+        (singleton-mask) token run from `state`, or [] when the position is
+        not forced. Exactly the chain get_next_instruction emits as a
+        Write span at a singleton NON-eos mask; the eos-flavored Write
+        cases (COMPLETE re-emission, a mask of exactly {eos}) return [] —
+        a serving jump never proposes eos, it lets the normal sampling
+        step end the request (DESIGN.md §4.5).
+
+        Pure query: advances run audit=False (peeked `_pending` entries are
+        left intact, no audit records), `state` itself is untouched
+        (persistent states), and no session/loop bookkeeping exists at this
+        level. Cold masks along the chain ARE walked (guide level has no
+        warm gate; the kernel-session path in
+        grid/models/vllm_structured.py enforces warm-only chaining)."""
+        if state.status == COMPLETE:
+            return []
+        ids, _ = self._mask_ids(state)
+        if len(ids) != 1:
+            return []
+        first = int(ids[0])
+        if first == self.eos_token_id:
+            return []
+        return self._forced_span(state, first)
+
     def _completion_tokens(self, state: GridState) -> list[int] | None:
         """Concrete minimal completion: finalize remainder, stack completion, +EOS."""
         if self.reserve is None:

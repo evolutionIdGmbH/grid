@@ -331,7 +331,8 @@ GRID_NO_RUST=1 .venv/bin/pytest tests/ -q         # force the executable-spec pa
 .venv-bench/bin/python bench/r_microharness.py --quick   # requirement-R harness
 ```
 
-**GRID_PERF_* flags** (`grid/perf_flags.py` is the single source of truth;
+**Performance flags** (`grid/perf_flags.py` is the single source of truth
+for every `GRID_PERF_*` flag AND every post-E1 lever regardless of prefix;
 grammars tested in `tests/test_perf_flags.py`). Since the 0.3.0 epoch's
 full-corpus run the compile-path winners are DEFAULT-ON, each with an env
 kill switch that restores the legacy path byte-identically:
@@ -344,6 +345,10 @@ kill switch that restores the legacy path byte-identically:
 | `GRID_PERF_ARTIFACT_STORE` | off | any value but `0` enables; default-on deferred until a warm-hit p50 measurement (BAKEOFF F2: +5-7ms cold per fast build) |
 | `GRID_PERF_FACTORED_BUDGET` | 20000 | product-state budget (tuning knob, not a flag): over budget the scanner serves the LazyProductDFA facade |
 | `GRID_PERF_COMPONENT_BUDGET` | 16384 | per-terminal component state budget (P3): over budget the terminal becomes a demand-interned LazyTerminalDFA and the scanner skips straight to the lazy product (the substring-union family — 5 former compile timeouts — compiles in seconds); `=0` disables the cap, restoring eager component builds and the family hang |
+| `GRID_PERF_DIRECT_EMIT` | on | `=0` restores text emission + `spec.load` re-parse in `compile_json_schema_grammar` (P2); text remains the debug/audit form (`grid.grammar.parts.render_text`) and the differential oracle. Grammar-object callers only — the text API `compile_json_schema` and serving (`vllm_processor` receives grammar text) are flag-independent |
+| `GRID_PERF_DIRECT_EMIT_CHECK` | off | `=1`: every `from_parts` also renders + reloads the text and asserts full grammar identity (CI oracle leg; AssertionError on renderer/object-builder drift) |
+| `GRID_PERF_SLICER` | off | `=1` enables the tokenizer slicer (S2): build_trie partitions the vocab by the JSON-string-safe byte class (96.2% of Llama-3.1 tokens) into a precomputed slice-id array + rest-trie, and the walk skips the sliced subtrees whenever a structural containment proof passes (string-interior cold walks 6.8ms -> 0.27ms, byte-identical output incl. v7 blob + entry_id; proof failure = today's full walk). Default-on awaits the H100 serving stamp |
+| `GRID_JUMP` | off | `=1` enables serving jump-forward (S1): `GridGrammarSession.jump_tokens()` emits forced singleton-mask runs as draft tokens (vLLM patch site 5); off = strict no-op. Stays off until the box bake (greedy token-parity gate) passes |
 | `GRID_PERF_STORE_COMPONENTS` | on (under the store master) | S3 sub-flag of `GRID_PERF_ARTIFACT_STORE`: per-terminal component namespace (cross-schema TerminalDFA payloads + breach markers); `=0` restores memo-only component builds |
 | `GRID_PERF_STORE_TRIE` | on (under the store master) | S3 sub-flag: TokenTrie namespace keyed by tokenizer fingerprint; `=0` restores the per-process trie build |
 | `GRID_PERF_STORE_JOURNAL` | on (under the store master) | S3 sub-flag: ContextJournal persistence (walk-miss keys/contexts only, never masks; additionally inert without `GRID_ADMIT_WARM=1`); `=0` restores in-memory-only journals |
