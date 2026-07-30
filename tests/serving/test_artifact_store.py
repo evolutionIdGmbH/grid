@@ -66,6 +66,21 @@ def test_schema_src_roundtrip(cache, monkeypatch):
     assert isinstance(warm_rec, set)
 
 
+def test_lazy_scanner_never_persisted(cache, toy_grammar, monkeypatch):
+    """Store law (P1): product-interner state is never persisted. Forced-lazy
+    builds (component budget 1) return the facade and write NO entry — and
+    emit no put-failed warning (the pre-P1 behavior pickled the facade and
+    warned on its locks)."""
+    import warnings as _warnings
+
+    monkeypatch.setenv("GRID_PERF_COMPONENT_BUDGET", "1")
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("error")  # any store warning fails the test
+        dfa = store.load_or_build_scanner(toy_grammar)
+    assert getattr(dfa, "lazy", False), "forced-lazy fixture must build lazy"
+    assert _bins(cache) == []
+
+
 # ------------------------------------------------------------- flag off
 
 def test_flag_off_noop(tmp_path, monkeypatch, toy_grammar):

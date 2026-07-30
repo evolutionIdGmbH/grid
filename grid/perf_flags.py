@@ -31,6 +31,12 @@ Flag table:
                                                             (default on:
                                                             unset = "1") else
                                                             "lr1_merge"
+    GRID_LALR_BUDGET            lalr_budget(default)        int(); "0" = cap
+                                                            disabled (None:
+                                                            unbounded
+                                                            construction);
+                                                            ValueError on
+                                                            garbage
     GRID_PERF_HASHCONS          hashcons_components()       ""/"0" = none,
                                                             "1"/"all" = all,
                                                             else comma list
@@ -47,6 +53,18 @@ Flag table:
                                                             off until the
                                                             H100 serving
                                                             stamp)
+    GRID_PERF_COUNTING          counting_enabled()          == "1" (default
+                                                            off: counting-set
+                                                            {m,n} window
+                                                            components on the
+                                                            factored path)
+    GRID_PERF_KERNEL_LAZY       kernel_lazy_enabled()       == "1" (default
+                                                            ON since the P1
+                                                            gates; "0" =
+                                                            lazy DFAs stay
+                                                            off the kernel,
+                                                            pure-Python
+                                                            _walk_py)
     GRID_JUMP                   jump_enabled()              == "1" (default
                                                             off: serving
                                                             jump-forward
@@ -133,6 +151,23 @@ def lalr_algorithm() -> str:
     return "dp" if os.environ.get("GRID_PERF_LALR_DP", "1") == "1" else "lr1_merge"
 
 
+def lalr_budget(default: int) -> int | None:
+    """GRID_LALR_BUDGET -> LALR construction item budget for
+    lalr.compile_tables (the state cap is derived at the call site from the
+    same value; both constructions check it at every new state). Crossing
+    the cap raises the DECLARED LALRBudgetExceeded instead of building on —
+    the terminate-deterministically outcome for the helm-testsuite /
+    o27148 divergence classes. "0" is the kill switch: returns None = caps
+    disabled = the pre-budget unbounded constructions (audit/oracle escape
+    hatch). Other values are int() with the default injected by the call
+    site (lalr.compile._DEFAULT_ITEM_BUDGET), ValueError on garbage — the
+    component_budget grammar. Keeps the bare GRID_ prefix (it declares an
+    outcome class, like the serving levers, rather than selecting an
+    equivalent faster path) but is born here per the post-E1 discipline."""
+    val = int(os.environ.get("GRID_LALR_BUDGET", str(default)))
+    return None if val == 0 else val
+
+
 # 'rulefor' (structural rule_for memo) is planned but NOT implemented; the
 # parser must not advertise components that silently no-op
 HASHCONS_COMPONENTS = frozenset({"norm", "dedupe"})
@@ -200,6 +235,39 @@ def slicer_enabled() -> bool:
     enables, anything else is the kill switch restoring today's full-trie
     walk byte-for-byte."""
     return os.environ.get("GRID_PERF_SLICER", "0") == "1"
+
+
+def counting_enabled() -> bool:
+    """GRID_PERF_COUNTING: counting-set scanner components for {m,n} windows
+    (P4 phase 1, grid/lexer/counting.py + factored.py). Eligible counted
+    loops keep O(1) control states plus a bounded counter instead of the
+    O(n) parse-time expansion; the runtime scan state becomes
+    (state, counts) via ScannerDFA.step/scan_full, and counting DFAs are
+    gated off the Rust kernel (Python spec walk until kernel v8). Sub-flag
+    of GRID_PERF_FACTORED_SCANNER: counting components exist only on the
+    factored path — the eager union builder (GRID_PERF_FACTORED_SCANNER=0,
+    the exactness oracle) never counts. Default OFF; only "1" enables,
+    anything else is the kill switch restoring the expanded components
+    byte-for-byte."""
+    return os.environ.get("GRID_PERF_COUNTING", "0") == "1"
+
+
+def kernel_lazy_enabled() -> bool:
+    """GRID_PERF_KERNEL_LAZY: serve lazy factored scanners (the over-budget
+    LazyProductDFA regime) through the grid_core v8 kernel walker — the
+    in-kernel lazy product (grid/trie/walk.py dispatch; component payloads
+    from grid/lexer/factored.py kernel_lazy_payload). Effective only when a
+    v8+ kernel is importable; older kernels and GRID_NO_RUST=1 keep the
+    pure-Python _walk_py serving path regardless. == "1" value grammar
+    unchanged; unset default flipped to ON on the P1 gates (full-vocab
+    kernel-vs-spec mask parity over the parity suite + the nine
+    substring-union schemas, MaskBench outcome identity, interleaved
+    stratified p50 ratio 1.003 — BAKEOFF.md P1 postscript); "0" is the
+    permanent kill switch restoring the wave-B lazy regime (kernel- and
+    genN-gated, _walk_py serving) byte-for-byte. RustVerdicts stays
+    Python-side for lazy schemas in every configuration of this flag
+    (phase-2 item)."""
+    return os.environ.get("GRID_PERF_KERNEL_LAZY", "1") == "1"
 
 
 def jump_enabled() -> bool:

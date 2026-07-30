@@ -75,16 +75,18 @@ FORMAT = 2
 # broader than the writer call sites: Terminal.priority and role_shape_hash
 # semantics live in spec.py/projection.py. factored.py produces stored
 # payloads two ways (ScannerDFA arrays under GRID_PERF_FACTORED_SCANNER via
-# materialize, and the per-terminal component namespace), trie/build.py the
-# trie namespace; rx/nfa/subset are the E2 split of dfa.py — their sources
-# feed every scanner and component payload just as when they lived inside
-# dfa.py; grammar/parts.py renders the schema_src TEXT payload on P2
+# materialize, and the per-terminal component namespace), counting.py the
+# counting component construction (P4), trie/build.py the trie namespace;
+# rx/nfa/subset are the E2 split of dfa.py — their sources feed every
+# scanner and component payload just as when they lived inside dfa.py;
+# grammar/parts.py renders the schema_src TEXT payload on P2
 # direct-emission store misses (render_text), so an emitter change must
 # evict stored text. The epoch is a directory name, so adding a module here
 # wholesale-invalidates without a FORMAT bump.
 _EPOCH_MODULES = (
     "grid.lexer.dfa",
     "grid.lexer.factored",
+    "grid.lexer.counting",
     "grid.lexer.nfa",
     "grid.lexer.rx",
     "grid.lexer.subset",
@@ -236,20 +238,41 @@ def _order_key(terminal_order: tuple[str, ...]) -> str:
 
 
 def load_or_build_scanner(grammar: DialectGrammar) -> ScannerDFA:
-    """Drop-in for ``build_scanner(grammar.terminals, grammar.terminal_order)``."""
+    """Drop-in for ``build_scanner(grammar.terminals, grammar.terminal_order)``.
+
+    GRID_PERF_COUNTING scopes the store instead of keying it (P4 phase 1):
+    flag-on entries live under a ``:c1``-suffixed key, so flag-off keys and
+    artifacts stay byte-identical and neither regime is ever served the
+    other's scanner — a counting scanner served flag-off would break the
+    flag's byte-identity contract, and an expanded scanner served flag-on
+    would silently disable counting (poisoning any A/B measurement through a
+    shared cache). Counting-CARRYING scanners are additionally never
+    persisted (their serialization format is the planned FORMAT-bump
+    follow-on): under the flag, window-free grammars — whose flag-on build
+    is value-identical to flag-off — roundtrip as before, window grammars
+    rebuild per process."""
     if not enabled():
         return build_scanner(grammar.terminals, grammar.terminal_order)
     key = f"{grammar.fingerprint}:{_order_key(grammar.terminal_order)}"
+    if perf_flags.counting_enabled():
+        key += ":c1"
     hit = get("scanner", key)
-    if isinstance(hit, ScannerDFA):
+    if isinstance(hit, ScannerDFA) and not hit.counters:
         return hit
     dfa = build_scanner(grammar.terminals, grammar.terminal_order)
-    if not getattr(dfa, "lazy", False):
-        # lazy facades (over-budget factored products) hold locks + demand
-        # state: never picklable, and their redeploy warmth comes from the
-        # component namespace instead — skip the put rather than tripping
-        # the one-shot store-degraded warning on a TypeError
-        put("scanner", key, dfa)
+    if getattr(dfa, "lazy", False):
+        # store law (P1): persist deterministic artifacts only, never
+        # product-interner state — a LazyProductDFA's states/annotations are
+        # instance-local demand-order (and its locks don't pickle; the old
+        # behavior was a once-per-process put warning). Post-P3 lazy builds
+        # are seconds, not the 87s+ the store would have amortized; persisting
+        # the underlying per-terminal component artifacts (eager TerminalDFA
+        # arenas + component NFA arenas, both deterministic) is the recorded
+        # S3 follow-on.
+        return dfa
+    if getattr(dfa, "counters", ()):
+        return dfa  # deliberate no-put (P4): counting persistence is the FORMAT-bump follow-on
+    put("scanner", key, dfa)
     return dfa
 
 

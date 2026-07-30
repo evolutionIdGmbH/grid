@@ -631,6 +631,32 @@ Python-side makes the win partial if CD re-checks dominate (measured,
 phase-2 follow-on); per-byte NFA stepping vs dense lookup (memoized rows,
 cap tuning).
 
+POSTSCRIPT (Wave C, landed; local macOS measurements, full-corpus republish
+still owed): shipped as grid_core v8 + `GRID_PERF_KERNEL_LAZY`, default ON
+post-gates with `=0` as the kill switch (BAKEOFF.md P1 postscript carries
+the gate evidence). Step-1 bound held:
+71-7,265 touched product states / 26-2,140 component subsets across the
+nine family schemas on full-instance full-vocab walks (predicted 10^3-10^4;
+intern cap 262,144 = ~36x worst observed). Mask parity: per-token digests
+identical kernel-vs-spec on all nine (3,095 steps) + eager cross-legs;
+family AB: cold-prefix worst token p50 276 -> 9.2ms, pooled prefix walk
+64.6 -> 2.6s, TTFM/RSS/outcomes unchanged, dense control (Stream)
+flag-neutral; MaskBench family arms: outcomes.py --strict 14/14 unchanged,
+pooled TBM p99 257 -> 8.6ms, p50 warm untouched. The coherent-numbering phase and the NFA-simulation bridge of
+CANDIDATES id-1 were confirmed unnecessary (raw T1/T2 keys + no state ids
+in kernel outputs). RUST_SCANNER disposition: subsumed-retired; nothing
+harvested — the payload pre-computes eps-folded artifacts Python-side, so
+no regex/NFA machinery belongs in the kernel (scanner_build.rs stays in
+its held worktree as reference only). Store law recorded and enforced:
+never persist product-interner state (lazy facades skip the scanner
+namespace; deterministic component artifacts are the S3 follow-on).
+Residue, recorded: full-instance worst tokens up to ~221ms on
+BatchJob/DataConnector are Python-side CD re-checks/registration (the
+declared phase-2 RustVerdicts item); one-time ~40-200ms payload
+serialization on first walk for schemas with 8-16k-state eager components
+(np conversion of tuple tables — optimize only if it ever shows outside
+the family).
+
 ### S2-slicer (serving, M, Wave C)
 
 Mechanism: measured: the flat ~7.2-7.7ms grammar-independent mode (1-8ms

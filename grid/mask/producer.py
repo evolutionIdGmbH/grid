@@ -322,10 +322,33 @@ class MaskProducer:
             # template instances (vllm_processor _t2_pools), so normalizing
             # here would alias one instance's entries to another's states —
             # the forbidden wrong-mask class. Raw schema-scoped key instead.
-            if not getattr(self.dfa, "lazy", False):
-                q, acc_len, p = self.dfa.scan_with_last_accept(remainder)
+            # Load-bearing for the v8 kernel too (GRID_PERF_KERNEL_LAZY): the
+            # in-kernel lazy product numbers its states in ITS OWN demand
+            # order — raw keys are what make that instance-local numbering
+            # unobservable (kernel payloads carry token/terminal ids only,
+            # never scanner state ids).
+            # (Counting facades are lazy and take the same raw key.)
+            dfa = self.dfa
+            if not getattr(dfa, "lazy", False):
+                if dfa.counters:
+                    # dense counting DFA (GRID_PERF_COUNTING): control states
+                    # collapse window positions, so (p, q, v) alone would
+                    # alias remainders whose counter values differ — the
+                    # counts extend the key (appended so key[5] stays the
+                    # schema fingerprint for warm_from_t2's foreign-key
+                    # filter). Counter-free DFAs keep every key
+                    # byte-identical.
+                    q, counts_q, acc_len, p, counts_p = dfa.scan_full(remainder)
+                    if q != DEAD:
+                        vis = dfa.live[q] if p < 0 else dfa.live[q] | dfa.accepts_all[p]
+                        if not (vis & self._LEX):
+                            return ("genN", p, q, remainder[acc_len:] if p >= 0 else b"",
+                                    tuple(sorted(A)), self.schema_fingerprint,
+                                    counts_p, counts_q)
+                    return ("generic", remainder, tuple(sorted(A)), self.schema_fingerprint)
+                q, acc_len, p = dfa.scan_with_last_accept(remainder)
                 if q != DEAD:
-                    vis = self.dfa.live[q] if p < 0 else self.dfa.live[q] | self.dfa.accepts_all[p]
+                    vis = dfa.live[q] if p < 0 else dfa.live[q] | dfa.accepts_all[p]
                     if not (vis & self._LEX):
                         return ("genN", p, q, remainder[acc_len:] if p >= 0 else b"",
                                 tuple(sorted(A)), self.schema_fingerprint)

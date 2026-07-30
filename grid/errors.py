@@ -24,6 +24,33 @@ class LALRConflictError(GridError):
         self.report = report
 
 
+class LALRBudgetExceeded(GridError):
+    """E4 compile-time decline: the LALR construction crossed its size cap
+    (items materialized or states) before completing — the declared outcome
+    for grammars whose automaton diverges (helm-testsuite class) or must be
+    enumerated tens of millions of items deep just to reach conflict
+    detection (o27148 class), phrased like the frontend's 'rule budget
+    exceeded (size cap)' family.
+
+    Deterministic by construction: the counters are input-derived (BFS over
+    the grammar, no wall clock), so the same grammar fires at identical
+    (states, items) on every run and machine, warm or cold — the artifact
+    store never caches declines. GRID_LALR_BUDGET=0 disables the cap
+    (audit/oracle escape hatch); see grid/perf_flags.lalr_budget."""
+
+    def __init__(self, states: int, items: int,
+                 item_budget: int, state_budget: int) -> None:
+        super().__init__(
+            f"LALR construction budget exceeded (size cap): "
+            f"{items:,} items / {states:,} states materialized "
+            f"(budget {item_budget:,} items / {state_budget:,} states)"
+        )
+        self.states = states
+        self.items = items
+        self.item_budget = item_budget
+        self.state_budget = state_budget
+
+
 class EmptyLanguageError(GrammarInvalid):
     """E2 verify: L(G_role) is empty. Policy misconfiguration; refuse the role."""
 

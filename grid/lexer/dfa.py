@@ -58,6 +58,17 @@ class ScannerDFA:
       and keyword-vs-identifier hypotheses need the full set, not just the winner).
     - ``live[s]``: terminals whose accept is reachable from ``s`` in >= 0 bytes —
       the E7 hypothesis set; ``h_max = max |live|`` (INV-LEX1).
+
+    Counting-set extension (GRID_PERF_COUNTING; built only by the factored
+    path's counting materializer): eligible {m,n} windows keep O(1) control
+    states plus a counter each. ``counters[k] = (m, n)`` with n=-1 for open
+    {m,}; the runtime scan state is (state, counts). ``guard_rows`` holds the
+    count-dependent transitions: (state, byte) -> ordered variants
+    (conds, dst, ops), conds = ((cid, lo, hi), ...) on the pre-step counts,
+    ops = ((cid, op), ...) with op 1 = saturating increment, 2 = reset (loop
+    left the control set). accept/accepts_all/live stay exact PER CONTROL
+    STATE (loop eligibility guarantees count-independence). Counter-free
+    instances are field-default-identical to the pre-counting layout.
     """
 
     start: int
@@ -66,12 +77,55 @@ class ScannerDFA:
     accepts_all: tuple[frozenset[int], ...]
     live: tuple[frozenset[int], ...]
     h_max: int = field(compare=False, default=0)
+    counters: tuple[tuple[int, int], ...] = ()
+    guard_rows: dict = field(default_factory=dict, hash=False)  # in __eq__, out of __hash__
 
     def next(self, state: int, byte: int) -> int:
+        assert not self.counters, "counting DFA: hand-stepping must go through step()"
         return self.trans[state][byte]
+
+    def zero_counts(self) -> tuple[int, ...]:
+        return (0,) * len(self.counters)
+
+    def step(self, state: int, counts: tuple[int, ...], byte: int) -> tuple[int, tuple[int, ...]]:
+        """One counter-aware byte step: (state', counts'). Counter-free DFAs
+        reduce to the plain table lookup (counts pass through untouched)."""
+        if self.guard_rows:
+            var = self.guard_rows.get((state, byte))
+            if var is not None:
+                for conds, dst, ops in var:
+                    ok = True
+                    for cid, lo, hi in conds:
+                        c = counts[cid]
+                        if c < lo or c > hi:
+                            ok = False
+                            break
+                    if not ok:
+                        continue
+                    if ops:
+                        lst = list(counts)
+                        for cid, op in ops:
+                            if op == 1:
+                                m, n = self.counters[cid]
+                                cap = n if n >= 0 else m
+                                v = lst[cid] + 1
+                                lst[cid] = cap if v > cap else v
+                            else:
+                                lst[cid] = 0
+                        counts = tuple(lst)
+                    return dst, counts
+                return DEAD, counts  # every variant's guard failed: dead here
+        return self.trans[state][byte], counts
 
     def scan_state(self, remainder: bytes) -> int:
         """DFA state after scanning ``remainder`` from start (DEAD if impossible)."""
+        if self.counters:
+            st, counts = self.start, (0,) * len(self.counters)
+            for b in remainder:
+                st, counts = self.step(st, counts, b)
+                if st == DEAD:
+                    return DEAD
+            return st
         st = self.start
         for b in remainder:
             st = self.trans[st][b]
@@ -93,6 +147,9 @@ class ScannerDFA:
         equal post-accept suffix ``v = remainder[l:]`` are walk-indistinguishable.
         Pure; differentially bound to per-prefix re-scanning in
         tests/lexer/test_scan_last_accept.py."""
+        if self.counters:
+            q, _cq, length, p, _cp = self.scan_full(remainder)
+            return q, length, p
         st = self.start
         length, p = 0, -1
         for i, b in enumerate(remainder):
@@ -103,12 +160,30 @@ class ScannerDFA:
                 length, p = i + 1, st
         return st, length, p
 
+    def scan_full(self, remainder: bytes) -> tuple[int, tuple[int, ...], int, int, tuple[int, ...]]:
+        """Counter-carrying scan_with_last_accept: ``(q, counts_q, l, p, counts_p)``.
+        ``counts_p`` is () when no prefix accepts — mirroring ``v = b""``. The
+        genN key for counting DFAs appends (counts_p, counts_q): control states
+        collapse window positions, so two remainders can share (p, q, v) while
+        their counter values distinguish the walk future."""
+        st, counts = self.start, (0,) * len(self.counters)
+        length, p = 0, -1
+        counts_p: tuple[int, ...] = ()
+        for i, b in enumerate(remainder):
+            st, counts = self.step(st, counts, b)
+            if st == DEAD:
+                return DEAD, counts, length, p, counts_p
+            if self.accept[st] != -1:
+                length, p, counts_p = i + 1, st, counts
+        return st, counts, length, p, counts_p
+
 
 def build_scanner(
     terminals: dict[str, Terminal],
     terminal_order: tuple[str, ...],
     *,
     factored: bool | None = None,
+    counting: bool | None = None,
 ) -> ScannerDFA | LazyProductDFA:
     """Combined NFA over all terminals -> subset-construction byte DFA.
 
@@ -122,13 +197,21 @@ def build_scanner(
     materialize reproduces it exactly, numbering included). Live sets on
     both paths come from the one NFA terminal-reach computation
     (_terminal_reach; per component on the factored path — see
-    factored.py)."""
+    factored.py).
+
+    ``counting`` (None = read GRID_PERF_COUNTING, default OFF) swaps eligible
+    {m,n} window terminals to counting-set components (grid/lexer/counting.py)
+    on the factored path: O(1) control states + a bounded counter instead of
+    the O(n) expansion, runtime state (state, counts) via step()/scan_full().
+    Counting exists ONLY on the factored path — the eager union builder below
+    is the exactness oracle and never counts (with factored=False the flag is
+    ignored)."""
     if factored is None:
         factored = perf_flags.factored_scanner_enabled()
     if factored:
         from grid.lexer.factored import build_factored_scanner
 
-        return build_factored_scanner(terminals, terminal_order)
+        return build_factored_scanner(terminals, terminal_order, counting=counting)
     b = _NFABuilder()
     root = b.new()
     accept_terminal: dict[int, int] = {}  # NFA accept state -> terminal id

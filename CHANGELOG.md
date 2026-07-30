@@ -228,6 +228,107 @@ Artifact-store redeploy warm set (S3, still under the default-off
   1039 -> 23ms) while fast schemas pay ~2ms at p50, so the warm-hit p50
   stays the default-on gate; store remains default-off this epoch.
 
+LALR construction budget (P5, `GRID_LALR_BUDGET`, default 32M items with a
+derived 4M-state cap; `=0` disables — the audit/oracle escape hatch): both
+table constructions count items materialized (closure sizes at state
+creation — input-derived, machine-independent, memory-proportional) and
+raise the declared `LALRBudgetExceeded(states, items, item_budget,
+state_budget)` instead of building past the cap. The two residual
+LALR-family 120s compile caps terminate deterministically: helm-testsuite
+(LR(0) core diverges — 62.7M items and climbing at 60s) declares in ~29s
+at 32,000,099 items / 289,811 states with peak RSS bounded at 4.5GB, and
+o27148 (conflicts reportable only after its full 48.17M-item automaton,
+~132s) declares in ~40s at 32,000,035 items / 1,096,970 states — fire
+counts identical across runs, and never cached (the artifact store puts
+only on success). Calibrated on a full-corpus counts sweep of the shipped
+build sequence (conflict-retry legs included; census reconciles with rc2
+exactly): the largest completing build is the conflict-family completer
+o21112 at 20.09M items / 926k states — 2.5x the roadmap's planned 8M
+default, which is therefore rejected — and the default is the log-midpoint
+between it and o27148 (1.59x/1.51x margins; >=4x headroom holds on the
+states axis). Zero fires on the other 11,304 corpus schemas, counters
+byte-identical on every unchanged record; construction overhead +0.8%
+(o948 in-process median, 200 reps). dp defines shipped outcomes; the
+lr1_merge oracle may fire where dp completes (LR(1) materializes >= LR(0)
+items), so differential gates assert table equality under budget and
+declared-class equality over it. With P3's substring-union fix this leaves
+no known compile-cap family, pending the epoch's one-shot full run.
+
+Counting-window components (P4 phase 1, `GRID_PERF_COUNTING`, default OFF):
+eligible one-shot `{m,n}` loops (prefix-code body, non-nullable
+continuation, span >= 8) keep a counted-loop NFA node instead of the O(n)
+parse-time expansion and determinize per terminal into a
+`CountingTerminalDFA` — a ScannerComponent sibling on the factored path
+(O(1) control states + a bounded counter; the held COUNTING_WINDOWS
+runtime surface re-derived per component, which dissolves its
+cross-terminal fallback/rebuild machinery). The lazy product grows a
+global counter table and caches per-(state, class) transition PLANS —
+variant tables, never a count-dependent successor id — and materializes
+to the held eager format (`ScannerDFA.counters` + `guard_rows`), so the
+runtime scan state is (state, counts) via `step`/`scan_full` everywhere
+(lexer run, Python walk, guide extension, reserve BFS); genN keys append
+`(counts_p, counts_q)`, the artifact store scopes flag-on entries under a
+counting key and defers counting-scanner persistence, and counting DFAs
+self-gate off the Rust kernel (Python spec walk until the kernel v8
+counter step) and off the S2 slicer proof. Gates: 67-test differential
+(product equivalence is a synchronized BFS over the whole reachable
+configuration space against the expanded flag-off oracle; boundary
+lexemes at m-1/m/n/n+1 incl. escapes and multi-byte UTF-8; geps-aware
+component co-acc against a configuration-space oracle; cache-key counter
+separation; memo/selection isolation), full suite green flag-on and -off
+(new CI leg), 400-schema corpus sample: grammar text/records
+byte-identical, flag-on-without-counters DFAs field-identical, 12
+counterful schemas probe-equal. Spot builds: (0,64) window 448ms ->
+3.4ms, (0,128) 3.1s -> 3.1ms, (0,128) x 200 keys 3.2s -> 67ms
+(materializes 1102 states vs 2604 expanded); o9823/o9843 stay parity
+(~0.7s -> ~0.9s, the family the factored path already subsumed — the
+BAKEOFF verdict, unchanged). Window budgets and degradation predicates
+are untouched by construction (asserted): the `{m,n}`-beyond-cap coverage
+lift is phase 3, kernel v8 counter frames phase 2.
+
+Kernel-resident lazy scanner (P1, `GRID_PERF_KERNEL_LAZY`, default ON with
+a v8+ grid_core — `=0` is the kill switch restoring the wave-B lazy regime
+byte-for-byte; older kernels and `GRID_NO_RUST=1` keep it regardless):
+lazy factored DFAs (the over-budget LazyProductDFA regime P3 created) now
+serve trie walks through the Rust kernel instead of pure-Python `_walk_py`.
+The walker's scanner becomes a backend enum behind the four accessor
+touchpoints (tr/accepting/accepts_all/live): `Dense` keeps the v7 arenas
+verbatim; `Lazy` is the in-kernel lazy product — sparse (tid, comp-state)
+tuples and per-component subset bitsets interned on demand under one build
+mutex (reads lock-free: append-only OnceLock arenas, AtomicI32 rows),
+annotations folded from per-component flags at intern time, so masks are
+pure functions of state VALUES and instance-local demand-order numbering
+never crosses the FFI (kernel payloads carry token/terminal ids only; lazy
+schemas already use raw schema-scoped T1/T2 keys). Components ship as
+compact blobs from `factored.kernel_lazy_payload` — dense arenas for eager
+components, NFA arenas (byte classes, eps-CLOSED per-class edge lists,
+accept id, reach words) for capped ones — so the kernel does no regex/NFA
+work; the Python facade stays the executable specification and the
+fallback (intern-cap breach surfaces as ValueError -> `_walk_py`, masks
+exact either way; the 262,144-state cap is ~36x the worst measured need).
+Gates: per-token full-vocab mask digests identical kernel-vs-spec across
+the nine-schema substring-union family (3,095 instance steps) plus
+eager-leg cross-checks; forced-all-lazy parity legs (toy/wide/sql-lexicon);
+id-independence under opposite-order interning and the rayon pool;
+recorded degradation sets untouched by construction (the flag's only
+consumer is walk dispatch). Measured (family AB, interleaved legs, jobs 1):
+64-token cold-prefix worst token p50 276ms -> 9.2ms, max 313 -> 15.9ms
+(~30x; full-instance worst tokens up to ~221ms remain on the two heaviest
+schemas — Python-side CD re-checks, the recorded phase-2 item), pooled
+prefix walk 64.6s -> 2.6s, TTFM columns and RSS unchanged, dense schemas
+byte-identical (flag consumed only for lazy DFAs); MaskBench family arms
+(outcomes.py --strict): 14/14 outcomes unchanged, pooled TBM p99
+257 -> 8.6ms over 10,965 masks, warm p50 untouched, stratified-29
+interleaved p50 gate at ratio 1.003 (the gate RUST_SCANNER failed). RustVerdicts stays
+Python-side for lazy schemas this phase. The artifact store now never
+persists the lazy facade (deterministic component artifacts are the S3
+follow-on). RUST_SCANNER (held since the bake-off) is subsumed: v8 ships
+blobs once at walker construction and never rehydrates arenas into Python,
+so the +18-22ms p50 FFI floor that sank it is structurally avoided; the
+eager `build_scanner_arena` port is retired unharvested (the v8 payload
+pre-computes eps-folded NFA artifacts Python-side, leaving nothing for
+in-kernel regex/NFA machinery to do).
+
 ## 0.3.0 - 2026-07-30
 
 The performance epoch: compile-time (TTFM) tail work, selected by measured
