@@ -14,9 +14,27 @@ full set.
 - All candidates measured on the same machine, same run, interleaved, so
   numbers are comparable. Report per set: TTFM p50/p90/p99/max, TBM
   p50/p99/max, peak RSS, and per-phase attribution.
+- TTFM is reported as TWO columns per set (E4): *compile-only* (maskbench
+  compile_grammar semantics: the five compile phases + GridGuide
+  construction) and *first-mask-included* (+ the first compute_mask on the
+  initial state). Lazy scanners defer product construction past the compile
+  phases and the kernel/genN gates force that first mask to pure Python, so
+  a compile-only column alone under-reports exactly the schemas the lazy
+  path rescues. Both columns are child-written stats
+  (profile_phases.py --first-mask: stats.ttfm_compile_us /
+  stats.ttfm_first_us); never recompute them downstream, never publish one
+  column without naming it. The old metric keeps its name and meaning.
+- Published outcome counts go through bench/perfbench/outcomes.py (the
+  classifier is the F1-retraction guard: records with running != null and
+  no timeout_s/rc marker are `incomplete`, never ok; at-cap statuses
+  without a timeout marker classify as timeouts). Cross-leg claims use its
+  compare mode: baseline timeouts have no oracle (timeout -> terminating is
+  the sanctioned direction); ok -> anything and declared-class changes are
+  gate failures.
 - The full 11.3k set is run ONCE at the end on the single winning
   configuration; perfbench is for selection, the full set is for the
-  published table.
+  published table. That run happens only after the TTFM definition above is
+  settled (it is, as of E4) and reports both columns.
 
 ## Task sets (manifest.json, extracted from the v0.2.5 full-run statuses)
 

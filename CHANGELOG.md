@@ -73,6 +73,27 @@ BatchJob/DataConnector build lazily (same lazy-product outcome class as
 before, seconds instead of tens of seconds). `=0` restores the eager
 component builds byte-identically (digest-gated), family hang included.
 
+Honest metrics (E4, bench/ only — no runtime change): TTFM is now published
+as two labeled columns, *compile-only* (maskbench compile_grammar
+semantics; the historical definition, name unchanged) and
+*first-mask-included* (+ the first compute_mask, which for lazy factored
+scanners is the first real payment of the deferred product construction —
+previously measured nowhere). profile_phases.py grows `--first-mask`
+(trie/guide/first_mask/prefix_masks phases, child-written
+ttfm_compile_us/ttfm_first_us stats) and `--leg` (interleaved env legs);
+new bench/perfbench/outcomes.py classifies records
+(ok/declared/timeout@phase/crash/incomplete/malformed; incomplete is never
+ok — the F1-retraction guard) and gates cross-leg compares by the oracle
+rule. Regenerated capped+fast legs at wave-A HEAD (BAKEOFF.md E4
+postscript): capped-16 accounting is 10 compiled / 5 declared / 1 timeout
+(replaces the withdrawn "10/16"), OFF-leg strict identity 45/45 vs v0.2.5;
+measured deferred cost on lazy schemas: initial mask 1.6-8.0ms but
+mid-instance cold tokens 239-298ms worst (dense band: ~8ms), 64-token cold
+prefix 1.6-11.8s — the recorded P1 go/no-go input. maskbench_grid.py now
+clears engine extras per schema (stale-write fix, informational fields
+only); frozen status dirs keep the artifact and outcomes.extras() defends
+them at read time.
+
 ## 0.3.0 - 2026-07-30
 
 The performance epoch: compile-time (TTFM) tail work, selected by measured
