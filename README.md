@@ -54,25 +54,69 @@ the official JSON-Schema-Test-Suite runs in CI under that contract.
   <img alt="Per-split coverage across GRID, llguidance, XGrammar" src="docs/assets/coverage-by-split-light.svg">
 </picture>
 
-### Latency
+### Latency and outcomes — one runner, one accounting (times in µs)
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/maskbench-latency-dark.svg">
-  <img alt="TTFM and TBM averages across GRID, llguidance, XGrammar (log scale)" src="docs/assets/maskbench-latency-light.svg">
-</picture>
+| metric | GRID 0.4.0 | llguidance 1.7.6 | XGrammar 0.2.3 |
+|:--|--:|--:|--:|
+| TBM avg | 513 | **22** | 194 |
+| TBM p99 | 8,228 | **299** | 772 |
+| TBM p99.9 | 8,980 | **1,099** | 51,022 |
+| TTFM avg | 65,684 | **693** | 334,134 |
+| TTFM p99 | 1,157,520 | **6,680** | 4,579,322 |
+| tokens | 3,491,288 | 2,958,083 | 3,468,252 |
+| schemas | 11,306 | 11,306 | 11,306 |
+| passing | 10,159 | 9,487 | **10,212** |
+| compile error | 637 | 1,797 | 51 |
+| timeout | **0** | **0** | **0** |
+| validation error | **5** | 32 | 671 |
+| invalidation error | 876 | **0** | 1,493 |
 
-Honest in both directions. llguidance's lazy lexer makes it the compile-time
-(TTFM) reference point; nothing else is close. GRID's compile
-average dropped 419ms -> 66ms across the 0.3/0.4 epochs (p50 7.4ms, p99
-1.16s), and — unique among the three on this run — **zero schemas fail to
-terminate**: every one of 11,306 compiles, declares, or budget-declines
-deterministically inside the wall. Per token (TBM), GRID's warm kernel path
-runs 25µs at p50 (3.7µs on SQL/CFG grammars, GRID's home turf); the average
-in the chart is dominated by first-visit cold walks that the benchmark's
-run-each-schema-once protocol never amortizes but a serving write-back cache
-does. On redeployment, the artifact store reloads compiled schemas at
-warm-hit medians of ~17-23ms for the heaviest families (measured,
-load-caveated — `bench/perfbench/BAKEOFF.md`).
+Reading the table:
+
+- The three engines sit at different points of the coverage/upfrontness/
+  latency trade-off: compile errors are *declared* non-support (visible,
+  safe — which is why that row carries no bold: lowest is not simply best);
+  validation errors (valid instance rejected) and invalidation errors
+  (invalid instance accepted) are silent correctness gaps — except GRID's,
+  whose invalidation errors each carry the names of the unenforced
+  constraints involved.
+- llguidance's lazy lexer makes it the latency reference point on every
+  timing row; nothing else is close. GRID's compile average
+  dropped 419ms -> 66ms across the 0.3/0.4 epochs (p50 7.4ms), and — unique
+  to this run — **zero schemas fail to terminate**: every one of 11,306
+  compiles, declares, or budget-declines deterministically inside the wall.
+- GRID's TBM p25-p75 is the grid_core kernel hit path (masks up to 512
+  terminals run in-kernel); the p90+ tail is cold-miss trie walks over the
+  128k vocabulary. MaskBench runs each schema once — the write-back cache
+  that amortizes GRID's misses across requests in serving never warms here;
+  the cold walk was cut first 9.3x by the kernel v5.1 verdict-equivalence
+  grouping (TBM p90 27.8ms -> 208µs vs the v3-era run), then a further ~2.8x
+  by the kernel v7 fused walk->blob->register path that eliminated the
+  Python-side per-cold-entry materialization cost and its gen-2 GC pauses
+  (208µs -> 75µs on the SQL harness); warm-path mask p50 is 25µs (3.7µs on
+  SQL/CFG grammars, GRID's home turf).
+- GRID's TTFM is the Python table build per schema. On redeployment the
+  artifact store reloads compiled schemas at warm-hit medians of ~17-23ms
+  for the heaviest families (measured, load-caveated —
+  `bench/perfbench/BAKEOFF.md`).
+- GRID's 5 validation errors on 11,306 schemas include 3 genuine
+  valid-instance rejections — definition-order properties and spec-default
+  additionalProperties (typed extras included) are accepted everywhere else.
+
+GRID notes: grid_core kernels active on 100% of compiled schemas (the rest
+exceed the 64-terminal kernel bound and run the pure-Python spec path).
+
+Ignored-but-accepted constraints (counted per schema; the XGrammar-default
+convention — these surface as invalidation errors when an invalid instance
+hinges on them): oneOf-exclusivity (433), required-not-enforced (350),
+scanner-budget: constrained string degraded (240), maxLength-with-pattern
+(170), minLength-with-pattern (162), length windows beyond cap (453 across
+four cap classes), string-constraint-terminal-too-large (97), minimum (73).
+
+Compile-error reasons (v1 subset boundaries, llguidance-style upfront):
+LALRConflictError (519), Unsupported: allOf merge failed (30), RxUnsupported
+(9), terminal budget (9), rule budget (8), anyOf/oneOf/$ref sibling-key
+families (20), LALRBudgetExceeded (2).
 
 ## What GRID has that the others are not designed for
 
