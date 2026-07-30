@@ -53,6 +53,7 @@ from concurrent.futures import ThreadPoolExecutor, wait
 
 import numpy as np
 
+from grid import perf_flags
 from grid.guide import ACCEPTING, ACTIVE, COMPLETE, GRAMMAR_END, GridGuide
 from grid.mask.producer import _chain
 from grid.models.vllm_processor import _GuideRegistry
@@ -234,6 +235,10 @@ class GridGrammarSession:
         except ValueError:  # engine-fatal to raise from compile_grammar
             self._defer_ms = 100.0
         self._defer_t0 = 0.0
+        # S1 jump-forward lever: default off; jump_tokens() is a [] no-op
+        # while disabled (the GRID_DEFER=0 byte-identical shape).
+        self._jump_on = perf_flags.jump_enabled()
+        self._jump_row: np.ndarray | None = None  # v6 scratch mask row
         prod = guide.producer
         if (not _force_v5
                 and guide.audit is None  # E14: audit-enabled guides stay on v5
@@ -369,7 +374,84 @@ class GridGrammarSession:
             return True
         return (time.monotonic() - self._defer_t0) * 1e3 >= self._defer_ms
 
+    def jump_tokens(self) -> list[int]:
+        """S1 serving jump-forward: the maximal forced (singleton-mask)
+        non-eos token run from the session's CURRENT position, as draft
+        tokens for scheduler-side injection (bench/vllm_grid_patch.py site
+        5). At a forced position the grammar bitmask admits exactly one
+        token, so a verifier accepts every span token with certainty under
+        ANY sampler — injection is parity-exact, never approximate. Forced
+        tokens still need KV entries: the jump collapses k sequential
+        decode steps into one multi-token verification step, it does not
+        skip compute for those tokens.
+
+        STATE-NEUTRAL by contract: the walk advances internally and is
+        rolled back before returning, because the vLLM manager itself
+        advances/rolls back the grammar around per-position bitmask fills
+        (and a configured drafter calls validate_tokens after this). The
+        six-method contract state (states/num_processed_tokens/_pf_target/
+        defer clock/kernel log) reads identically before and after.
+
+        v5/spec path: guide.forced_run over Python states (walks cold masks
+        — the A/B and no-kernel regime). v6 kernel path: warm-only chaining
+        — session_fill into a scratch row, popcount==1 and bit != eos,
+        session_accept, repeat; an unbound successor binds from T1 when
+        peekable (no walk) and otherwise ENDS the jump: cold configs are
+        never walked eagerly for a jump (they would be walked anyway when
+        the request reaches them — jumping only removes the forward passes
+        between, it must not add walks). Stops on: non-singleton mask, eos
+        bit, _FLAG_COMPLETE, j_max, cold successor.
+
+        GRID_JUMP unset/0 (perf_flags.jump_enabled, read at construction):
+        returns [] without touching guide or kernel. Raises only where the
+        regular fill path would raise one step later (same kernel/producer
+        ops); the try/finally guarantees the rollback either way."""
+        if not self._jump_on or self.is_terminated():
+            return []
+        if self._sid is None:
+            return self.guide.forced_run(self.states[-1])
+        return self._jump_v6()
+
     # -- v6 internals ----------------------------------------------------------
+
+    def _jump_v6(self) -> list[int]:
+        kernel, sid = self._kernel, self._sid
+        prod = self.guide.producer
+        prod._sync_epoch()  # risk (d): rollover must drop kernel bindings
+        eos = self.guide.eos_token_id
+        row = self._jump_row
+        if row is None:
+            words = (self.guide.vocab_size + 31) // 32
+            row = self._jump_row = np.zeros(words, dtype=np.uint32)
+        span: list[int] = []
+        try:
+            while len(span) < self.guide.j_max:
+                if kernel.session_fill(sid, row) < 0:
+                    # unbound: a T1-warm config binds without a walk (the
+                    # _bind_or_schedule warm half); cold ends the jump
+                    a_words, remainder = kernel.session_walk_inputs(sid)
+                    handle, _a = prod.session_peek_handle(a_words, remainder)
+                    if handle is None:
+                        break
+                    kernel.session_bind(sid, handle)
+                    got = kernel.session_fill(sid, row)
+                    assert got >= 0, "fill after bind must hit (kernel v6 invariant)"
+                iv = int.from_bytes(row.tobytes(), "little")
+                if iv.bit_count() != 1:
+                    break
+                tok = iv.bit_length() - 1
+                if tok == eos:
+                    break
+                flags = kernel.session_accept(sid, tok)
+                if not flags & _FLAG_OK:  # unreachable: tok came from the mask
+                    break
+                span.append(tok)
+                if flags & _FLAG_COMPLETE:  # unreachable for non-eos; defensive
+                    break
+        finally:
+            if span:  # state-neutral: pop exactly the accepts pushed above
+                kernel.session_rollback(sid, len(span))
+        return span
 
     def _accept_v6(self, tokens: list[int]) -> bool:
         if self._complete:
@@ -444,6 +526,12 @@ try:  # pragma: no cover - exercised on vllm hosts (next runner session)
             # (never an approximate mask). Backends without this attr default
             # to ready in the guard (getattr default-True shape).
             return self.session.mask_ready()
+
+        def jump_tokens(self) -> list[int]:
+            # S1/patch site 5 hook: forced (singleton-mask) continuation as
+            # draft tokens, [] unless GRID_JUMP=1. Backends without this
+            # attr are skipped by the guard (getattr default-None shape).
+            return self.session.jump_tokens()
 
         def reset(self):
             self.session.reset()
