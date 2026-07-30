@@ -47,6 +47,13 @@ Flag table:
                                                             off until the
                                                             H100 serving
                                                             stamp)
+    GRID_PERF_KERNEL_LAZY       kernel_lazy_enabled()       == "1" (default
+                                                            off until the P1
+                                                            gates land; "0" =
+                                                            lazy DFAs stay
+                                                            off the kernel,
+                                                            pure-Python
+                                                            _walk_py)
     GRID_JUMP                   jump_enabled()              == "1" (default
                                                             off: serving
                                                             jump-forward
@@ -192,6 +199,21 @@ def slicer_enabled() -> bool:
     enables, anything else is the kill switch restoring today's full-trie
     walk byte-for-byte."""
     return os.environ.get("GRID_PERF_SLICER", "0") == "1"
+
+
+def kernel_lazy_enabled() -> bool:
+    """GRID_PERF_KERNEL_LAZY: serve lazy factored scanners (the over-budget
+    LazyProductDFA regime) through the grid_core v8 kernel walker — the
+    in-kernel lazy product (grid/trie/walk.py dispatch; component payloads
+    from grid/lexer/factored.py kernel_lazy_payload). Effective only when a
+    v8+ kernel is importable; older kernels and GRID_NO_RUST=1 keep the
+    pure-Python _walk_py serving path regardless. Default OFF until the P1
+    gates land (full-vocab kernel-vs-spec mask parity over the parity suite
+    + the nine substring-union schemas); "0" is the permanent kill switch
+    restoring the wave-B lazy regime (kernel- and genN-gated, _walk_py
+    serving) byte-for-byte. RustVerdicts stays Python-side for lazy schemas
+    in every configuration of this flag (phase-2 item)."""
+    return os.environ.get("GRID_PERF_KERNEL_LAZY", "0") == "1"
 
 
 def jump_enabled() -> bool:

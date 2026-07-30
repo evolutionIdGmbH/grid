@@ -322,6 +322,11 @@ class MaskProducer:
             # template instances (vllm_processor _t2_pools), so normalizing
             # here would alias one instance's entries to another's states —
             # the forbidden wrong-mask class. Raw schema-scoped key instead.
+            # Load-bearing for the v8 kernel too (GRID_PERF_KERNEL_LAZY): the
+            # in-kernel lazy product numbers its states in ITS OWN demand
+            # order — raw keys are what make that instance-local numbering
+            # unobservable (kernel payloads carry token/terminal ids only,
+            # never scanner state ids).
             if not getattr(self.dfa, "lazy", False):
                 q, acc_len, p = self.dfa.scan_with_last_accept(remainder)
                 if q != DEAD:
