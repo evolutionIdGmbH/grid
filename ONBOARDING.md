@@ -343,6 +343,7 @@ kill switch that restores the legacy path byte-identically:
 | `GRID_PERF_HASHCONS` | `norm,dedupe` | `=0` (or `""`) disables; comma list for component-granular A/B |
 | `GRID_PERF_ARTIFACT_STORE` | off | any value but `0` enables; default-on deferred until a warm-hit p50 measurement (BAKEOFF F2: +5-7ms cold per fast build) |
 | `GRID_PERF_FACTORED_BUDGET` | 20000 | product-state budget (tuning knob, not a flag): over budget the scanner serves the LazyProductDFA facade |
+| `GRID_PERF_COMPONENT_BUDGET` | 16384 | per-terminal component state budget (P3): over budget the terminal becomes a demand-interned LazyTerminalDFA and the scanner skips straight to the lazy product (the substring-union family — 5 former compile timeouts — compiles in seconds); `=0` disables the cap, restoring eager component builds and the family hang |
 
 `GRID_PERF_NFA_LIVE` no longer exists: the legacy DFA-graph live-set
 fixpoint and the verify branches were DELETED after the 11.3k

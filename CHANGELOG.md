@@ -50,6 +50,29 @@ GrammarInvalid message text included. factored.py gains the type-only
 ScannerComponent Protocol — the seam a COUNTING_WINDOWS component type
 plugs into beside TerminalDFA without touching the product.
 
+Per-component state budget (P3, `GRID_PERF_COMPONENT_BUDGET`, default
+16384): the substring-union terminal family (13-17 unanchored keywords in
+one JSON-string terminal, BAKEOFF.md F1) keeps a per-keyword matched bit
+alive, so its eager per-terminal subset construction discovers ~2^k states
+(o83132: 268,803 / ~87s / 2.2GB; o5195: >200k with the frontier open) while
+a walk demands at most one new subset per scanned byte. Components that
+breach the budget come back as demand-interned LazyTerminalDFAs — exact
+same subsets/annotations as the eager build (accepting = accept-in-subset,
+co_acc = NFA terminal-reach over the subset), consumed through a
+step(state, cls) facade on ScannerComponent — and the scanner skips product
+materialization (the union DFA is at least component-sized, so the product
+budget would abort it anyway); the lazy product keeps its existing
+kernel/genN/T2/reserve gates. Default fixed by a manifest-set sweep (853
+schemas, 21,223 unique patterns: largest terminating non-family component
+7,210; largest inside a dense-today build 15,865 — strmprivacy Stream —
+which must stay byte-identical; every 2^k member breaches in 1.8-11.9s).
+Outcome changes, all in the family: 5 compile timeouts (o5195, o48423,
+o47656, o47657, o48427) become lazy compiles; o83132 (~87s), o83133,
+o33033, and the >16384-state components of strmprivacy
+BatchJob/DataConnector build lazily (same lazy-product outcome class as
+before, seconds instead of tens of seconds). `=0` restores the eager
+component builds byte-identically (digest-gated), family hang included.
+
 ## 0.3.0 - 2026-07-30
 
 The performance epoch: compile-time (TTFM) tail work, selected by measured
