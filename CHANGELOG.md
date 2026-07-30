@@ -73,6 +73,49 @@ BatchJob/DataConnector build lazily (same lazy-product outcome class as
 before, seconds instead of tens of seconds). `=0` restores the eager
 component builds byte-identically (digest-gated), family hang included.
 
+Artifact-store redeploy warm set (S3, still under the default-off
+`GRID_PERF_ARTIFACT_STORE` master; zero flag-off behavior change):
+
+- New namespaces, each with a default-on sub-flag kill switch:
+  `component` (`GRID_PERF_STORE_COMPONENTS`) — per-terminal TerminalDFA
+  payloads keyed `blake2b(kind|budget|pattern)`, CROSS-schema by
+  construction, plus breach MARKERS so warm redeploys skip the
+  substring-union family's capped eager attempt (fresh-process step-1
+  attribution: components 2.1-12.6s vs product <=0.8s per family member;
+  the breached component's cost IS the attempt, and its LazyTerminalDFA is
+  lock-bearing and unpicklable — markers recover what payloads cannot);
+  `trie` (`GRID_PERF_STORE_TRIE`) — TokenTrie keyed by tokenizer
+  fingerprint, fingerprint computed from the same single token_bytes pass a
+  cold build consumes; `journal` (`GRID_PERF_STORE_JOURNAL`, CANDIDATES
+  #20a) — ContextJournal snapshot/restore (walk-miss keys/contexts only,
+  never masks) keyed `blake2b(grammar_src)`, restored in the registry under
+  `GRID_ADMIT_WARM=1` so admission warmup precomputes the previous
+  deployment's cold-walk set; write-back = self-flush every
+  `GRID_PERF_STORE_JOURNAL_EVERY` (64) new records + warmup completion +
+  backend destroy.
+- `load_or_build_scanner` skips `put` for lazy facades (previously tripped
+  the one-shot degraded-store warning via pickle TypeError); their redeploy
+  warmth comes from the component namespace.
+- `_EPOCH_MODULES` now covers every payload-producing source: factored.py,
+  trie/build.py, and the E2 split modules (nfa/rx/subset) whose sources fed
+  scanner artifacts while only dfa.py was hashed — wholesale invalidation
+  on rollout, by design.
+- `kernel_fingerprint()` (blake2b of the grid_core binary) reserved-key
+  helper; persisted T2 mask blobs (#20b) and RustWalker arenas stay
+  EXPLICIT non-goals (key shapes documented in bench/perfbench/DESIGN.md,
+  no payloads) pending a served-mask-parity gate / the RUST_SCANNER
+  decision.
+- Gates: poison-builder warm hits per namespace; store-warm factored
+  differential (dense bit-identical, breach-regime observable equality);
+  GrammarInvalid ordering + message parity on partial/warm stores; journal
+  replay entry-id parity vs a no-journal producer; cross-process scanner
+  numbering pin for genN (p,q) coherence;
+  bench/perfbench/diff_store_warm.py off/cold/warm corpus digests (src,
+  tables, scanner, mask-drive entry ids, error text).
+- Measured (bench/perfbench/store_coldwarm.py, fresh process per scenario,
+  results in the S3 wave report): warm-hit p50 stays the default-on gate;
+  store remains default-off this epoch.
+
 ## 0.3.0 - 2026-07-30
 
 The performance epoch: compile-time (TTFM) tail work, selected by measured

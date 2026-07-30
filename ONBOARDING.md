@@ -344,6 +344,10 @@ kill switch that restores the legacy path byte-identically:
 | `GRID_PERF_ARTIFACT_STORE` | off | any value but `0` enables; default-on deferred until a warm-hit p50 measurement (BAKEOFF F2: +5-7ms cold per fast build) |
 | `GRID_PERF_FACTORED_BUDGET` | 20000 | product-state budget (tuning knob, not a flag): over budget the scanner serves the LazyProductDFA facade |
 | `GRID_PERF_COMPONENT_BUDGET` | 16384 | per-terminal component state budget (P3): over budget the terminal becomes a demand-interned LazyTerminalDFA and the scanner skips straight to the lazy product (the substring-union family — 5 former compile timeouts — compiles in seconds); `=0` disables the cap, restoring eager component builds and the family hang |
+| `GRID_PERF_STORE_COMPONENTS` | on (under the store master) | S3 sub-flag of `GRID_PERF_ARTIFACT_STORE`: per-terminal component namespace (cross-schema TerminalDFA payloads + breach markers); `=0` restores memo-only component builds |
+| `GRID_PERF_STORE_TRIE` | on (under the store master) | S3 sub-flag: TokenTrie namespace keyed by tokenizer fingerprint; `=0` restores the per-process trie build |
+| `GRID_PERF_STORE_JOURNAL` | on (under the store master) | S3 sub-flag: ContextJournal persistence (walk-miss keys/contexts only, never masks; additionally inert without `GRID_ADMIT_WARM=1`); `=0` restores in-memory-only journals |
+| `GRID_PERF_STORE_JOURNAL_EVERY` | 64 | journal self-flush cadence in NEW records (tuning knob under `GRID_PERF_STORE_JOURNAL`) |
 
 `GRID_PERF_NFA_LIVE` no longer exists: the legacy DFA-graph live-set
 fixpoint and the verify branches were DELETED after the 11.3k

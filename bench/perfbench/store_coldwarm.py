@@ -108,9 +108,11 @@ def compile_child(schema_file: str, out_file: str) -> None:
         if isinstance(schema, dict) and "schema" in schema and "tests" in schema:
             schema = schema["schema"]
 
+        from grid.errors import LALRConflictError
         from grid.grammar import spec
         from grid.grammar.projection import RoleProjection
         from grid.jsonschema import compile_json_schema
+        from grid.jsonschema.compiler import compile_schema
         from grid.serving.artifact_store import (
             load_or_build_scanner,
             load_or_compile_tables,
@@ -121,7 +123,24 @@ def compile_child(schema_file: str, out_file: str) -> None:
         grammar = phase("spec_load", lambda: spec.load(src))
         rec["stats"]["terminals"] = len(grammar.terminal_order)
         proj = phase("projection", lambda: RoleProjection.full(grammar).build())
-        phase("lalr", lambda: load_or_compile_tables(proj))
+        try:
+            phase("lalr", lambda: load_or_compile_tables(proj))
+        except LALRConflictError:
+            # the production caller convention (bench/maskbench_grid.py):
+            # retry ONCE with branch string-value unification. NOTE the retry
+            # recompiles via compile_schema directly — the schema_src
+            # namespace never caches the unified source, so the conflict
+            # family re-pays schema_compile + the failed LALR on every
+            # redeploy (an honest, measured store gap; keying the unify mode
+            # is a follow-up).
+            def _retry():
+                nonlocal grammar
+                src2, _rec2 = compile_schema(schema, unify_string_values=True)
+                grammar = spec.load(src2)
+                return load_or_compile_tables(RoleProjection.full(grammar).build())
+
+            rec["stats"]["lalr_retry"] = True
+            phase("lalr_retry", _retry)
         dfa = phase("scanner", lambda: load_or_build_scanner(grammar))
         rec["stats"]["dfa_lazy"] = bool(getattr(dfa, "lazy", False))
     except Exception as e:
@@ -271,7 +290,8 @@ def parent(groups: list[str], out_dir: str, run_tbm: bool) -> None:
           "publishable absolutes)", flush=True)
     for i, (sid, timeout_s) in enumerate(work):
         store = os.path.join(stores_dir, sid)
-        out = lambda sc: os.path.join(out_dir, f"{sid}.{sc}.json")  # noqa: E731
+        out = lambda sc, _sid=sid: os.path.join(  # noqa: E731
+            out_dir, f"{_sid}.{sc}.json")
         if os.path.exists(out("B")):
             print(f"[{i + 1}/{len(work)}] {sid} (resume: done)", flush=True)
             continue
@@ -345,12 +365,20 @@ def summarize(out_dir: str) -> None:
     dedup: dict[tuple[str, str], int] = {}
     per_store: list[int] = []
     n_timeout = {"A": 0, "B": 0, "C": 0}
+    n_error = {"A": 0, "B": 0, "C": 0}
     for path in sorted(g.glob(os.path.join(out_dir, "*.?.json"))):
         sid, sc = os.path.basename(path)[:-5].rsplit(".", 1)
         with open(path) as f:
             rec = json.load(f)
         grp = group_of.get(sid, "?")
         slot = by_group.setdefault(grp, {"A": [], "B": [], "C": []})
+        if "error" in rec:
+            # declared outcomes (Unsupported, residual LALR conflicts, ...):
+            # excluded from timing percentiles, error PARITY across legs is
+            # diff_store_warm.py's job
+            n_error[sc] += 1
+            slot[sc].append(None)
+            continue
         if "timeout_s" in rec or rec.get("running") is not None:
             n_timeout[sc] += 1
             slot[sc].append(None)  # timed out: excluded from percentiles,
@@ -385,7 +413,8 @@ def summarize(out_dir: str) -> None:
             row += (f" {_pct(xs, 50):9.1f} {_pct(xs, 99):9.1f} "
                     f"{max(xs) if xs else float('nan'):9.1f}")
         print(row)
-    print(f"timeouts/incomplete per scenario: {n_timeout}")
+    print(f"timeouts/incomplete per scenario: {n_timeout}; "
+          f"declared errors: {n_error}")
     if per_store:
         print(f"\nper-schema store size: p50 {_pct([float(x) for x in per_store], 50) / 1024:.0f} KiB, "
               f"max {max(per_store) / 1024 / 1024:.1f} MiB")
