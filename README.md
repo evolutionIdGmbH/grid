@@ -54,7 +54,7 @@ the official JSON-Schema-Test-Suite runs in CI under that contract.
   <img alt="Per-split coverage across GRID, llguidance, XGrammar" src="docs/assets/coverage-by-split-light.svg">
 </picture>
 
-### Latency and outcomes — one runner, one accounting (times in µs)
+### Latency and outcomes - times in µs (one runner, one accounting)
 
 | metric | GRID 0.4.0 | llguidance 1.7.6 | XGrammar 0.2.3 |
 |:--|--:|--:|--:|
@@ -65,7 +65,6 @@ the official JSON-Schema-Test-Suite runs in CI under that contract.
 | TTFM p99 | 1,157,520 | **6,680** | 4,579,322 |
 | tokens | 3,491,288 | 2,958,083 | 3,468,252 |
 | schemas | 11,306 | 11,306 | 11,306 |
-| passing | 10,159 | 9,487 | **10,212** |
 | compile error | 637 | 1,797 | 51 |
 | timeout | **0** | **0** | **0** |
 | validation error | **5** | 32 | 671 |
