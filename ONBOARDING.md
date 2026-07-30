@@ -331,7 +331,8 @@ GRID_NO_RUST=1 .venv/bin/pytest tests/ -q         # force the executable-spec pa
 .venv-bench/bin/python bench/r_microharness.py --quick   # requirement-R harness
 ```
 
-**GRID_PERF_* flags** (`grid/perf_flags.py` is the single source of truth;
+**Performance flags** (`grid/perf_flags.py` is the single source of truth
+for every `GRID_PERF_*` flag AND every post-E1 lever regardless of prefix;
 grammars tested in `tests/test_perf_flags.py`). Since the 0.3.0 epoch's
 full-corpus run the compile-path winners are DEFAULT-ON, each with an env
 kill switch that restores the legacy path byte-identically:
@@ -344,6 +345,7 @@ kill switch that restores the legacy path byte-identically:
 | `GRID_PERF_ARTIFACT_STORE` | off | any value but `0` enables; default-on deferred until a warm-hit p50 measurement (BAKEOFF F2: +5-7ms cold per fast build) |
 | `GRID_PERF_FACTORED_BUDGET` | 20000 | product-state budget (tuning knob, not a flag): over budget the scanner serves the LazyProductDFA facade |
 | `GRID_PERF_COMPONENT_BUDGET` | 16384 | per-terminal component state budget (P3): over budget the terminal becomes a demand-interned LazyTerminalDFA and the scanner skips straight to the lazy product (the substring-union family — 5 former compile timeouts — compiles in seconds); `=0` disables the cap, restoring eager component builds and the family hang |
+| `GRID_JUMP` | off | `=1` enables serving jump-forward (S1): `GridGrammarSession.jump_tokens()` emits forced singleton-mask runs as draft tokens (vLLM patch site 5); off = strict no-op. Stays off until the box bake (greedy token-parity gate) passes |
 
 `GRID_PERF_NFA_LIVE` no longer exists: the legacy DFA-graph live-set
 fixpoint and the verify branches were DELETED after the 11.3k
