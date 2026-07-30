@@ -735,6 +735,90 @@ def write_report(cells, adversarial, singleflight, checks, out_path, mock):
     return all_ok
 
 
+def _jump_probe(args):  # pragma: no cover - GPU host
+    """S1 jump-forward bake: {GRID_JUMP off, on} x {batches} on the grid
+    backend, greedy, heterogeneous schemas — the acceptance evidence for
+    flipping GRID_JUMP on.
+
+    Per (leg, batch): engine steps (the raw step loop — steps SAVED is the
+    jump's whole effect), decoded tokens, wall, and per-request token
+    streams. Greedy outputs must be token-identical off-vs-on: forced
+    positions cannot flip (the bitmask admits one token — certain
+    acceptance), and free positions see the same greedy argmax. Any
+    divergence prints the first differing position per request for
+    diagnosis (batching-numerics vs a real bug) and fails the probe.
+
+    GRID_JUMP is read at session construction in the ENGINE process: the
+    env is set before each LLM build (inherited by spawned engine procs).
+    Requires bench/vllm_grid_patch.py site 5 applied (real_run applies it).
+    """
+    import time
+
+    from vllm import LLM, SamplingParams
+    from vllm.sampling_params import StructuredOutputsParams
+
+    grammar = GRAMMAR_SQL.read_text()
+    batches = [int(b) for b in args.batches.split(",")]
+    schema_items = list(SCHEMAS.items())
+    results: dict[tuple[str, int], dict] = {}
+    for leg, flag in (("off", "0"), ("on", "1")):
+        os.environ["GRID_JUMP"] = flag
+        llm = LLM(model=args.model, gpu_memory_utilization=args.gpu_mem,
+                  max_model_len=args.max_model_len, enforce_eager=False,
+                  structured_outputs_config={"backend": "grid"})
+        for b in batches:
+            prompts, sps, rids = [], [], []
+            for i in range(b):
+                name, schema = schema_items[i % len(schema_items)]
+                spec = json.dumps({"grammar": grammar, "schema": schema})
+                prompts.append(f"{PROMPT}{name} #{i}: ")
+                sps.append(SamplingParams(
+                    temperature=0.0, max_tokens=args.max_tokens,
+                    structured_outputs=StructuredOutputsParams(grammar=spec)))
+                rids.append(f"jp-{leg}-{b}-{i}")
+            eng = llm.llm_engine
+            for rid, prompt, sp in zip(rids, prompts, sps, strict=True):
+                eng.add_request(rid, prompt, sp)
+            toks: dict[str, list[int]] = {}
+            steps = 0
+            t0 = time.perf_counter()
+            while eng.has_unfinished_requests():
+                outs = eng.step()
+                steps += 1
+                for out in outs:
+                    toks[out.request_id] = list(out.outputs[0].token_ids)
+            wall = time.perf_counter() - t0
+            results[(leg, b)] = {
+                "steps": steps, "wall_s": wall,
+                "tokens": sum(len(v) for v in toks.values()),
+                "streams": {rid.split("-", 2)[-1]: v for rid, v in toks.items()},
+            }
+        del llm
+    os.environ.pop("GRID_JUMP", None)
+
+    ok = True
+    print("\nS1 jump-forward probe (greedy; steps saved is the lever's effect):")
+    print(f"{'batch':>6}{'steps off':>10}{'steps on':>10}{'saved':>8}"
+          f"{'tok off':>9}{'tok on':>8}  parity")
+    for b in batches:
+        off, on = results[("off", b)], results[("on", b)]
+        saved = (off["steps"] - on["steps"]) / off["steps"] if off["steps"] else 0.0
+        parity = off["streams"] == on["streams"]
+        ok &= parity
+        print(f"{b:>6}{off['steps']:>10}{on['steps']:>10}{100 * saved:>7.1f}%"
+              f"{off['tokens']:>9}{on['tokens']:>8}  {'YES' if parity else 'NO'}")
+        if not parity:
+            for key in sorted(off["streams"]):
+                a, c = off["streams"].get(key, []), on["streams"].get(key, [])
+                if a != c:
+                    i = next((k for k, (x, y) in enumerate(zip(a, c)) if x != y),
+                             min(len(a), len(c)))
+                    print(f"    request {key}: first divergence at token {i} "
+                          f"(off {a[i:i + 3]} vs on {c[i:i + 3]})")
+    print("  parity gate:", "OK" if ok else "FAILED — do not flip GRID_JUMP on")
+    return ok
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--mock", action="store_true")
@@ -760,7 +844,18 @@ def main() -> int:
                          "legacy lockstep math for comparison.")
     ap.add_argument("--assert-gates", action="store_true")
     ap.add_argument("--out", default=str(BENCH_DIR / "RESULTS-serving.md"))
+    ap.add_argument("--jump-probe", action="store_true",
+                    help="S1 standalone mode (GPU host): {GRID_JUMP off,on} x "
+                         "{--batches} greedy legs on the grid backend — "
+                         "engine-step counts (steps saved) + token-parity "
+                         "gate. Runs instead of the arm matrix.")
     args = ap.parse_args()
+
+    if args.jump_probe:  # pragma: no cover - GPU host only
+        assert not args.mock, "--jump-probe is a real-engine probe"
+        import vllm_grid_patch
+        vllm_grid_patch.main()
+        return 0 if _jump_probe(args) else 1
 
     if args.mock:
         arms = args.arms.split(",")
