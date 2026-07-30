@@ -394,3 +394,110 @@ standard-host rerun remains open alongside the S1 GPU-box items).
 Residual: store schema_src remains text (hits re-parse; the optional
 'grammar' pickle namespace is the recorded follow-on), and the DP-LALR
 int-id handoff (CANDIDATES id 6) now has a clean seam via GrammarParts.
+
+## Postscript: P5 LALR construction budget (post-v0.3.0, wave C)
+
+The last LALR-family hangs terminate declared. Both constructions now
+count items materialized (sum of closure sizes at state creation —
+input-derived, machine-independent, memory-proportional) plus states,
+checked at every new state (two int compares); crossing either cap raises
+the declared LALRBudgetExceeded carrying (states, items, item_budget,
+state_budget), phrased in the frontend's "budget exceeded (size cap)"
+family. GRID_LALR_BUDGET overrides the item budget ("0" disables both
+caps — the audit/oracle escape hatch); the state cap rides the same knob
+at budget // 8. Declines are never cached (store puts only on success;
+serving's SingleFlight negative-caches 30s, then rebuilds to the identical
+fire point), so budget outcomes reproduce exactly warm and cold.
+
+### Calibration: the planned 8M default was refuted by the full corpus
+
+The roadmap's anchor ("largest completer = tmlanguage, 1.83M items; 8M =
+4.4x headroom") was profiled-sets-only. The calibration sweep this item
+demanded ran the SHIPPED maskbench build sequence (initial build + LALR-
+conflict retry) over all 11,306 corpus schemas, dp path, recording per-leg
+construction counters (diff_lalr.py --counts --ids-from-dir
+tmp/mb-grid-v030rc2; out: tmp/perfbench-lalr-counts-pre). Census
+reconciles with rc2 exactly — ok 10,669 (rc2's 10,664 + the 5 P3-fixed
+substring-union schemas, whose LALR is small and which timed out in the
+scanner phase this child never runs), conflict 519 (== rc2's declared
+LALRConflictError), skip 116 (== 106 Unsupported + 9 RxUnsupported + 1
+GrammarInvalid), killed 2 (helm-testsuite, o27148 — rc2's LALR-family
+timeouts). 11,734 completed constructions (conflict-retry legs included):
+
+| completer (top by lr0_items) | items | states | s/leg | rc2 outcome |
+|---|---|---|---|---|
+| o21112 | 20,094,330 | 926,457 | ~54 | LALRConflictError |
+| o21108 | 8,881,971 | 430,362 | ~24 | LALRConflictError |
+| io-package | 5,792,920 | 207,610 | ~29 | LALRConflictError |
+| o43189 | 4,534,113 | 240,116 | ~16 | LALRConflictError |
+| meta | 2,852,780 | 112,688 | ~7 | LALRConflictError |
+| pkg_schema | 1,950,817 | 189,477 | ~5 | ok |
+| tmlanguage | 1,831,000 | 171,509 | ~8 | ok |
+
+(completer p50 642 items, p99 227,972.) The conflict family's heavy tail
+was invisible to the profiled sets: conflicts are a fill-stage outcome,
+reported only AFTER the full construction, so a conflict schema is a
+completing BUILD the budget must respect. o21112 at 20.09M items sits 2.5x
+ABOVE the planned 8M default (which is therefore rejected — it would have
+changed two completers' declared class), and only 2.4x BELOW the smallest
+hang the budget exists to declare (o27148, 48.17M items). The plan's
+">=4x headroom" rule is unsatisfiable on the items axis; the shipped
+default is the log-midpoint of the measured gap:
+
+    ITEM_BUDGET = 32M (1.59x above the largest completer, 1.51x below
+    o27148), STATE_BUDGET = 32M // 8 = 4M (4.3x the largest completer's
+    926k states — >=4x holds on the states axis).
+
+Two structural arguments cover the thin items headroom: the completer
+distribution is not near a continuum edge (p99 is 88x below the max; the
+>2M population is five schemas, all measured exactly), and completer size
+is cap-bounded — a build near 32M items costs ~90s+ per leg, two legs per
+compile, which could not have finished inside the 120s corpus cap that
+defines today's completer set. Deployments that want o27148's actual
+conflict report back can raise GRID_LALR_BUDGET to 50M (~132s build).
+
+### Measured fire behavior and gates
+
+- helm-testsuite (LR(0) core diverges; 62.75M items and climbing at 60s
+  pre-budget): 120s timeout -> declared in 28.3-29.7s at 32,000,099 items
+  / 289,811 states, peak RSS 4.36-4.48GB across runs — bounded, and
+  comparable to what the o21112 completer legitimately materializes today;
+  identical fire counts across four independent runs (idle and
+  10-job-loaded).
+- o27148 (conflict detection needs the full 48.17M-item automaton + DP
+  lookaheads, ~132s): 120s timeout -> declared in 39.3-42.6s at
+  32,000,035 items / 1,096,970 states, peak RSS 4.65GB; identical fire
+  counts across three independent runs.
+- Corpus verify (tmp/perfbench-lalr-counts-on vs -pre, 11,306 records):
+  fire set is EXACTLY {helm-testsuite, o27148}, both timeout ->
+  declared:LALRBudgetExceeded — the outcomes.py-sanctioned direction
+  (baseline timeouts have no oracle), and vs rc2 NO error-class changes
+  at all (o27148 was a timeout in rc2, not a conflict; the plan's
+  "conflict->budget class change" scoping dissolved on measurement).
+  Zero fires on the other 11,304 schemas; construction counters
+  byte-identical on every unchanged record.
+- Overhead: o948 (928 states / 2,627 items) in-process compile_tables
+  median, 200 reps, idle box: 4.933ms (pre-P5 b39c326) -> 4.973ms
+  (counters + budget, default ON), +0.8%; interleaved
+  default-vs-kill-switch under full sweep load: ratio 1.015.
+  Independently reproduced in the verification pass: 4.897ms -> 4.945ms
+  (+1.0%), interleaved ratio 1.006. The per-schema paired diff-run
+  comparison (269 schemas equal in both differential sweeps) has ON/OFF
+  dp-time ratio p50 0.97 (>=100ms builds, n=25: aggregate 0.91 — the ON
+  sweep ran on a lighter-loaded box), i.e. at corpus scale the
+  counter+budget cost is indistinguishable from run-to-run load noise;
+  the controlled number is the in-process interleaved pair. All within
+  the <10% stratified-p50 gate.
+- dp/lr1_merge differential (ttfm_tail_1pct + stratified_200 +
+  tbm_tail_100, budget ON): zero mismatches; helm classifies as the
+  scoped over-budget outcome (class equality only — LR(1) materializes
+  >= LR(0) items, so fire counts differ by construction).
+
+Residual: with P3's substring-union fix, no known compile-cap family
+remains corpus-wide — pending confirmation by the epoch's one-shot full
+maskbench run (DESIGN.md ground rule), where the two fires will appear as
+compile_error:LALRBudgetExceeded and outcomes.py compare must show exactly
+two "improved" rows vs rc2. Peak-RSS-at-fire scales with the budget
+(4.4-4.7GB measured at 32M CPython items); a deployment that needs a
+tighter memory envelope lowers GRID_LALR_BUDGET at the documented
+completer tradeoff.

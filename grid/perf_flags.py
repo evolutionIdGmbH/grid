@@ -31,6 +31,12 @@ Flag table:
                                                             (default on:
                                                             unset = "1") else
                                                             "lr1_merge"
+    GRID_LALR_BUDGET            lalr_budget(default)        int(); "0" = cap
+                                                            disabled (None:
+                                                            unbounded
+                                                            construction);
+                                                            ValueError on
+                                                            garbage
     GRID_PERF_HASHCONS          hashcons_components()       ""/"0" = none,
                                                             "1"/"all" = all,
                                                             else comma list
@@ -123,6 +129,23 @@ def lalr_algorithm() -> str:
     "0", kept as the construction-independent oracle), for
     lalr.compile_tables."""
     return "dp" if os.environ.get("GRID_PERF_LALR_DP", "1") == "1" else "lr1_merge"
+
+
+def lalr_budget(default: int) -> int | None:
+    """GRID_LALR_BUDGET -> LALR construction item budget for
+    lalr.compile_tables (the state cap is derived at the call site from the
+    same value; both constructions check it at every new state). Crossing
+    the cap raises the DECLARED LALRBudgetExceeded instead of building on —
+    the terminate-deterministically outcome for the helm-testsuite /
+    o27148 divergence classes. "0" is the kill switch: returns None = caps
+    disabled = the pre-budget unbounded constructions (audit/oracle escape
+    hatch). Other values are int() with the default injected by the call
+    site (lalr.compile._DEFAULT_ITEM_BUDGET), ValueError on garbage — the
+    component_budget grammar. Keeps the bare GRID_ prefix (it declares an
+    outcome class, like the serving levers, rather than selecting an
+    equivalent faster path) but is born here per the post-E1 discipline."""
+    val = int(os.environ.get("GRID_LALR_BUDGET", str(default)))
+    return None if val == 0 else val
 
 
 # 'rulefor' (structural rule_for memo) is planned but NOT implemented; the

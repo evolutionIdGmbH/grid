@@ -165,6 +165,32 @@ the realistic saving rides on bonus tokens; byte-level JF (~10x the mass)
 stays the recorded v2 deferral. Mode-2 logits-processor route untouched
 (§4.5 rule 3: singleton-degrade, never a unioned span mask).
 
+LALR construction budget (P5, `GRID_LALR_BUDGET`, default 32M items with a
+derived 4M-state cap; `=0` disables — the audit/oracle escape hatch): both
+table constructions count items materialized (closure sizes at state
+creation — input-derived, machine-independent, memory-proportional) and
+raise the declared `LALRBudgetExceeded(states, items, item_budget,
+state_budget)` instead of building past the cap. The two residual
+LALR-family 120s compile caps terminate deterministically: helm-testsuite
+(LR(0) core diverges — 62.7M items and climbing at 60s) declares in ~29s
+at 32,000,099 items / 289,811 states with peak RSS bounded at 4.5GB, and
+o27148 (conflicts reportable only after its full 48.17M-item automaton,
+~132s) declares in ~40s at 32,000,035 items / 1,096,970 states — fire
+counts identical across runs, and never cached (the artifact store puts
+only on success). Calibrated on a full-corpus counts sweep of the shipped
+build sequence (conflict-retry legs included; census reconciles with rc2
+exactly): the largest completing build is the conflict-family completer
+o21112 at 20.09M items / 926k states — 2.5x the roadmap's planned 8M
+default, which is therefore rejected — and the default is the log-midpoint
+between it and o27148 (1.59x/1.51x margins; >=4x headroom holds on the
+states axis). Zero fires on the other 11,304 corpus schemas, counters
+byte-identical on every unchanged record; construction overhead +0.8%
+(o948 in-process median, 200 reps). dp defines shipped outcomes; the
+lr1_merge oracle may fire where dp completes (LR(1) materializes >= LR(0)
+items), so differential gates assert table equality under budget and
+declared-class equality over it. With P3's substring-union fix this leaves
+no known compile-cap family, pending the epoch's one-shot full run.
+
 ## 0.3.0 - 2026-07-30
 
 The performance epoch: compile-time (TTFM) tail work, selected by measured
