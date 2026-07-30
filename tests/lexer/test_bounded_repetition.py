@@ -8,16 +8,12 @@ from grid.grammar.spec import Terminal
 from grid.lexer.dfa import _parse_regex, build_scanner
 
 
-def _accepts(pattern: str, text: str) -> bool:
+def _accepts(pattern: str, text: str, counting: bool = False) -> bool:
     term = Terminal(name="T", pattern=pattern, is_literal=False,
                     ignored=False, decl_index=0)
-    dfa = build_scanner({"T": term}, ["T"])
-    state = dfa.start
-    for b in text.encode("latin-1"):
-        state = dfa.next(state, b)
-        if state < 0:
-            return False
-    return dfa.accept[state] >= 0
+    dfa = build_scanner({"T": term}, ["T"], counting=counting)
+    state = dfa.scan_state(text.encode("latin-1"))
+    return state >= 0 and dfa.accept[state] >= 0
 
 
 CASES = [
@@ -30,24 +26,31 @@ CASES = [
     ("[0-9]{2,3}x", ["12x", "123x"], ["1x", "1234x", "12"]),
     ("(ab){2}", ["abab"], ["ab", "ababab"]),
     ("a{1,2}b{1,2}", ["ab", "aab", "abb", "aabb"], ["a", "b", "aaab"]),
+    # counting-eligible spans (>= _COUNTING_MIN_SPAN, non-final loop)
+    ("[0-9]{2,12}x", ["12x", "123456789012x"], ["1x", "1234567890123x", "12"]),
+    ("a{8,}b", ["a" * 8 + "b", "a" * 20 + "b"], ["a" * 7 + "b", "a" * 8]),
 ]
 
 
-def test_bounded_repetition_semantics():
+@pytest.mark.parametrize("counting", [False, True])
+def test_bounded_repetition_semantics(counting):
     for pat, yes, no in CASES:
         for s in yes:
-            assert _accepts(pat, s), (pat, s)
+            assert _accepts(pat, s, counting), (pat, s)
         for s in no:
-            assert not _accepts(pat, s), (pat, s)
+            assert not _accepts(pat, s, counting), (pat, s)
 
 
-def test_equivalent_to_unrolled():
+@pytest.mark.parametrize("counting", [False, True])
+def test_equivalent_to_unrolled(counting):
     pairs = [("a{2,4}", "aaa?a?"), ("a{2,}", "aaa*"), ("a{3}", "aaa"),
-             ("[xy]{1,3}", "[xy][xy]?[xy]?")]
-    probes = ["", "a", "aa", "aaa", "aaaa", "aaaaa", "x", "xy", "xyx", "xyxy"]
+             ("[xy]{1,3}", "[xy][xy]?[xy]?"),
+             ("[xy]{8,10}z", "[xy]{8}[xy]?[xy]?z")]
+    probes = ["", "a", "aa", "aaa", "aaaa", "aaaaa", "x", "xy", "xyx", "xyxy",
+              "xyxyxyxy" + "z", "xyxyxyxyx" + "z", "xyxyxyxyxyx" + "z"]
     for braced, unrolled in pairs:
         for s in probes:
-            assert _accepts(braced, s) == _accepts(unrolled, s), (braced, s)
+            assert _accepts(braced, s, counting) == _accepts(unrolled, s), (braced, s)
 
 
 def test_literal_brace_fallback():
