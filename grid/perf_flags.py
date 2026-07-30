@@ -47,6 +47,10 @@ Flag table:
                                                             off until the
                                                             H100 serving
                                                             stamp)
+    GRID_JUMP                   jump_enabled()              == "1" (default
+                                                            off: serving
+                                                            jump-forward
+                                                            draft injection)
 
 Contract (enforced by tests/test_perf_flags.py):
 
@@ -58,9 +62,13 @@ Contract (enforced by tests/test_perf_flags.py):
   lru_cache, no module-level snapshot): tests monkeypatch these flags
   between calls, and long-lived serving processes may flip them.
 
-Non-GRID_PERF flags (GRID_CACHE_DIR, GRID_ADMIT_WARM, GRID_DEFER, ...) are
-out of scope: they are not performance-path selectors and keep their
-existing read sites.
+Pre-existing non-GRID_PERF flags (GRID_CACHE_DIR, GRID_ADMIT_WARM,
+GRID_DEFER, ...) are out of scope: they are not performance-path selectors
+and keep their existing read sites. NEW performance levers are born here
+regardless of prefix (the post-E1 discipline) — GRID_JUMP, the serving
+jump-forward lever, is the first: it keeps the serving-flag GRID_ prefix
+(it selects scheduler-side behavior like GRID_DEFER, not a compile path)
+but reads through this module so its grammar is oracle-tested.
 """
 
 import os
@@ -184,3 +192,16 @@ def slicer_enabled() -> bool:
     enables, anything else is the kill switch restoring today's full-trie
     walk byte-for-byte."""
     return os.environ.get("GRID_PERF_SLICER", "0") == "1"
+
+
+def jump_enabled() -> bool:
+    """GRID_JUMP: serving jump-forward (S1). When "1",
+    GridGrammarSession.jump_tokens() emits the forced (singleton-mask)
+    token run from the session's current position as draft tokens for
+    scheduler-side injection (bench/vllm_grid_patch.py site 5); the next
+    engine step verifies the whole run under per-position bitmasks in one
+    forward pass. Default OFF for the first epoch; any other value —
+    including "" — is the kill switch: jump_tokens() returns [] without
+    touching the kernel session (the GRID_DEFER=0 byte-identical-no-op
+    shape). Read at session construction, one session per request."""
+    return os.environ.get("GRID_JUMP", "0") == "1"

@@ -145,6 +145,26 @@ untouched (`vllm_processor` receives grammar TEXT in the request spec).
 Artifact-store schema_src entries remain text; store hits load text in
 both flag states.
 
+Serving jump-forward (S1, `GRID_JUMP`, default OFF — parity-gated, not yet
+box-validated): forced token runs (singleton-mask chains, the §4.5
+mechanism mode 1 already jumps) delivered to the vLLM scheduler-side
+backend as draft tokens. `GridGuide.forced_run` (public pure-query span
+surface) + `GridGrammarSession.jump_tokens()` — state-neutral, v5 guide
+path and v6 kernel path (warm-only chaining via session_fill/accept +
+rollback; cold successors end the jump, never walk) — + patch site 5
+(spec_token_ids injection after accept_tokens; drafter proposals keep
+winning) + the upstream-shaped vllm_upstream_jump_tokens.patch. At a
+forced position the bitmask admits exactly one token, so draft acceptance
+is certain under any sampler: greedy token parity off-vs-on is the flip
+gate (bench/vllm_serving_bench.py --jump-probe, vllm_sched_accept.py
+--jump — both pending the next GPU session, as is the step-3 probe of
+0.24's SO+spec interplay/bonus-token mechanics). Measured stage-0 density
+(bench/RESULTS-jf-density.md, JSB replay, gpt2): forced steps 2.3%
+overall, 8-13% on rigid function-call-style splits, runs ~all length-1 —
+the realistic saving rides on bonus tokens; byte-level JF (~10x the mass)
+stays the recorded v2 deferral. Mode-2 logits-processor route untouched
+(§4.5 rule 3: singleton-degrade, never a unioned span mask).
+
 ## 0.3.0 - 2026-07-30
 
 The performance epoch: compile-time (TTFM) tail work, selected by measured
