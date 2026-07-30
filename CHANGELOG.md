@@ -223,8 +223,10 @@ Artifact-store redeploy warm set (S3, still under the default-off
   bench/perfbench/diff_store_warm.py off/cold/warm corpus digests (src,
   tables, scanner, mask-drive entry ids, error text).
 - Measured (bench/perfbench/store_coldwarm.py, fresh process per scenario,
-  results in the S3 wave report): warm-hit p50 stays the default-on gate;
-  store remains default-off this epoch.
+  results in the BAKEOFF.md S3 postscript — load-caveated): redeploy warm
+  hits erase the heavy tails (p3_family p50 5245 -> 17ms, ttfm_capped
+  1039 -> 23ms) while fast schemas pay ~2ms at p50, so the warm-hit p50
+  stays the default-on gate; store remains default-off this epoch.
 
 ## 0.3.0 - 2026-07-30
 

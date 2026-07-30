@@ -394,3 +394,75 @@ standard-host rerun remains open alongside the S1 GPU-box items).
 Residual: store schema_src remains text (hits re-parse; the optional
 'grammar' pickle namespace is the recorded follow-on), and the DP-LALR
 int-id handoff (CANDIDATES id 6) now has a clean seam via GrammarParts.
+
+## Postscript: S3 artifact store (post-v0.3.0, wave C)
+
+The redeploy warm set shipped — component/trie/journal namespaces beside
+schema_src/scanner/lalr, all under the default-off GRID_PERF_ARTIFACT_STORE
+master with per-namespace kill switches (the CHANGELOG Unreleased S3 entry
+carries the full design: cross-schema TerminalDFA payloads + breach
+markers, slicer-variant trie keys, journal snapshot/restore under
+GRID_ADMIT_WARM). Two reconciliations landed on review + the wave-b merge:
+
+- **Failed-build law, scoped.** The old blanket "failed builds never put"
+  predates the component namespace and broke against it: /x*/'s
+  TerminalDFA is validly persisted before the scanner-level empty-match
+  law rejects the grammar. Scoped law: grammar-keyed namespaces
+  (schema_src/scanner/lalr) never persist from a failed build; the
+  component namespace keeps VALIDLY-built components — its
+  (kind, budget, pattern) identity is grammar-independent, and the failing
+  check re-runs and re-raises identically over exactly such partial warm
+  stores (GrammarInvalid ordering + message-parity tests construct them
+  deliberately). The alternative (conditioning component puts on
+  parent-build success) would strand cross-schema warmth precisely for the
+  substring-union family the namespace was built for.
+- **code_epoch() executes nothing.** import_module semantics charged
+  grid.trie.build — and with it numpy, ~20ms — to the FIRST store access:
+  a pure import tax on the warm-hit p50 this postscript quotes. find_spec
+  fixed that but still executed parent-package inits
+  (grid.jsonschema's pulls the whole compiler chain, ~31ms fully cold —
+  real in grid-source-only serving processes). Final semantics: sys.modules,
+  else a PathFinder walk over parent search locations — specs located,
+  zero modules executed, fully-cold ~10ms / mid-compile ~7ms, epoch value
+  unchanged. Pinned by a subprocess probe (no new grid.* module, no
+  numpy).
+
+Gates at this HEAD (post-merge, post-scoping, post-epoch-fix): full pytest
+shipped defaults exit 0; full pytest legacy kill-switch leg
+(FACTORED_SCANNER=0 LALR_DP=0 HASHCONS=0 DIRECT_EMIT=0) exit 0; the store
+differential test file 8/8 under both flag states; diff_store_warm over
+stratified_200+p3_family+ttfm_capped (221 units x off/cold/warm legs):
+off-vs-cold OK 221 identical, off-vs-warm OK 221 identical — src, tables,
+scanner, drive entry-ids, error text; timeout (helm) and declared-error
+(x7) units agree across legs.
+
+Measured (store_coldwarm.py protocol: fresh child per scenario, sequential;
+C = flag-off, A = cold+persist on empty store, B = redeploy warm hit;
+ms/schema pipeline totals; LOAD CAVEAT: dev box under concurrent wave-C
+agent load, absolutes are upper bounds — scenario STRUCTURE is the durable
+claim; a quiet-machine retake is warranted before quoting absolutes
+anywhere else):
+
+| group (n) | C p50/p99 | A p50/p99 | B p50/p99 |
+|---|---|---|---|
+| p3_family (14) | 5245 / 12947 | 5249 / 12815 | **17.1** / 919 |
+| ttfm_capped (7) | 1039 / 1392 | 1207 / 1438 | **22.7** / 155 |
+| stratified_200 (50, stride 4) | 7.1 / 999 | 18.4 / 1129 | 9.0 / 178 |
+
+timeouts 1/1/1 (helm-testsuite, all scenarios — parity); declared errors
+6/6/6. Per-schema store p50 139 KiB, max 15.8 MiB; deduplicated deployment
+footprint 65.6 MiB over 1,616 unique entries (scanner 28.8M, component
+17.7M, lalr 16.1M, schema_src 3.0M). Journal TBM legs (spider dialect,
+compile artifacts warm in both): redeploy-warm first-request mask p50
+14us / p99 48us vs redeploy-cold 52us / 64us — the journal moves the
+recurring cold-walk set off the first-request path.
+
+Reading: the warm set erases exactly the tails it was built for —
+p3_family redeploy p50 307x under flag-off (breach markers skip the capped
+eager attempt), ttfm_capped 46x — while fast schemas PAY at p50 (B 9.0 vs
+C 7.1ms: consult + unpickle beats a trivial rebuild only when the build is
+nontrivial; same shape F2 recorded cold, +5-7ms/A-leg). Disposition
+unchanged: GRID_PERF_ARTIFACT_STORE stays default-off this epoch; the
+default-on decision belongs to a serving-box warm-hit measurement over a
+real redeploy population, where the B-leg tails and the journal legs are
+the operative numbers.
