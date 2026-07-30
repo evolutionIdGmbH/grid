@@ -17,6 +17,7 @@ lexicon-live states (identifier positions), and closure blowups.
 """
 
 import dataclasses
+import os
 import random
 
 import numpy as np
@@ -264,8 +265,14 @@ def test_proof_refuses_lexicon_live_states(sql_grammar, sql_tokenizer, monkeypat
 
 needs_kernel = pytest.mark.skipif(
     W._grid_core is None or not hasattr(W._grid_core, "RustWalker")
-    or not hasattr(W._grid_core.RustWalker, "slice_stats"),
-    reason="slicer-capable grid_core not installed",
+    or not hasattr(W._grid_core.RustWalker, "slice_stats")
+    # forced-lazy / no-rust CI legs: build_scanner returns a LazyProductDFA,
+    # which the kernel walker legitimately never receives (the walk gate
+    # routes lazy facades to the spec path) - there is no kernel to exercise
+    or os.environ.get("GRID_NO_RUST") == "1"
+    or os.environ.get("GRID_PERF_FACTORED_BUDGET") == "0",
+    reason="kernel walk not exercisable (no slicer-capable grid_core, "
+           "GRID_NO_RUST, or forced-lazy regime)",
 )
 
 
