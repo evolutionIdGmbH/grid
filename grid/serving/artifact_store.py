@@ -31,9 +31,15 @@ verify an envelope (format, epoch, namespace, key) and self-heal (unlink +
 rebuild) on any mismatch or corruption; writes are atomic (per-writer tmp —
 pid, thread id, counter — + os.replace), so concurrent writers, threads
 included, at worst duplicate work with identical content. Failed builds raise
-before any put, so error outcomes reproduce
-exactly on warm runs. With the flag off every helper is a pure passthrough to
-the underlying builder.
+before any put IN THEIR OWN namespace, so error outcomes reproduce exactly on
+warm runs. The component namespace is deliberately finer-grained: its
+identity is the (kind, budget, pattern) triple, self-contained and
+cross-schema, so a factored-scanner build that fails a scanner-level law
+(e.g. the empty-match check) after building some components validly KEEPS
+those component entries — a valid component is valid under any grammar, and
+the failing check itself re-runs and re-raises identically on warm builds
+(pinned by the partial-warm-store parity tests). With the flag off every
+helper is a pure passthrough to the underlying builder.
 
 Security: entries are pickles, and unpickling executes code. The store is safe
 only because artifacts are self-produced under a user-owned directory (default
