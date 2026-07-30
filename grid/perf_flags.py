@@ -43,6 +43,10 @@ Flag table:
                                                             "0" = text ->
                                                             spec.load)
     GRID_PERF_DIRECT_EMIT_CHECK direct_emit_check_enabled() == "1"
+    GRID_PERF_SLICER            slicer_enabled()            == "1" (default
+                                                            off until the
+                                                            H100 serving
+                                                            stamp)
 
 Contract (enforced by tests/test_perf_flags.py):
 
@@ -166,3 +170,17 @@ def direct_emit_check_enabled() -> bool:
     otherwise. The permanent CI oracle against renderer/object-builder
     drift."""
     return os.environ.get("GRID_PERF_DIRECT_EMIT_CHECK", "0") == "1"
+
+
+def slicer_enabled() -> bool:
+    """GRID_PERF_SLICER: tokenizer slicer (S2) — build_trie additionally
+    partitions the vocabulary by the JSON-string-safe byte class into a
+    precomputed slice-id array + rest-trie (grid/trie/build.py TrieSlices),
+    and the walk (kernel walk_auto / spec _walk_py) skips the sliced 96% of
+    the trie whenever the containment proof passes. Read at BUILD sites
+    (build_trie; the tables are structural), so a flip affects tries built
+    after it — walkers over a slice-carrying trie keep slicing. Default OFF
+    pending the H100 serving stamp (the GRID_V7 flip precedent); only "1"
+    enables, anything else is the kill switch restoring today's full-trie
+    walk byte-for-byte."""
+    return os.environ.get("GRID_PERF_SLICER", "0") == "1"

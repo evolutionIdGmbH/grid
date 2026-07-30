@@ -224,6 +224,22 @@ def test_direct_emit_check_oracle(monkeypatch, raw):
     assert perf_flags.direct_emit_check_enabled() == oracle
 
 
+@pytest.mark.parametrize("raw", RAW_VALUES)
+def test_slicer_oracle(monkeypatch, raw):
+    _setenv(monkeypatch, "GRID_PERF_SLICER", raw)
+    # == "1" grammar, default OFF (pre-H100-stamp disposition: the flip to
+    # default-on is a separate, stamped change)
+    oracle = os.environ.get("GRID_PERF_SLICER", "0") == "1"
+    assert perf_flags.slicer_enabled() == oracle
+    if raw in (None, "", "0", "true", "2", "00"):
+        assert perf_flags.slicer_enabled() is False
+
+
+def test_slicer_default_is_off(monkeypatch):
+    monkeypatch.delenv("GRID_PERF_SLICER", raising=False)
+    assert perf_flags.slicer_enabled() is False
+
+
 # ------------------------------------------------------- call-time reads
 
 
@@ -274,6 +290,11 @@ def test_every_reader_is_call_time(monkeypatch):
     assert perf_flags.direct_emit_check_enabled() is True
     monkeypatch.setenv("GRID_PERF_DIRECT_EMIT_CHECK", "0")
     assert perf_flags.direct_emit_check_enabled() is False
+
+    monkeypatch.setenv("GRID_PERF_SLICER", "1")
+    assert perf_flags.slicer_enabled() is True
+    monkeypatch.setenv("GRID_PERF_SLICER", "0")
+    assert perf_flags.slicer_enabled() is False
 
 
 # ------------------------------------------------------- leaf import
