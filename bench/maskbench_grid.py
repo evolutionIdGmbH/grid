@@ -13,9 +13,10 @@ Mirrors maskbench/maskbench/runner.py measurement semantics exactly:
 
 Engines: --engine grid | llg | xgr  (xgr in "compliant" mode: any whitespace,
 non-strict - the configuration MaskBench documents for apples-to-apples runs).
-The GRID arm compiles schemas via bench/json_schema_to_grid.py (v1 subset;
-unsupported features raise -> compile-error bucket, llguidance-style honesty)
-and shares the per-tokenizer trie across schemas (like llg/xgr tokenizer init).
+The GRID arm compiles schemas via grid.jsonschema.compile_json_schema_grammar
+(unsupported features raise -> compile-error bucket, llguidance-style honesty;
+GRID_PERF_DIRECT_EMIT selects text-load vs direct object emission) and shares
+the per-tokenizer trie across schemas (like llg/xgr tokenizer init).
 
 Run each engine over the SAME deterministic sample, then aggregate:
   .venv-bench/bin/python bench/maskbench_grid.py --engine grid --data <dir> --sample 15
@@ -71,33 +72,35 @@ class GridEngine:
         self.extra: dict = {}
 
     def compile_grammar(self, schema: dict) -> None:
-        from json_schema_to_grid import compile_schema as _compile
-
-        def compile_schema(s, **kw):
-            return _compile(s, strict=self.strict, **kw)
-
+        from grid import perf_flags
         from grid.errors import LALRConflictError
-        from grid.grammar import spec
         from grid.grammar.projection import RoleProjection
         from grid.guide import GridGuide
+        from grid.jsonschema import compile_json_schema_grammar
         from grid.lalr.compile import compile_tables
         from grid.lexer.dfa import build_scanner
 
-        src, ignored = compile_schema(schema)
-        grammar = spec.load(src)
-        proj = RoleProjection.full(grammar).build()
+        def build(unify: bool):
+            # grammar-object API (P2): flag-off = text + spec.load exactly
+            # as before; GRID_PERF_DIRECT_EMIT=1 skips render + re-parse and
+            # takes the trusted full-projection register (differentially
+            # gated: bench/perfbench/diff_direct_emit.py)
+            grammar, ignored = compile_json_schema_grammar(
+                schema, strict=self.strict, unify_string_values=unify)
+            proj = RoleProjection.full_built(grammar) \
+                if perf_flags.direct_emit_enabled() \
+                else RoleProjection.full(grammar).build()
+            return grammar, ignored, compile_tables(proj)
+
         try:
-            tables = compile_tables(proj)
+            grammar, ignored, tables = build(False)
         except LALRConflictError:
             # conflict retry (once): re-normalize with branch string-value
             # unification — overlapping per-branch string values collapse to
             # one shared rule (widening, recorded/declared by mode). Schemas
             # whose first build succeeds never reach this path; residual
             # conflicts propagate as the honest compile error.
-            src, ignored = compile_schema(schema, unify_string_values=True)
-            grammar = spec.load(src)
-            proj = RoleProjection.full(grammar).build()
-            tables = compile_tables(proj)
+            grammar, ignored, tables = build(True)
         dfa = build_scanner(grammar.terminals, grammar.terminal_order)
         self.guide = GridGuide(tables=tables, dfa=dfa, trie=self.trie, adapter=self.adapter)
         self.extra = {

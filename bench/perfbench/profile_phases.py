@@ -70,18 +70,37 @@ def child(schema_file: str, out_file: str) -> None:
         if isinstance(schema, dict) and "schema" in schema and "tests" in schema:
             schema = schema["schema"]  # wrapped maskbench layout
 
+        from grid import perf_flags
         from grid.grammar import spec
         from grid.grammar.projection import RoleProjection
         from grid.jsonschema import compile_json_schema
         from grid.lalr.compile import compile_tables
         from grid.lexer.dfa import build_scanner
 
-        src, recorded = phase("schema_compile", lambda: compile_json_schema(schema))
-        rec["stats"]["src_bytes"] = len(src)
-        rec["stats"]["recorded"] = len(recorded)
-        grammar = phase("spec_load", lambda: spec.load(src))
-        rec["stats"]["terminals"] = len(grammar.terminals)
-        proj = phase("projection", lambda: RoleProjection.full(grammar).build())
+        if perf_flags.direct_emit_enabled():
+            # GRID_PERF_DIRECT_EMIT leg: the store-off sequence of
+            # compile_json_schema_grammar, split at the same joints so the
+            # record format (and A/B comparability) is unchanged —
+            # schema_compile = manifest build (no text render), spec_load =
+            # object build + shared validate/freeze, projection = trusted
+            # full_built. The flags snapshot above self-describes the leg.
+            from grid.jsonschema.compiler import compile_schema_parts
+
+            parts, recorded = phase(
+                "schema_compile", lambda: compile_schema_parts(schema))
+            rec["stats"]["recorded"] = len(recorded)
+            rec["stats"]["direct_emit"] = True
+            grammar = phase(
+                "spec_load", lambda: spec.DialectGrammar.from_parts(parts))
+            rec["stats"]["terminals"] = len(grammar.terminals)
+            proj = phase("projection", lambda: RoleProjection.full_built(grammar))
+        else:
+            src, recorded = phase("schema_compile", lambda: compile_json_schema(schema))
+            rec["stats"]["src_bytes"] = len(src)
+            rec["stats"]["recorded"] = len(recorded)
+            grammar = phase("spec_load", lambda: spec.load(src))
+            rec["stats"]["terminals"] = len(grammar.terminals)
+            proj = phase("projection", lambda: RoleProjection.full(grammar).build())
         tables = phase("lalr", lambda: compile_tables(proj))
         rec["stats"]["lalr_states"] = len(getattr(tables, "action", ()) or ())
         dfa = phase("scanner", lambda: build_scanner(grammar.terminals, grammar.terminal_order))
