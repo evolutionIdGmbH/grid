@@ -207,6 +207,13 @@ def process_file(engine, file: str, time_limit: int) -> dict:
         "validation_errors": 0,    # should accept but didn't
         "invalidation_errors": 0,  # should reject but didn't
     }
+    # stale-write fix (E4, informational fields only — no outcome semantics):
+    # engines set `extra` on compile SUCCESS, so without this clear the
+    # `finally` below stamped the PREVIOUS schema's n_terminals/kernel/
+    # ignored_features onto timeout and compile-error statuses (every status
+    # dir up to and including tmp/mb-grid-v030rc2 carries the artifact;
+    # outcomes.extras() defends those frozen dirs at read time)
+    engine.extra = {}
     signal.alarm(time_limit)
     try:
         t0 = time.monotonic()
