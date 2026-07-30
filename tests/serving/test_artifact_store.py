@@ -129,6 +129,28 @@ def test_source_mutation_changes_epoch(module, tmp_path, monkeypatch):
         store.code_epoch.cache_clear()
 
 
+def test_code_epoch_executes_no_payload_module():
+    """code_epoch LOCATES epoch sources (sys.modules / find_spec.origin)
+    without EXECUTING them: importing grid.trie.build would pull numpy
+    (~20ms) into the first store access — a pure import tax on the very
+    warm-hit latency the store exists to measure and remove. Fresh process:
+    the pytest process has numpy loaded long before this test runs."""
+    import subprocess
+    import sys
+
+    root = pathlib.Path(store.__file__).resolve().parents[2]
+    code = (
+        "import sys\n"
+        "from grid.serving import artifact_store\n"
+        "artifact_store.code_epoch()\n"
+        "bad = [m for m in ('numpy', 'grid.trie.build') if m in sys.modules]\n"
+        "assert not bad, f'code_epoch executed payload modules: {bad}'\n"
+    )
+    env = dict(os.environ, PYTHONPATH=str(root))
+    subprocess.run([sys.executable, "-c", code], check=True, env=env,
+                   cwd=str(root))
+
+
 def test_epoch_change_misses(cache, toy_grammar, monkeypatch):
     store.load_or_build_scanner(toy_grammar)
     monkeypatch.setattr(store, "code_epoch", lambda: "f" * 32)

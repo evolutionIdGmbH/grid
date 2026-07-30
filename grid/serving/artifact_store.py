@@ -114,8 +114,8 @@ def root() -> Path:
 
 @lru_cache(maxsize=1)
 def code_epoch() -> str:
-    import importlib
     import importlib.metadata
+    import importlib.util
 
     h = hashlib.blake2b(digest_size=16)
     try:
@@ -127,9 +127,18 @@ def code_epoch() -> str:
     # unpickle errors mid-serving
     h.update(f"|py{sys.version_info[0]}.{sys.version_info[1]}|".encode())
     for name in _EPOCH_MODULES:
-        mod = importlib.import_module(name)
+        # LOCATE the source, never execute it: importing grid.trie.build here
+        # would pull numpy (~20ms) into the first store access — a pure import
+        # tax on the very warm-hit latency the store exists to remove.
+        # Already-imported modules answer from sys.modules (free; and it lets
+        # tests monkeypatch __file__ to simulate a source change); the rest
+        # resolve via find_spec, which imports parent PACKAGES only — nothing
+        # on these paths executes a payload module or reaches numpy. Pinned by
+        # test_code_epoch_executes_no_payload_module.
+        mod = sys.modules.get(name)
+        origin = mod.__file__ if mod is not None else importlib.util.find_spec(name).origin
         h.update(name.encode())
-        h.update(Path(mod.__file__).read_bytes())
+        h.update(Path(origin).read_bytes())
     return h.hexdigest()
 
 
