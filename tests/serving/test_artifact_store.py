@@ -67,10 +67,13 @@ def test_schema_src_roundtrip(cache, monkeypatch):
 
 
 def test_lazy_scanner_never_persisted(cache, toy_grammar, monkeypatch):
-    """Store law (P1): product-interner state is never persisted. Forced-lazy
-    builds (component budget 1) return the facade and write NO entry — and
-    emit no put-failed warning (the pre-P1 behavior pickled the facade and
-    warned on its locks)."""
+    """Store law (P1), scoped per the S3 merge: product-interner state is
+    never persisted — forced-lazy builds (component budget 1) return the
+    facade and write NO scanner-namespace entry, and emit no put-failed
+    warning (the pre-P1 behavior pickled the facade and warned on its
+    locks). Component-namespace entries ARE expected: a lazy facade's
+    redeploy warmth comes from the cross-schema component store (module
+    docstring), and component identity is grammar-independent."""
     import warnings as _warnings
 
     monkeypatch.setenv("GRID_PERF_COMPONENT_BUDGET", "1")
@@ -78,7 +81,9 @@ def test_lazy_scanner_never_persisted(cache, toy_grammar, monkeypatch):
         _warnings.simplefilter("error")  # any store warning fails the test
         dfa = store.load_or_build_scanner(toy_grammar)
     assert getattr(dfa, "lazy", False), "forced-lazy fixture must build lazy"
-    assert _bins(cache) == []
+    by_ns = {p.parent.name for p in _bins(cache)}
+    assert "scanner" not in by_ns and "lalr" not in by_ns, by_ns
+    assert by_ns <= {"component"}, by_ns
 
 
 # ------------------------------------------------------------- flag off
