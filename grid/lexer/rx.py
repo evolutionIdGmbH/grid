@@ -32,12 +32,13 @@ def _expand_repeat(node: _Node, m: int, n: int | None) -> _Node:
 
 @dataclass
 class _Node:
-    kind: str                      # char|class|any|cat|alt|star|plus|opt|eps
+    kind: str                      # char|class|any|cat|alt|star|plus|opt|eps|rep
     chars: frozenset[int] = frozenset()
     kids: tuple[_Node, ...] = ()
+    bounds: tuple[int, int | None] | None = None  # rep only: (m, n); n=None open
 
 
-def _parse_regex(pattern: str) -> _Node:
+def _parse_regex(pattern: str, keep_reps: bool = False) -> _Node:
     pos = 0
 
     def peek() -> str | None:
@@ -76,7 +77,13 @@ def _parse_regex(pattern: str) -> _Node:
                 if rep is None:
                     break               # literal '{' consumed by parse_atom later
                 m, n = rep
-                node = _expand_repeat(node, m, n)
+                if keep_reps:
+                    # counting-set candidate ({m,n} kept as a counted-loop
+                    # node; grid/lexer/counting.py expands the ineligible
+                    # ones via the same _expand_repeat)
+                    node = _Node("rep", kids=(node,), bounds=(m, n))
+                else:
+                    node = _expand_repeat(node, m, n)
             else:
                 break
         return node

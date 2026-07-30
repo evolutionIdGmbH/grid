@@ -47,6 +47,11 @@ Flag table:
                                                             off until the
                                                             H100 serving
                                                             stamp)
+    GRID_PERF_COUNTING          counting_enabled()          == "1" (default
+                                                            off: counting-set
+                                                            {m,n} window
+                                                            components on the
+                                                            factored path)
     GRID_JUMP                   jump_enabled()              == "1" (default
                                                             off: serving
                                                             jump-forward
@@ -192,6 +197,21 @@ def slicer_enabled() -> bool:
     enables, anything else is the kill switch restoring today's full-trie
     walk byte-for-byte."""
     return os.environ.get("GRID_PERF_SLICER", "0") == "1"
+
+
+def counting_enabled() -> bool:
+    """GRID_PERF_COUNTING: counting-set scanner components for {m,n} windows
+    (P4 phase 1, grid/lexer/counting.py + factored.py). Eligible counted
+    loops keep O(1) control states plus a bounded counter instead of the
+    O(n) parse-time expansion; the runtime scan state becomes
+    (state, counts) via ScannerDFA.step/scan_full, and counting DFAs are
+    gated off the Rust kernel (Python spec walk until kernel v8). Sub-flag
+    of GRID_PERF_FACTORED_SCANNER: counting components exist only on the
+    factored path — the eager union builder (GRID_PERF_FACTORED_SCANNER=0,
+    the exactness oracle) never counts. Default OFF; only "1" enables,
+    anything else is the kill switch restoring the expanded components
+    byte-for-byte."""
+    return os.environ.get("GRID_PERF_COUNTING", "0") == "1"
 
 
 def jump_enabled() -> bool:
