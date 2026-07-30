@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "grid-guardrail"
-version = "0.3.0"
+version = "0.4.0"
 description = "GRID - Grammar-Railed Decoding: grammar-constrained LLM decoding with RBAC grammars and an audit trail"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
@@ -37,7 +37,7 @@ dev = [
     "ruff",
 ]
 transformers = ["transformers"]
-kernel = ["grid_core"]  # Rust kernels: 5-platform abi3 wheels on PyPI
+kernel = ["grid_core>=0.2"]  # Rust kernels (v8): 5-platform abi3 wheels on PyPI
 
 [tool.setuptools.packages.find]
 include = ["grid", "grid.*"]

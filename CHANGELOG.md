@@ -4,7 +4,7 @@ Versions in the 0.2.x line are **correctness-only** (the coverage epoch,
 DESIGN-JSON-COVERAGE.md): error metrics are the headline; timings are
 recorded, not optimized (kernel frozen at v7). Speed work is the 0.3.x epoch.
 
-## Unreleased
+## 0.4.0 - 2026-07-30
 
 0.3.x flag disposition (E3): the epoch's measured winners become the
 shipped defaults, gated on the v0.3.0 full-corpus run
