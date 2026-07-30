@@ -35,8 +35,11 @@ journal's contribution to the first-request TBM tail.
 Usage:
     python bench/perfbench/store_coldwarm.py \
         --group stratified_200:60:0:4 --group p3_family:300:0:1 \
-        --group ttfm_capped:300:0:1 --tbm --jobs 1 --out tmp/store-coldwarm
+        --group ttfm_capped:300:0:1 --tbm --out tmp/store-coldwarm
     python bench/perfbench/store_coldwarm.py --summarize-only --out ...
+
+Children always run sequentially (one at a time, publishable absolutes);
+there is deliberately no --jobs knob.
 """
 
 from __future__ import annotations
