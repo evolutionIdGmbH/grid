@@ -28,11 +28,17 @@ v0.3.0rc1, see CHANGELOG).
 Over GRID_PERF_FACTORED_BUDGET product states the LazyProductDFA facade is
 returned instead: it serves the ScannerDFA protocol with transitions
 materialized on demand — token-length-bounded along trie paths, so blowup
-states are never built. Lazy DFAs are gated off the Rust kernel
-(trie/walk.py), off genN cache keys (mask/producer.py: demand-order state
-ids are instance-local, and T2 is shared across template instances), and
-off the full-enumeration reserve BFS (lalr/reserve.py dispatches to
-``shortest_lexemes_factored``).
+states are never built. Lazy DFAs are gated off genN cache keys
+(mask/producer.py: demand-order state ids are instance-local, and T2 is
+shared across template instances) and off the full-enumeration reserve BFS
+(lalr/reserve.py dispatches to ``shortest_lexemes_factored``). Trie walks
+serve through the grid_core v8 in-kernel lazy product (GRID_PERF_KERNEL_LAZY,
+trie/walk.py; component payloads via ``kernel_lazy_payload`` below, this
+facade remaining the executable specification and the fallback), while
+RustVerdicts stays gated off — CD re-checks and guide advance still consume
+this facade directly. Counting products (GRID_PERF_COUNTING; counters != ())
+stay off the kernel entirely — Python spec walk until kernel counter frames
+(P4 phase 2) land.
 
 The product budget bounds only the PRODUCT; GRID_PERF_COMPONENT_BUDGET
 (default 16384, "0" = cap disabled) bounds each COMPONENT's eager subset
@@ -843,6 +849,107 @@ def _counting_comps(
             comps[t] = _component(
                 terminals[name].pattern, terminals[name].is_literal, component_budget)
     return comps
+
+
+# -- grid_core v8 lazy-scanner payload (kernel-resident lazy product) --------
+#
+# The kernel's LazyScanner is a transcription of LazyProductDFA (this module
+# stays the executable specification). Components ship as compact immutable
+# blobs — the kernel does NO regex/NFA work: byte classes, eps-folded
+# per-class edge lists, accept ids and NFA accept-reachability are all
+# precomputed here from artifacts the build already made. State ids on both
+# sides are instance-local demand-order; only state VALUES (subset bitsets /
+# sparse product tuples) determine annotations, so masks agree regardless of
+# discovery order (tests/trie/test_rust_parity.py lazy leg).
+
+def _dense_component_blob(comp: TerminalDFA) -> bytes:
+    """Eager component -> kernel blob (LE): u8 kind=0, u16 n_classes,
+    u32 n_states, i32 trans[n_states * n_classes], u8 accepting[n_states],
+    u8 co_acc[n_states]."""
+    import struct
+
+    import numpy as np
+
+    n_states = len(comp.trans)
+    n_classes = len(comp.trans[0]) if n_states else 0
+    return b"".join((
+        struct.pack("<BHI", 0, n_classes, n_states),
+        np.asarray(comp.trans, dtype="<i4").tobytes(),
+        bytes(bytearray(comp.accepting)),
+        bytes(bytearray(comp.co_acc)),
+    ))
+
+
+def _nfa_component_blob(comp: LazyTerminalDFA) -> bytes:
+    """Over-budget component -> kernel NFA arena blob (LE): u8 kind=1,
+    u16 n_classes, u32 n_nfa, u32 acc, u32 n_words, u64 reach[n_words],
+    u64 start[n_words], u32 offsets[n_nfa * n_classes + 1], u32 dests[...].
+
+    ``dests`` lists are the eps-CLOSED per-(state, class) destination sets:
+    eps-closure distributes over union (subset.eps_closure_fn), so the
+    kernel's subset step — union members' lists, no eps walk — lands on
+    exactly the subsets LazyTerminalDFA.step interns. Raw-empty lists stay
+    empty (closure only applied to non-empty dest sets), preserving the
+    "no member moves -> DEAD" convention bit-for-bit."""
+    import struct
+
+    import numpy as np
+
+    reach = comp._reach
+    n_nfa = len(reach)
+    n_classes = comp._n_classes
+    n_words = (n_nfa + 63) // 64
+    reach_words = [0] * n_words
+    for q, r in enumerate(reach):
+        if r:
+            reach_words[q >> 6] |= 1 << (q & 63)
+    start_words = [0] * n_words
+    for q in comp._states[0]:
+        start_words[q >> 6] |= 1 << (q & 63)
+    offsets = np.zeros(n_nfa * n_classes + 1, dtype="<u4")
+    dests: list[int] = []
+    ec = comp._eps_closure
+    ebc = comp._edge_by_class
+    for q in range(n_nfa):
+        per = ebc.get(q)
+        base = q * n_classes
+        for cls in range(n_classes):
+            lst = per[cls] if per is not None else None
+            if lst:
+                dests.extend(sorted(ec(frozenset(lst))))
+            offsets[base + cls + 1] = len(dests)
+    return b"".join((
+        struct.pack("<BHIII", 1, n_classes, n_nfa, comp._acc, n_words),
+        np.asarray(reach_words, dtype="<u8").tobytes(),
+        np.asarray(start_words, dtype="<u8").tobytes(),
+        offsets.tobytes(),
+        np.asarray(dests, dtype="<u4").tobytes(),
+    ))
+
+
+def kernel_lazy_payload(
+    dfa: LazyProductDFA,
+) -> tuple[list[int], list[bytes], list[list[int]]]:
+    """RustWalker(lazy_scanner=...) payload for a lazy product: (global byte
+    classes, component blobs in terminal order, per-component global->component
+    class maps). Pure read of frozen build artifacts — never touches the
+    facade's interned states, so a concurrently-walking LazyProductDFA
+    serializes safely (the eps_star memo inside _eps_closure grows benignly
+    under the GIL)."""
+    # counting products (GRID_PERF_COUNTING) must never reach the kernel:
+    # a CountingTerminalDFA's dense trans is ADVISORY on guarded cells, so
+    # blobbing it would silently drop the counter guards — the forbidden
+    # wrong-mask class. walk.py gates counting DFAs off the kernel; this
+    # assert keeps the payload boundary honest until kernel counter frames
+    # (P4 phase 2) land.
+    assert not dfa.counters, \
+        "counting product reached kernel_lazy_payload (kernel counter step pending)"
+    blobs = [
+        _nfa_component_blob(c) if isinstance(c, LazyTerminalDFA)
+        else _dense_component_blob(c)
+        for c in dfa.comps
+    ]
+    return (list(dfa._gclass_of), blobs, [list(m) for m in dfa._cmap])
 
 
 def shortest_lexemes_factored(dfa: LazyProductDFA) -> dict[int, bytes]:

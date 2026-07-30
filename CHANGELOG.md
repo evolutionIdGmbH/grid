@@ -223,6 +223,49 @@ BAKEOFF verdict, unchanged). Window budgets and degradation predicates
 are untouched by construction (asserted): the `{m,n}`-beyond-cap coverage
 lift is phase 3, kernel v8 counter frames phase 2.
 
+Kernel-resident lazy scanner (P1, `GRID_PERF_KERNEL_LAZY`, default ON with
+a v8+ grid_core — `=0` is the kill switch restoring the wave-B lazy regime
+byte-for-byte; older kernels and `GRID_NO_RUST=1` keep it regardless):
+lazy factored DFAs (the over-budget LazyProductDFA regime P3 created) now
+serve trie walks through the Rust kernel instead of pure-Python `_walk_py`.
+The walker's scanner becomes a backend enum behind the four accessor
+touchpoints (tr/accepting/accepts_all/live): `Dense` keeps the v7 arenas
+verbatim; `Lazy` is the in-kernel lazy product — sparse (tid, comp-state)
+tuples and per-component subset bitsets interned on demand under one build
+mutex (reads lock-free: append-only OnceLock arenas, AtomicI32 rows),
+annotations folded from per-component flags at intern time, so masks are
+pure functions of state VALUES and instance-local demand-order numbering
+never crosses the FFI (kernel payloads carry token/terminal ids only; lazy
+schemas already use raw schema-scoped T1/T2 keys). Components ship as
+compact blobs from `factored.kernel_lazy_payload` — dense arenas for eager
+components, NFA arenas (byte classes, eps-CLOSED per-class edge lists,
+accept id, reach words) for capped ones — so the kernel does no regex/NFA
+work; the Python facade stays the executable specification and the
+fallback (intern-cap breach surfaces as ValueError -> `_walk_py`, masks
+exact either way; the 262,144-state cap is ~36x the worst measured need).
+Gates: per-token full-vocab mask digests identical kernel-vs-spec across
+the nine-schema substring-union family (3,095 instance steps) plus
+eager-leg cross-checks; forced-all-lazy parity legs (toy/wide/sql-lexicon);
+id-independence under opposite-order interning and the rayon pool;
+recorded degradation sets untouched by construction (the flag's only
+consumer is walk dispatch). Measured (family AB, interleaved legs, jobs 1):
+64-token cold-prefix worst token p50 276ms -> 9.2ms, max 313 -> 15.9ms
+(~30x; full-instance worst tokens up to ~221ms remain on the two heaviest
+schemas — Python-side CD re-checks, the recorded phase-2 item), pooled
+prefix walk 64.6s -> 2.6s, TTFM columns and RSS unchanged, dense schemas
+byte-identical (flag consumed only for lazy DFAs); MaskBench family arms
+(outcomes.py --strict): 14/14 outcomes unchanged, pooled TBM p99
+257 -> 8.6ms over 10,965 masks, warm p50 untouched, stratified-29
+interleaved p50 gate at ratio 1.003 (the gate RUST_SCANNER failed). RustVerdicts stays
+Python-side for lazy schemas this phase. The artifact store now never
+persists the lazy facade (deterministic component artifacts are the S3
+follow-on). RUST_SCANNER (held since the bake-off) is subsumed: v8 ships
+blobs once at walker construction and never rehydrates arenas into Python,
+so the +18-22ms p50 FFI floor that sank it is structurally avoided; the
+eager `build_scanner_arena` port is retired unharvested (the v8 payload
+pre-computes eps-folded NFA artifacts Python-side, leaving nothing for
+in-kernel regex/NFA machinery to do).
+
 ## 0.3.0 - 2026-07-30
 
 The performance epoch: compile-time (TTFM) tail work, selected by measured

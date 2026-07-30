@@ -44,6 +44,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from grid import perf_flags
 from grid.lexer.dfa import DEAD, ScannerDFA
 from grid.lexer.run import EmissionEvent
 from grid.trie.build import TokenTrie
@@ -60,6 +61,17 @@ _USE_RUST = (
     and hasattr(_grid_core, "RustWalker")
     and os.environ.get("GRID_NO_RUST") != "1"
 )
+
+
+def _kernel_lazy_ok() -> bool:
+    """Lazy factored DFAs may enter the kernel walker: GRID_PERF_KERNEL_LAZY
+    (call-time read — flippable) AND a v8+ kernel (the lazy_scanner FFI).
+    Older kernels keep the wave-B regime: lazy schemas walk _walk_py."""
+    return (
+        _USE_RUST
+        and getattr(_grid_core, "__kernel_version__", 0) >= 8
+        and perf_flags.kernel_lazy_enabled()
+    )
 
 _MASK_CACHE: dict[int, frozenset[int]] = {}
 _WALKERS: dict[tuple[int, int, int], tuple] = {}
@@ -109,10 +121,13 @@ def _unmask(mask: int) -> frozenset[int]:
 def _rust_walker(trie: TokenTrie, dfa: ScannerDFA, ignored: frozenset[int],
                  priority: dict[int, tuple[int, int]], lexicons: Lexicons | None):
     # lazy factored DFAs (GRID_PERF_FACTORED_SCANNER over-budget regime) have
-    # no dense trans/accept arrays — every kernel entry must gate on this;
-    # counting DFAs (GRID_PERF_COUNTING) stay on the Python spec walk until
-    # the kernel v8 counter step lands
-    assert not getattr(dfa, "lazy", False), "lazy factored DFA reached the kernel walker"
+    # no dense trans/accept arrays — they enter only as a v8 lazy_scanner
+    # payload (GRID_PERF_KERNEL_LAZY); every other kernel entry gates on
+    # this. Counting DFAs (GRID_PERF_COUNTING) stay on the Python spec walk
+    # until kernel counter frames (P4 phase 2) land: the kernel has no
+    # counter step, and a counting facade's dense rows are advisory-only.
+    lazy = bool(getattr(dfa, "lazy", False))
+    assert not lazy or _kernel_lazy_ok(), "lazy factored DFA reached the kernel walker"
     assert not getattr(dfa, "counters", ()), "counting DFA reached the Rust walker"
     key = (id(trie), id(dfa), id(lexicons))
     hit = _WALKERS.get(key)
@@ -123,28 +138,41 @@ def _rust_walker(trie: TokenTrie, dfa: ScannerDFA, ignored: frozenset[int],
     n_terminals = len(priority)
     w = _width(n_terminals)
     literal_words = _term_words((t for t, (kind, _i) in priority.items() if kind == 0), w)
-    trans = np.array(dfa.trans, dtype=np.int32)
-    accept = np.array(dfa.accept, dtype=np.int32)
     lex = None if lexicons is None else {
         int(tid): [bytes(word) for word in words] for tid, words in lexicons.allowed.items()
     }
     kwargs = {}
-    # S2 slice tables: (class bitmap as 4 u64 words, alias-complete i32-le
-    # slice ids, rest-trie u64-le nodes). Only when the trie carries slices
-    # AND the installed kernel knows the tables (feature-probe on the stats
-    # getter added in the same kernel change) — an older grid_core keeps the
-    # exact pre-slicer construction.
-    if trie.slices is not None and hasattr(_grid_core.RustWalker, "slice_stats"):
-        sl = trie.slices
-        kwargs["slices"] = (
-            [int(x) for x in sl.class_words],
-            sl.ids.astype("<i4", copy=False).tobytes(),
-            sl.rest_nodes.astype("<u8", copy=False).tobytes(),
-        )
+    if lazy:
+        # v8 in-kernel lazy product: per-component blobs instead of dense
+        # arenas (factored.kernel_lazy_payload); NEVER ship slice tables —
+        # lazy DFAs don't slice on the spec path either (_walk_py gate), and
+        # the kernel construction hard-errors on the combination.
+        from grid.lexer.factored import kernel_lazy_payload
+
+        kwargs["lazy_scanner"] = kernel_lazy_payload(dfa)
+        trans_b = accept_b = b""
+        accepts_all_words: list[list[int]] = []
+        live_words: list[list[int]] = []
+    else:
+        trans_b = np.array(dfa.trans, dtype=np.int32).tobytes()
+        accept_b = np.array(dfa.accept, dtype=np.int32).tobytes()
+        accepts_all_words = [_term_words(s, w) for s in dfa.accepts_all]
+        live_words = [_term_words(s, w) for s in dfa.live]
+        # S2 slice tables: (class bitmap as 4 u64 words, alias-complete i32-le
+        # slice ids, rest-trie u64-le nodes). Only when the trie carries slices
+        # AND the installed kernel knows the tables (feature-probe on the stats
+        # getter added in the same kernel change) — an older grid_core keeps the
+        # exact pre-slicer construction.
+        if trie.slices is not None and hasattr(_grid_core.RustWalker, "slice_stats"):
+            sl = trie.slices
+            kwargs["slices"] = (
+                [int(x) for x in sl.class_words],
+                sl.ids.astype("<i4", copy=False).tobytes(),
+                sl.rest_nodes.astype("<u8", copy=False).tobytes(),
+            )
     walker = _grid_core.RustWalker(
-        trie.nodes.tobytes(), trans.tobytes(), accept.tobytes(), n_terminals,
-        [_term_words(s, w) for s in dfa.accepts_all],
-        [_term_words(s, w) for s in dfa.live],
+        trie.nodes.tobytes(), trans_b, accept_b, n_terminals,
+        accepts_all_words, live_words,
         dfa.start, _term_words(ignored, w), literal_words, lexicon=lex,
         aliases={int(k): [int(x) for x in v] for k, v in (trie.aliases or {}).items()},
         **kwargs,
@@ -316,18 +344,29 @@ def walk(
     """SS2 kernel #1: (ci_mask, cd_token_list) for the current configuration.
 
     Dispatches to the grid_core Rust kernel when available (bit-identical by
-    tests/trie/test_rust_parity.py); falls back to the Python implementation for
-    grammars with more than 512 terminals, when GRID_NO_RUST=1, when the DFA
-    is a lazy factored facade (which materializes product states only along the
-    trie paths this walk actually takes), or for counting DFAs
-    (GRID_PERF_COUNTING — kernel v8 counter step pending)."""
+    tests/trie/test_rust_parity.py); falls back to the Python implementation
+    for grammars with more than 512 terminals or when GRID_NO_RUST=1. Lazy
+    factored facades (which materialize product states only along the trie
+    paths this walk actually takes) enter the kernel only under
+    GRID_PERF_KERNEL_LAZY with a v8+ kernel (the in-kernel lazy product,
+    mask-identical by the parity suite's lazy leg); otherwise — and on the
+    kernel's intern-cap ValueError, a never-event at the measured state
+    bound — they walk the Python specification below. Counting DFAs
+    (GRID_PERF_COUNTING) always walk the Python specification: the kernel
+    has no counter step (P4 phase 2 pending), dense or lazy alike."""
+    lazy = bool(getattr(dfa, "lazy", False))
     if (_USE_RUST and len(priority) <= MAX_KERNEL_TERMINALS
-            and not getattr(dfa, "lazy", False)
+            and (not lazy or _kernel_lazy_ok())
             and not getattr(dfa, "counters", ())):
         import numpy as np
 
         walker = _rust_walker(trie, dfa, ignored, priority, lexicons)
-        ci_bytes, raw_groups = walker.walk(bytes(remainder), _term_words(A, walker.width))
+        try:
+            ci_bytes, raw_groups = walker.walk(bytes(remainder), _term_words(A, walker.width))
+        except ValueError:
+            if not lazy:
+                raise  # dense walks have no sanctioned kernel failure mode
+            return _walk_py(trie, dfa, remainder, A, ignored, priority, lexicons)
         # ci ids arrive as ONE i32-le buffer (sorted, alias-expanded in-kernel);
         # np.frombuffer is zero-copy and the view is read-only (immutability
         # matches the tuple it replaces) — no per-id int objects materialize.
