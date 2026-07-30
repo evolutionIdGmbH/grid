@@ -109,8 +109,11 @@ def _unmask(mask: int) -> frozenset[int]:
 def _rust_walker(trie: TokenTrie, dfa: ScannerDFA, ignored: frozenset[int],
                  priority: dict[int, tuple[int, int]], lexicons: Lexicons | None):
     # lazy factored DFAs (GRID_PERF_FACTORED_SCANNER over-budget regime) have
-    # no dense trans/accept arrays — every kernel entry must gate on this
+    # no dense trans/accept arrays — every kernel entry must gate on this;
+    # counting DFAs (GRID_PERF_COUNTING) stay on the Python spec walk until
+    # the kernel v8 counter step lands
     assert not getattr(dfa, "lazy", False), "lazy factored DFA reached the kernel walker"
+    assert not getattr(dfa, "counters", ()), "counting DFA reached the Rust walker"
     key = (id(trie), id(dfa), id(lexicons))
     hit = _WALKERS.get(key)
     if hit is not None:
@@ -157,7 +160,8 @@ def make_verdict_kernel(tables, dfa: ScannerDFA, lexicons: Lexicons | None):
     dense arrays to upload). SS2 kernel #2 + the LALR simulate behind it."""
     if (not _USE_RUST or not hasattr(_grid_core, "RustVerdicts")
             or tables.n_terminals > MAX_KERNEL_TERMINALS
-            or getattr(dfa, "lazy", False)):
+            or getattr(dfa, "lazy", False)
+            or getattr(dfa, "counters", ())):  # counter step is kernel v8; Python verdicts until then
         return None
     import numpy as np
 
@@ -264,30 +268,40 @@ def pick_viable(
 class _Frame:
     """Per-trie-node incremental walk state (the grid_core kernel state)."""
 
-    __slots__ = ("end", "dfa_state", "seg", "last_len", "last_state",
+    __slots__ = ("end", "dfa_state", "seg", "last_len", "last_state", "counts",
                  "events", "n_real", "cd_flag")
 
     def __init__(self, end: int, dfa_state: int, seg: bytes, last_len: int, last_state: int,
+                 counts: tuple[int, ...] | None,
                  events: tuple, n_real: int, cd_flag: bool) -> None:
         self.end = end
         self.dfa_state = dfa_state
         self.seg = seg
         self.last_len = last_len
         self.last_state = last_state
+        self.counts = counts          # counting DFAs only; None otherwise
         self.events = events          # tuple[(EmissionEvent, lexeme_bytes)]
         self.n_real = n_real
         self.cd_flag = cd_flag
 
 
-def _seed(dfa: ScannerDFA, remainder: bytes) -> tuple[int, bytes, int, int]:
+def _seed(dfa: ScannerDFA, remainder: bytes) -> tuple[int, bytes, int, int, tuple[int, ...] | None]:
     """Scan the (invariantly single-partial-lexeme) remainder, tracking last accept."""
+    if getattr(dfa, "counters", ()):
+        cur, counts, last_len, last_state = dfa.start, dfa.zero_counts(), 0, -1
+        for i, b in enumerate(remainder):
+            cur, counts = dfa.step(cur, counts, b)
+            assert cur != DEAD, "LexerRun invariant: remainder must be scannable"
+            if dfa.accept[cur] != -1:
+                last_len, last_state = i + 1, cur
+        return cur, remainder, last_len, last_state, counts
     cur, last_len, last_state = dfa.start, 0, -1
     for i, b in enumerate(remainder):
         cur = dfa.trans[cur][b]
         assert cur != DEAD, "LexerRun invariant: remainder must be scannable"
         if dfa.accept[cur] != -1:
             last_len, last_state = i + 1, cur
-    return cur, remainder, last_len, last_state
+    return cur, remainder, last_len, last_state, None
 
 
 def walk(
@@ -303,10 +317,13 @@ def walk(
 
     Dispatches to the grid_core Rust kernel when available (bit-identical by
     tests/trie/test_rust_parity.py); falls back to the Python implementation for
-    grammars with more than 512 terminals, when GRID_NO_RUST=1, or when the DFA
+    grammars with more than 512 terminals, when GRID_NO_RUST=1, when the DFA
     is a lazy factored facade (which materializes product states only along the
-    trie paths this walk actually takes)."""
-    if _USE_RUST and len(priority) <= MAX_KERNEL_TERMINALS and not getattr(dfa, "lazy", False):
+    trie paths this walk actually takes), or for counting DFAs
+    (GRID_PERF_COUNTING — kernel v8 counter step pending)."""
+    if (_USE_RUST and len(priority) <= MAX_KERNEL_TERMINALS
+            and not getattr(dfa, "lazy", False)
+            and not getattr(dfa, "counters", ())):
         import numpy as np
 
         walker = _rust_walker(trie, dfa, ignored, priority, lexicons)
@@ -403,7 +420,10 @@ def _walk_py(
     are path-determined, so this equals the full walk's output as a set, and
     the CD sequence is byte-identical (all slice tokens are CI under the
     proof; unsafe tokens keep their relative DFS order in the rest-trie)."""
-    if trie.slices is not None and not getattr(dfa, "lazy", False):
+    # counting DFAs skip slicing too: the containment proof BFSes dense
+    # trans rows, which are advisory-only on guarded (state, byte) cells
+    if (trie.slices is not None and not getattr(dfa, "lazy", False)
+            and not getattr(dfa, "counters", ())):
         q = _seed(dfa, remainder)[0]
         if _slice_contained(trie.slices, dfa, q, A, ignored, lexicons):
             rest = _walk_py_nodes(
@@ -440,6 +460,8 @@ def _walk_py_nodes(
                 return True
         return False
 
+    counting = bool(getattr(dfa, "counters", ()))
+    zero = dfa.zero_counts() if counting else None
     root = _Frame(0, *_seed(dfa, remainder), events=(), n_real=0, cd_flag=False)
     stack: list[_Frame] = [root]
 
@@ -456,6 +478,7 @@ def _walk_py_nodes(
         # ---- incremental byte step with emission cascade -------------------
         cur, seg = parent.dfa_state, parent.seg
         last_len, last_state = parent.last_len, parent.last_state
+        counts = parent.counts
         events = parent.events
         n_real = parent.n_real
         cd_flag = parent.cd_flag
@@ -466,10 +489,15 @@ def _walk_py_nodes(
         while idx < len(pending):
             b = pending[idx]
             idx += 1
-            nx = trans[cur][b]
+            if counting:
+                nx, counts2 = dfa.step(cur, counts, b)
+            else:
+                nx = trans[cur][b]
             if nx != DEAD:
                 seg = seg + bytes([b])
                 cur = nx
+                if counting:
+                    counts = counts2
                 if accept[nx] != -1:
                     last_len, last_state = len(seg), nx
                 continue
@@ -496,12 +524,14 @@ def _walk_py_nodes(
             pending[idx:idx] = list(rest)
             pending.insert(idx + len(rest), b)
             cur, seg, last_len, last_state = dfa.start, b"", 0, -1
+            counts = zero
 
         if reject:
             i += size
             continue
 
-        frame = _Frame(i + size, cur, seg, last_len, last_state, events, n_real, cd_flag)
+        frame = _Frame(i + size, cur, seg, last_len, last_state, counts,
+                       events, n_real, cd_flag)
 
         # ---- node verdict (identical semantics to v1 classify tail); the
         # n_real == 0 non-viable case also prunes the subtree (monotone) ------

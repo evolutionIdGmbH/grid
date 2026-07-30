@@ -405,3 +405,62 @@ def test_genn_rekeying_preserves_entry_bytes(sql_source, sql_tokenizer):
         return sorted(tuple(sorted(int(t) for t in g.token_ids)) for g in e.cd_groups)
 
     assert part(e1) == part(e2)
+
+
+def test_counting_window_counts_extend_genn_key(monkeypatch):
+    """GRID_PERF_COUNTING: counting DFAs collapse window positions into
+    shared control states, so the genN key appends (counts_p, counts_q) —
+    remainders aliasing on (p, q, v) but differing in counter value must get
+    separate entries whose masks match the expanded (flag-off) DFA's masks.
+    (The module autouse fixture pins the eager scanner; counting exists only
+    on the factored path, so the flag-on leg re-enables it — the materialized
+    factored product equals the eager build exactly, numbering included.)"""
+    from grid.jsonschema import compile_json_schema
+
+    src, _rec = compile_json_schema(
+        {"type": "string", "minLength": 4, "maxLength": 10})
+    tok = MockTokenizer(extra_tokens=(
+        '"', ' ', 'a', 'ab', 'abcd', 'abcdefgh', '"abcde', 'e"', '"x',
+    ))
+
+    def build(counting: bool):
+        if counting:
+            monkeypatch.setenv("GRID_PERF_FACTORED_SCANNER", "1")
+            monkeypatch.setenv("GRID_PERF_COUNTING", "1")
+            # dense counting artifact whatever the CI leg exports: genN (the
+            # object under test) is gated off lazy facades by design
+            monkeypatch.delenv("GRID_PERF_FACTORED_BUDGET", raising=False)
+            monkeypatch.delenv("GRID_PERF_COMPONENT_BUDGET", raising=False)
+        else:
+            monkeypatch.setenv("GRID_PERF_FACTORED_SCANNER", "0")
+            monkeypatch.delenv("GRID_PERF_COUNTING", raising=False)
+        try:
+            return build_guide(src, tok)
+        finally:
+            monkeypatch.setenv("GRID_PERF_FACTORED_SCANNER", "0")
+            monkeypatch.delenv("GRID_PERF_COUNTING", raising=False)
+
+    g_off, g_on = build(False), build(True)
+    assert g_on.dfa.counters and not g_off.dfa.counters
+    # 5 vs 7 window chars: same control state (p, q, v alias), different counts
+    r1, r2 = b'"abcde', b'"abcdefg'
+    node_off = g_off.initial_state.stack
+    node_on = g_on.initial_state.stack
+    A_on = g_on.producer.allowed(node_on)
+    k1 = g_on.producer.cache_key(r1, A_on)
+    k2 = g_on.producer.cache_key(r2, A_on)
+    assert k1[0] == k2[0] == "genN" and k1 != k2
+    assert k1[1:6] == k2[1:6], "premise: (p, q, v, A, fp) alias without counts"
+
+    def ids(guide, node, rem):
+        ci, cd_pass, _eid = guide.producer.masks(node, rem)
+        out = {int(t) for t in np.asarray(ci, dtype=np.int64)}
+        out.update(int(t) for t in cd_pass)
+        return out
+
+    for rem in (r1, r2):
+        assert ids(g_on, node_on, rem) == ids(g_off, node_off, rem), rem
+    # the window bites: 4 more chars fit at count 5, not at count 7
+    t_abcd = tok.vocabulary["abcd"]
+    assert t_abcd in ids(g_on, node_on, r1)
+    assert t_abcd not in ids(g_on, node_on, r2)

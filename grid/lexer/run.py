@@ -74,6 +74,8 @@ class LexerRun:
         hypothesis per SS6 step 2), or None if the remainder cannot be fully
         consumed (EOS illegal mid-lexeme). An empty remainder yields ().
         """
+        if dfa.counters:
+            return _finalize_counting(dfa, self.remainder)
         out: list[EmissionEvent] = []
         buf = self.remainder
         i = 0
@@ -96,8 +98,35 @@ class LexerRun:
         return tuple(out)
 
 
+def _finalize_counting(dfa: ScannerDFA, buf: bytes) -> tuple[EmissionEvent, ...] | None:
+    """finalize() for counting DFAs: identical segmentation over (state, counts)
+    steps; counts reset with each restart at dfa.start."""
+    out: list[EmissionEvent] = []
+    zero = dfa.zero_counts()
+    i = 0
+    while i < len(buf):
+        st, counts = dfa.start, zero
+        last: tuple[int, int] | None = None  # (end, state)
+        j = i
+        while j < len(buf):
+            st, counts = dfa.step(st, counts, buf[j])
+            if st == DEAD:
+                break
+            j += 1
+            if dfa.accept[st] != -1:
+                last = (j, st)
+        if last is None:
+            return None
+        end, acc_state = last
+        out.append(EmissionEvent(dfa.accepts_all[acc_state], end - i))
+        i = end
+    return tuple(out)
+
+
 def scan(dfa: ScannerDFA, buf: bytes) -> tuple[list[EmissionEvent], bytes]:
     """Maximal-munch scan with forced emission; returns (events, remainder)."""
+    if dfa.counters:
+        return _scan_counting(dfa, buf)
     events: list[EmissionEvent] = []
     i = 0
     while True:
@@ -111,6 +140,35 @@ def scan(dfa: ScannerDFA, buf: bytes) -> tuple[list[EmissionEvent], bytes]:
                 dead = True
                 break
             st = nx
+            j += 1
+            if dfa.accept[st] != -1:
+                last = (j, st)
+        if not dead:
+            return events, buf[i:]
+        if last is None:
+            raise ScanReject(f"illegal byte 0x{buf[j]:02X} at offset {j}")
+        end, acc_state = last
+        events.append(EmissionEvent(dfa.accepts_all[acc_state], end - i))
+        i = end
+
+
+def _scan_counting(dfa: ScannerDFA, buf: bytes) -> tuple[list[EmissionEvent], bytes]:
+    """scan() for counting DFAs: identical maximal-munch/restart semantics over
+    (state, counts) steps; counts reset with each restart at dfa.start."""
+    events: list[EmissionEvent] = []
+    zero = dfa.zero_counts()
+    i = 0
+    while True:
+        st, counts = dfa.start, zero
+        last: tuple[int, int] | None = None  # (end, accepting state)
+        j = i
+        dead = False
+        while j < len(buf):
+            nx, counts2 = dfa.step(st, counts, buf[j])
+            if nx == DEAD:
+                dead = True
+                break
+            st, counts = nx, counts2
             j += 1
             if dfa.accept[st] != -1:
                 last = (j, st)

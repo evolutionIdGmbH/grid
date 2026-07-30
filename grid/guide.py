@@ -419,6 +419,8 @@ class GridGuide:
 
     def _lexeme_extension(self, state: GridState) -> bytes | None:
         """BFS: shortest byte suffix completing the current partial lexeme."""
+        if self.dfa.counters:
+            return self._lexeme_extension_counting(state)
         start = state.lexer.state(self.dfa)
         a_now = self.producer.allowed(state.stack)
         okset = a_now | self.tables.ignored_terminal_ids
@@ -434,6 +436,31 @@ class GridGuide:
                     if ns != DEAD and ns not in seen:
                         seen.add(ns)
                         nxt.append((ns, path + bytes([byte])))
+            frontier = nxt
+            if not frontier:
+                break
+        return None
+
+    def _lexeme_extension_counting(self, state: GridState) -> bytes | None:
+        """Counting-DFA _lexeme_extension: BFS over (state, counts) — the
+        configuration space matches the expanded DFA's state space, bounded and
+        off the token path (budget-trigger only)."""
+        q, counts, _l, _p, _cp = self.dfa.scan_full(state.lexer.remainder)
+        assert q != DEAD, "LexerRun invariant: remainder must be scannable"
+        a_now = self.producer.allowed(state.stack)
+        okset = a_now | self.tables.ignored_terminal_ids
+        frontier: list[tuple[int, tuple[int, ...], bytes]] = [(q, counts, b"")]
+        seen = {(q, counts)}
+        for _ in range(64):
+            nxt: list[tuple[int, tuple[int, ...], bytes]] = []
+            for st, cts, path in frontier:
+                if path and self.dfa.accepts_all[st] & okset:
+                    return path
+                for byte in range(256):
+                    ns, ncts = self.dfa.step(st, cts, byte)
+                    if ns != DEAD and (ns, ncts) not in seen:
+                        seen.add((ns, ncts))
+                        nxt.append((ns, ncts, path + bytes([byte])))
             frontier = nxt
             if not frontier:
                 break
