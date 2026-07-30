@@ -64,7 +64,6 @@ the official JSON-Schema-Test-Suite runs in CI under that contract.
 | TTFM avg | 65,684 | **693** | 334,134 |
 | TTFM p99 | 1,157,520 | **6,680** | 4,579,322 |
 | tokens | 3,491,288 | 2,958,083 | 3,468,252 |
-| schemas | 11,306 | 11,306 | 11,306 |
 | compile error | 637 | 1,797 | 51 |
 | timeout | **0** | **0** | **0** |
 | validation error | **5** | 32 | 671 |
