@@ -29,6 +29,15 @@ DEAD = -1
 _Edges = dict[int, list[tuple[frozenset[int], int]]]
 
 
+class SubsetBudgetExceeded(Exception):
+    """subset_construct discovered more than ``max_states`` subset states.
+
+    Raised only when a caller passes a cap (factored._build_component under
+    GRID_PERF_COMPONENT_BUDGET); the partial arrays are discarded by the
+    caller — the substring-union terminal family discovers ~2^k states
+    eagerly, so there is nothing worth keeping."""
+
+
 def eps_closure_fn(
     eps: dict[int, list[int]],
 ) -> Callable[[Iterable[int]], frozenset[int]]:
@@ -121,6 +130,7 @@ def subset_construct(
     edge_by_class: dict[int, list[list[int] | None]],
     eps_closure: Callable[[Iterable[int]], frozenset[int]],
     n_classes: int,
+    max_states: int | None = None,
 ) -> tuple[list[frozenset[int]], list[list[int]]]:
     """Rabin-Scott subset construction over class-compressed rows.
 
@@ -128,6 +138,13 @@ def subset_construct(
     (``sorted(by_class.items())``) — the numbering contract shared by the
     eager builder and the factored materializer (LazyProductDFA.materialize
     reproduces this order to be equal, not just isomorphic).
+
+    ``max_states`` (None = unbounded, the eager-builder default): raise
+    SubsetBudgetExceeded once more than that many subsets exist. Checked per
+    processed state, so the loop may overshoot by one state's class fanout
+    before raising — irrelevant, breach output is discarded. Under the cap
+    the arrays are bit-identical to the uncapped run (the check is
+    read-only).
 
     Returns ``(order, class_rows)``: ``order[i]`` is the i-th subset state,
     ``class_rows[i][cl]`` the successor state id or DEAD. Per-state
@@ -138,6 +155,8 @@ def subset_construct(
     class_rows: list[list[int]] = []
     i = 0
     while i < len(order):
+        if max_states is not None and len(order) > max_states:
+            raise SubsetBudgetExceeded
         cur = order[i]
         i += 1
         by_class: dict[int, set[int]] = {}

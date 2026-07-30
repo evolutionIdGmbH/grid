@@ -13,9 +13,19 @@ Two gates, both against build_scanner's eager union subset construction:
    match — state ids are instance-local, the sets are not. Plus
    scan/finalize EmissionEvent-stream equality (numbering-free by
    construction), scan_with_last_accept observables, and shortest_lexemes.
+
+Both gates also run with component_budget=0 (P3, GRID_PERF_COMPONENT_BUDGET):
+every component a demand-interned LazyTerminalDFA. Gate 1's form there:
+build_factored_scanner SKIPS materialization on breach (returns the facade
+even under an unbounded product budget), but a FRESH facade materialized in
+full must still reproduce the eager artifact exactly — that equality is what
+makes the skip a scheduling decision rather than a semantic one. The
+substring-union generator scales the o83132/o5195 family shape down to
+k=2..6 keywords, small enough for the eager oracle to terminate.
 """
 
 import random
+import threading
 
 import pytest
 
@@ -25,7 +35,11 @@ from grid.grammar.spec import Terminal
 from grid.jsonschema import compile_json_schema
 from grid.lalr.reserve import shortest_lexemes
 from grid.lexer.dfa import DEAD, build_scanner
-from grid.lexer.factored import LazyProductDFA, build_factored_scanner
+from grid.lexer.factored import (
+    LazyProductDFA,
+    LazyTerminalDFA,
+    build_factored_scanner,
+)
 from grid.lexer.run import LexerRun, ScanReject, scan
 
 # ---------------------------------------------------------------- corpora
@@ -181,7 +195,8 @@ def _full_differential(terminals, order, seed: int) -> None:
     assert eager.h_max == lazy.h_max
     assert eager.accepts_all[0] == lazy.accepts_all[0]
     assert eager.live[0] == lazy.live[0]
-    for w in _words(eager, seed):
+    words = _words(eager, seed)
+    for w in words:
         compare_prefixes(eager, lazy, w)
         compare_swla(eager, lazy, w)
         compare_streams(eager, lazy, w)
@@ -193,6 +208,28 @@ def _full_differential(terminals, order, seed: int) -> None:
         pytest.fail("materialization aborted under an unbounded budget")
     assert mat == eager
     assert mat.h_max == eager.h_max  # h_max is compare=False on the dataclass
+
+    # component-budget=0 leg (P3): every component demand-interned; same
+    # per-prefix observables, emission streams, swla, and reserve BFS words
+    lazy_c = build_factored_scanner(terminals, order, budget=0, component_budget=0)
+    assert isinstance(lazy_c, LazyProductDFA)
+    assert all(isinstance(c, LazyTerminalDFA) for c in lazy_c.comps)
+    assert eager.h_max == lazy_c.h_max
+    for w in words:
+        compare_prefixes(eager, lazy_c, w)
+        compare_swla(eager, lazy_c, w)
+        compare_streams(eager, lazy_c, w)
+    assert shortest_lexemes(eager, len(order)) == shortest_lexemes(lazy_c, len(order))
+    # breached components under an unbounded product budget: the builder
+    # SKIPS materialization (facade returned), but a fresh facade
+    # materialized in full still equals the eager artifact EXACTLY —
+    # numbering included (fresh = no demand walks perturbing discovery order)
+    skip = build_factored_scanner(terminals, order, budget=10**9, component_budget=0)
+    assert isinstance(skip, LazyProductDFA)
+    mat_c = skip.materialize(10**9)
+    assert mat_c is not None
+    assert mat_c == eager
+    assert mat_c.h_max == eager.h_max
 
 
 # ---------------------------------------------------------------- grammars
@@ -225,6 +262,103 @@ def test_window_terminals():
 def test_window_product():
     terms, order = _rx_terms("[a-z]{1,16}x", "[a-y]{2,8}", "z{0,4}q")
     _full_differential(terms, order, seed=29)
+
+
+def _union_terms(k: int) -> tuple[dict[str, Terminal], tuple[str, ...]]:
+    """The substring-union family (BAKEOFF.md F1 / o83132 S2) scaled to k
+    keywords: unanchored keyword alternatives inside one quoted terminal,
+    each branch with the trailing closure that keeps the per-keyword matched
+    bit alive — eager subsets scale with 2^k, so the eager oracle terminates
+    for k<=6 while the shape stays the pathological one. Siblings: a
+    disjoint terminal and an overlapping quoted window (shared '"' prefix)."""
+    kws = ["ab", "cd", "ace", "bd", "abc", "cab"][:k]
+    alts = "|".join(f"[a-e]*{kw}[a-e]*" for kw in kws)
+    return _rx_terms(f'"({alts})"', "[0-9]+", '"[0-9]{1,4}"')
+
+
+UNION_PROBES = [
+    b'"ab"', b'"cd"', b'"ace"', b'"aabbcd"', b'"abcd"', b'"eeabee"',
+    b'"e"', b'"', b'"ab', b'"abx', b'"1234"', b'"12"', b'123', b'"abcab"',
+    b'"acecab"', b'"' + b"e" * 30 + b'ab"', b'""',
+]
+
+
+def test_substring_union_family():
+    for k in range(2, 7):
+        terms, order = _union_terms(k)
+        _full_differential(terms, order, seed=90 + k)
+        eager, lazy = _pair(terms, order)
+        lazy_c = build_factored_scanner(terms, order, budget=0, component_budget=0)
+        for w in UNION_PROBES:
+            compare_prefixes(eager, lazy, w)
+            compare_prefixes(eager, lazy_c, w)
+            compare_swla(eager, lazy_c, w)
+            compare_streams(eager, lazy_c, w)
+
+
+def test_component_budget_flag_dispatch(monkeypatch):
+    """Env wiring: GRID_PERF_COMPONENT_BUDGET breaches -> the builder skips
+    materialization and returns the facade even under a huge product budget;
+    "0" is the kill switch restoring eager components (dense result)."""
+    terms, order = _union_terms(4)
+    eager = build_scanner(terms, order, factored=False)
+    monkeypatch.setenv("GRID_PERF_FACTORED_SCANNER", "1")
+    monkeypatch.setenv("GRID_PERF_FACTORED_BUDGET", "1000000")
+    monkeypatch.setenv("GRID_PERF_COMPONENT_BUDGET", "2")
+    lazy = build_scanner(terms, order)
+    assert isinstance(lazy, LazyProductDFA)
+    assert any(isinstance(c, LazyTerminalDFA) for c in lazy.comps)
+    assert lazy.materialize(10**9) == eager   # fresh facade: exact numbering
+    monkeypatch.setenv("GRID_PERF_COMPONENT_BUDGET", "0")   # kill switch
+    dense = build_scanner(terms, order)
+    assert dense == eager
+
+
+def test_mixed_lazy_and_eager_components():
+    """A budget between the union component's size and the small siblings':
+    only the union goes lazy; the mixed product still matches the oracle."""
+    terms, order = _union_terms(5)
+    eager = build_scanner(terms, order, factored=False)
+    mixed = build_factored_scanner(terms, order, budget=0, component_budget=24)
+    assert isinstance(mixed, LazyProductDFA)
+    kinds = {name: type(c).__name__ for name, c in zip(order, mixed.comps)}
+    assert kinds["T0"] == "LazyTerminalDFA"   # the union breaches 24 states
+    assert "TerminalDFA" in kinds.values()    # a sibling stays eager
+    for w in _words(eager, seed=88) + UNION_PROBES:
+        compare_prefixes(eager, mixed, w)
+        compare_swla(eager, mixed, w)
+    fresh = build_factored_scanner(terms, order, budget=10**9, component_budget=24)
+    assert isinstance(fresh, LazyProductDFA)   # breach skips materialization
+    assert fresh.materialize(10**9) == eager
+
+
+def test_lazy_component_threaded_walks():
+    """The component memo is shared across producer prefetch threads: races
+    must produce duplicate COMPUTES at worst, never duplicate ids or torn
+    annotations (the LazyProductDFA._intern idiom, one level down)."""
+    terms, order = _union_terms(5)
+    eager = build_scanner(terms, order, factored=False)
+    lazy_c = build_factored_scanner(terms, order, budget=0, component_budget=0)
+    words = _words(eager, seed=97) + UNION_PROBES
+    errs: list[BaseException] = []
+
+    def storm(offset: int) -> None:
+        try:
+            for w in words[offset::4]:
+                compare_swla(eager, lazy_c, w)
+        except BaseException as e:  # noqa: BLE001 - surface into the main thread
+            errs.append(e)
+
+    threads = [threading.Thread(target=storm, args=(i,)) for i in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errs
+    # post-storm coherence: a full single-threaded sweep over every word
+    for w in words:
+        compare_prefixes(eager, lazy_c, w)
+        compare_streams(eager, lazy_c, w)
 
 
 def test_zombie_states():
