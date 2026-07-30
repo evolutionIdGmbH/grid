@@ -112,10 +112,46 @@ def root() -> Path:
     return Path(override) if override else Path.home() / ".cache" / "grid"
 
 
+def _locate_origin(name: str) -> str:
+    """File path of ``name``'s source WITHOUT executing any module.
+
+    An already-imported module answers from sys.modules (free — and it lets
+    tests monkeypatch ``__file__`` to simulate a source change). Otherwise
+    walk the dotted path with ``importlib.machinery.PathFinder`` over the
+    parent's search locations: PathFinder locates specs but never runs a
+    module or a package ``__init__``. (``importlib.util.find_spec`` would
+    EXECUTE parent packages — ``grid.jsonschema``'s init pulls the whole
+    compiler chain into a process that may never compile a schema, e.g. a
+    grid-source-only serving process whose first store access is the
+    scanner or trie namespace.) pyc-only deployments resolve to the .pyc
+    via ``spec.origin`` exactly as ``__file__`` would; a missing module
+    raises and degrades to a store miss inside get/put's envelope.
+    """
+    from importlib.machinery import PathFinder
+
+    mod = sys.modules.get(name)
+    if mod is not None:
+        return mod.__file__
+    spec = None
+    search = None  # None -> sys.path, for the top-level component
+    prefix = ""
+    for part in name.split("."):
+        prefix = f"{prefix}.{part}" if prefix else part
+        parent = sys.modules.get(prefix)
+        if parent is not None:  # imported ancestor: reuse its search path
+            search = list(getattr(parent, "__path__", ()))
+            continue
+        spec = PathFinder.find_spec(prefix, search)
+        if spec is None:
+            raise ModuleNotFoundError(f"epoch module not found: {prefix}")
+        search = spec.submodule_search_locations
+    assert spec is not None  # full name in sys.modules returned above
+    return spec.origin
+
+
 @lru_cache(maxsize=1)
 def code_epoch() -> str:
     import importlib.metadata
-    import importlib.util
 
     h = hashlib.blake2b(digest_size=16)
     try:
@@ -129,16 +165,11 @@ def code_epoch() -> str:
     for name in _EPOCH_MODULES:
         # LOCATE the source, never execute it: importing grid.trie.build here
         # would pull numpy (~20ms) into the first store access — a pure import
-        # tax on the very warm-hit latency the store exists to remove.
-        # Already-imported modules answer from sys.modules (free; and it lets
-        # tests monkeypatch __file__ to simulate a source change); the rest
-        # resolve via find_spec, which imports parent PACKAGES only — nothing
-        # on these paths executes a payload module or reaches numpy. Pinned by
+        # tax on the very warm-hit latency the store exists to remove — and
+        # even parent-package inits are off-limits (_locate_origin). Pinned by
         # test_code_epoch_executes_no_payload_module.
-        mod = sys.modules.get(name)
-        origin = mod.__file__ if mod is not None else importlib.util.find_spec(name).origin
         h.update(name.encode())
-        h.update(Path(origin).read_bytes())
+        h.update(Path(_locate_origin(name)).read_bytes())
     return h.hexdigest()
 
 

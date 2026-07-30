@@ -130,11 +130,15 @@ def test_source_mutation_changes_epoch(module, tmp_path, monkeypatch):
 
 
 def test_code_epoch_executes_no_payload_module():
-    """code_epoch LOCATES epoch sources (sys.modules / find_spec.origin)
+    """code_epoch LOCATES epoch sources (sys.modules / a PathFinder walk)
     without EXECUTING them: importing grid.trie.build would pull numpy
     (~20ms) into the first store access — a pure import tax on the very
-    warm-hit latency the store exists to measure and remove. Fresh process:
-    the pytest process has numpy loaded long before this test runs."""
+    warm-hit latency the store exists to measure and remove — and even a
+    parent package __init__ is off-limits (grid.jsonschema's pulls the
+    whole compiler chain into e.g. a grid-source-only serving process).
+    Assert NOTHING appears in sys.modules beyond stdlib importlib helpers.
+    Fresh process: the pytest process has numpy loaded long before this
+    test runs."""
     import subprocess
     import sys
 
@@ -142,9 +146,12 @@ def test_code_epoch_executes_no_payload_module():
     code = (
         "import sys\n"
         "from grid.serving import artifact_store\n"
+        "before = set(sys.modules)\n"
         "artifact_store.code_epoch()\n"
-        "bad = [m for m in ('numpy', 'grid.trie.build') if m in sys.modules]\n"
-        "assert not bad, f'code_epoch executed payload modules: {bad}'\n"
+        "new_grid = sorted(m for m in set(sys.modules) - before\n"
+        "                  if m == 'grid' or m.startswith('grid.'))\n"
+        "assert not new_grid, f'code_epoch executed grid modules: {new_grid}'\n"
+        "assert 'numpy' not in sys.modules, 'code_epoch reached numpy'\n"
     )
     env = dict(os.environ, PYTHONPATH=str(root))
     subprocess.run([sys.executable, "-c", code], check=True, env=env,

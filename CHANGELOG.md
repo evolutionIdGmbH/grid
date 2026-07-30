@@ -195,10 +195,13 @@ Artifact-store redeploy warm set (S3, still under the default-off
   trie/build.py, grammar/parts.py (P2's schema_src text renderer), and the
   E2 split modules (nfa/rx/subset) whose sources fed scanner artifacts
   while only dfa.py was hashed — wholesale invalidation on rollout, by
-  design. `code_epoch()` LOCATES these sources (sys.modules, else
-  find_spec origin) without executing them — importing grid.trie.build
-  would charge numpy's ~20ms import to the first store access, taxing the
-  warm-hit latency the store exists to remove.
+  design. `code_epoch()` LOCATES these sources (sys.modules, else a
+  PathFinder walk over parent search locations) without executing ANY
+  module — importing grid.trie.build would charge numpy's ~20ms import to
+  the first store access, taxing the warm-hit latency the store exists to
+  remove, and even find_spec's parent-package imports are off-limits
+  (grid.jsonschema's `__init__` pulls the whole compiler chain into e.g. a
+  grid-source-only serving process).
 - Failed-build law, stated precisely: the grammar-keyed namespaces
   (schema_src/scanner/lalr) never persist anything from a failed build, so
   error outcomes reproduce from real rebuilds; the component namespace
