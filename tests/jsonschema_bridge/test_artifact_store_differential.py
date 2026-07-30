@@ -114,15 +114,41 @@ def test_unsupported_raises_cold_and_warm_uncached(tmp_path, monkeypatch):
 
 
 def test_grammar_invalid_raises_cold_and_warm_uncached(tmp_path, monkeypatch):
+    """Failed-build law, scoped to the GRAMMAR-KEYED namespaces
+    (scanner/lalr/schema_src/...): a failed build must leave no entry there,
+    so the error outcome reproduces from a real rebuild, never from a hit.
+
+    The ``component`` namespace (S3) is exempt BY DESIGN: its identity is
+    the (kind, budget, pattern) triple — cross-schema and self-contained —
+    so the TerminalDFA built for /x*/ is a correct artifact for /x*/ under
+    ANY grammar, and build_factored_scanner persists it before the
+    scanner-level empty-match law rejects THIS grammar. Error parity over
+    exactly such partial warm stores is pinned separately
+    (tests/serving/test_artifact_store.py::
+    test_empty_match_error_parity_with_warm_store and
+    ::test_factored_scanner_first_error_ordering_with_partial_warm_store).
+    """
+    from grid import perf_flags
+    from grid.lexer import factored
+
     monkeypatch.setenv("GRID_PERF_ARTIFACT_STORE", "1")
     monkeypatch.setenv("GRID_CACHE_DIR", str(tmp_path))
+    # cold memo: the store consult sits BEHIND the process-wide component
+    # memo, so earlier tests must not mask the component put this test rules on
+    monkeypatch.setattr(factored, "_COMPONENTS", {})
     g = spec.load("%start a\nX: /x*/\na: X\n")  # empty-matching terminal
     with pytest.raises(GrammarInvalid, match="empty string") as cold:
         store.load_or_build_scanner(g)
     with pytest.raises(GrammarInvalid, match="empty string") as warm:
         store.load_or_build_scanner(g)
     assert str(warm.value) == str(cold.value)
-    assert not list(tmp_path.rglob("*.bin"))
+    leaked = [p for p in tmp_path.rglob("*.bin") if p.parent.name != "component"]
+    assert not leaked, f"failed build persisted grammar-keyed entries: {leaked}"
+    if perf_flags.factored_scanner_enabled() and perf_flags.store_components_enabled():
+        # the exemption is exercised, not vacuous: X's component (payload or
+        # breach marker, budget-dependent) was validly persisted pre-raise.
+        # (The eager kill-switch leg never touches the component namespace.)
+        assert any(p.parent.name == "component" for p in tmp_path.rglob("*.bin"))
 
 
 # ------------------------------------------------------------- cross-process

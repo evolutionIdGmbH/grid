@@ -463,6 +463,56 @@ def test_flag_dispatch(monkeypatch, sql_grammar):
     assert build_scanner(sql_grammar.terminals, sql_grammar.terminal_order) == eager
 
 
+def test_store_warm_differential(tmp_path, monkeypatch):
+    """S3 component namespace: a store-warm factored build (fresh memo,
+    builder poisoned — every component unpickled or marker-rebuilt) must
+    (a) materialize the BIT-IDENTICAL ScannerDFA in the dense regime and
+    (b) match the eager oracle's per-prefix observables in the lazy/breach
+    regime, over the substring-union family shape."""
+    from grid.lexer import factored as fmod
+
+    monkeypatch.setenv("GRID_PERF_ARTIFACT_STORE", "1")
+    monkeypatch.setenv("GRID_CACHE_DIR", str(tmp_path))
+    terms, order = _union_terms(4)
+    eager = build_scanner(terms, order, factored=False)
+    words = _words(eager, seed=123) + UNION_PROBES
+
+    real_build = fmod._build_component
+
+    def _boom(*_a, **_k):
+        raise AssertionError("builder called: expected a warm component hit")
+
+    # dense regime: cold populate, then warm rebuild from the store alone
+    monkeypatch.setattr(fmod, "_COMPONENTS", {})
+    cold = build_factored_scanner(terms, order, budget=10**9, component_budget=10**9)
+    assert cold == eager
+    monkeypatch.setattr(fmod, "_COMPONENTS", {})
+    monkeypatch.setattr(fmod, "_build_component", _boom)
+    warm = build_factored_scanner(terms, order, budget=10**9, component_budget=10**9)
+    assert warm == eager  # bit-identical arrays, numbering included
+    assert warm.h_max == eager.h_max
+
+    # breach regime: cold writes the marker for the union terminal, warm
+    # builds its LazyTerminalDFA directly (no eager attempt — builder AND
+    # subset_construct poisoned); observables must match the oracle
+    monkeypatch.setattr(fmod, "_build_component", real_build)
+    monkeypatch.setattr(fmod, "_COMPONENTS", {})
+    cold_lazy = build_factored_scanner(terms, order, budget=0, component_budget=24)
+    assert isinstance(cold_lazy, LazyProductDFA)
+    monkeypatch.setattr(fmod, "_COMPONENTS", {})
+    monkeypatch.setattr(fmod, "_build_component", _boom)
+    monkeypatch.setattr(fmod, "subset_construct", _boom)
+    warm_lazy = build_factored_scanner(terms, order, budget=0, component_budget=24)
+    assert isinstance(warm_lazy, LazyProductDFA)
+    assert any(isinstance(c, LazyTerminalDFA) for c in warm_lazy.comps)
+    assert eager.h_max == warm_lazy.h_max
+    for w in words:
+        compare_prefixes(eager, warm_lazy, w)
+        compare_swla(eager, warm_lazy, w)
+        compare_streams(eager, warm_lazy, w)
+    assert shortest_lexemes(eager, len(order)) == shortest_lexemes(warm_lazy, len(order))
+
+
 def test_materialize_after_demand_walks(sql_grammar):
     """Budget breach then late materialization on the SAME instance: demand
     walks reorder state discovery, so numbering may differ from eager — the

@@ -90,6 +90,38 @@ class TokenTrie:
         return self.aliases.get(token_id, (token_id,))
 
 
+def _token_entries(adapter) -> list[tuple[bytes, int]]:
+    """The (token bytes, id) table from TokenizerAdapter.token_bytes (E5) —
+    the trie's sole input and the fingerprint's sole input, split out so the
+    artifact-store loader can fingerprint WITHOUT building (and build from
+    the same pass on a miss, never iterating token_bytes twice)."""
+    special = getattr(adapter, "special_token_ids", frozenset())
+    entries: list[tuple[bytes, int]] = []
+    for tid in sorted(set(adapter.vocabulary.values())):
+        if tid in special:
+            continue
+        bs = adapter.token_bytes(tid)
+        if not bs:
+            continue
+        if len(bs) > 2**16:
+            raise TrieBuildError(f"token {tid} unreasonably long ({len(bs)} bytes)")
+        entries.append((bs, tid))
+    if not entries:
+        raise TrieBuildError("empty vocabulary after excluding special tokens")
+    return entries
+
+
+def _entries_fingerprint(entries: list[tuple[bytes, int]]) -> str:
+    import hashlib
+
+    h = hashlib.blake2b(digest_size=16)
+    for bs, tid in entries:
+        h.update(tid.to_bytes(4, "little"))
+        h.update(len(bs).to_bytes(2, "little"))
+        h.update(bs)
+    return h.hexdigest()
+
+
 def _dfs_words(entries: list[tuple[bytes, int]]) -> list[int]:
     """entries [(spelling, tid)] -> packed DFS node words (the format above).
     Byte-identical to the historical inline build: nested insert keeping the
@@ -162,39 +194,25 @@ def _build_slices(entries: list[tuple[bytes, int]]) -> TrieSlices | None:
 
 def build_trie(adapter) -> TokenTrie:
     """Build from TokenizerAdapter.token_bytes exclusively (E5)."""
-    special = getattr(adapter, "special_token_ids", frozenset())
-    entries: list[tuple[bytes, int]] = []
-    for tid in sorted(set(adapter.vocabulary.values())):
-        if tid in special:
-            continue
-        bs = adapter.token_bytes(tid)
-        if not bs:
-            continue
-        if len(bs) > 2**16:
-            raise TrieBuildError(f"token {tid} unreasonably long ({len(bs)} bytes)")
-        entries.append((bs, tid))
-    if not entries:
-        raise TrieBuildError("empty vocabulary after excluding special tokens")
+    return _build_from_entries(_token_entries(adapter))
 
+
+def _build_from_entries(entries: list[tuple[bytes, int]]) -> TokenTrie:
+    """The build behind build_trie, from a prepared entries table (the
+    artifact-store loader calls this on a trie-namespace miss, after having
+    fingerprinted the same table). Reads perf_flags.slicer_enabled() at call
+    time: TrieSlices are BAKED INTO the returned object, which is why the
+    store keys the trie namespace per slicer variant."""
     # group byte-identical spellings; the trie node carries the smallest id
     by_bytes: dict[bytes, list[int]] = {}
     for bs, tid in entries:
         by_bytes.setdefault(bs, []).append(tid)
     aliases = {min(ids): tuple(sorted(ids)) for ids in by_bytes.values() if len(ids) > 1}
 
-    words = _dfs_words(entries)
-
-    import hashlib
-
-    h = hashlib.blake2b(digest_size=16)
-    for bs, tid in entries:
-        h.update(tid.to_bytes(4, "little"))
-        h.update(len(bs).to_bytes(2, "little"))
-        h.update(bs)
     return TokenTrie(
-        nodes=np.array(words, dtype=np.uint64),
+        nodes=np.array(_dfs_words(entries), dtype=np.uint64),
         n_tokens=len(entries),
-        tokenizer_fingerprint=h.hexdigest(),
+        tokenizer_fingerprint=_entries_fingerprint(entries),
         aliases=aliases,
         slices=_build_slices(entries) if perf_flags.slicer_enabled() else None,
     )

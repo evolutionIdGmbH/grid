@@ -62,10 +62,10 @@ class _GuideRegistry:
 
     def __init__(self, adapter) -> None:
         from grid.serving import SingleFlight
-        from grid.trie.build import build_trie
+        from grid.serving.artifact_store import load_or_build_trie
 
         self.adapter = adapter
-        self.trie = build_trie(adapter)
+        self.trie = load_or_build_trie(adapter)
         self._flight = SingleFlight(failed_ttl_s=30.0)
         # T2 pools (DESIGN §E10), one per dialect: templates of DIFFERENT
         # schemas/roles over one grammar share schema-independent entries —
@@ -82,6 +82,13 @@ class _GuideRegistry:
     @property
     def stats(self) -> dict:
         return self._flight.stats
+
+    def flush_journals(self) -> None:
+        """Best-effort journal write-back (S3): flush() is a no-op for
+        unbound journals and never raises. Called from backend shutdown; the
+        every-N self-flush bounds loss on unclean exits."""
+        for journal in list(self._journals.values()):
+            journal.flush()
 
     def guide_for(self, spec: dict) -> GridGuide:
         grammar_src = spec["grammar"]
@@ -105,17 +112,28 @@ class _GuideRegistry:
         from grid.grammar import spec as gspec
         from grid.grammar.projection import RoleProjection
         from grid.mask.cache import MaskCacheT2
-        from grid.serving import ContextJournal
-        from grid.serving.artifact_store import load_or_build_scanner, load_or_compile_tables
+        from grid.serving.artifact_store import (
+            load_or_build_scanner,
+            load_or_compile_tables,
+            load_or_restore_journal,
+        )
 
         dialect = hashlib.blake2b(grammar_src.encode(), digest_size=12).hexdigest()
         t2 = self._t2_pools.setdefault(dialect, MaskCacheT2())
         # GRID_ADMIT_WARM=0 is the W4+W5 kill switch: no journal is wired at
         # all (producer.journal stays None — the walk-miss path is exactly
         # today's), and admission_warmup no-ops independently. Read at template
-        # build, like the producer's own one-shot env reads.
-        journal = None if os.environ.get("GRID_ADMIT_WARM", "0") == "0" \
-            else self._journals.setdefault(dialect, ContextJournal())
+        # build, like the producer's own one-shot env reads. With the artifact
+        # store on, a NEW dialect's journal is restored from the store (S3:
+        # the previous deployment's cold-walk set) and self-flushes; flag-off
+        # it is exactly today's fresh in-memory journal.
+        if os.environ.get("GRID_ADMIT_WARM", "0") == "0":
+            journal = None
+        else:
+            journal = self._journals.get(dialect)
+            if journal is None:
+                journal = self._journals.setdefault(
+                    dialect, load_or_restore_journal(grammar_src))
 
         grammar = gspec.load(grammar_src)
         if verbs:

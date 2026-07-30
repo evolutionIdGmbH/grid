@@ -42,6 +42,22 @@ Bounded (GRID_JOURNAL_MAX, default 4096, per record class; first-seen entries
 are kept — the structural contexts appear first — and overflow is dropped) and
 thread-safe (records arrive from scheduler, prefetch-pool and warmup-pool
 threads).
+
+Persistence (S3, CANDIDATES #20a): snapshot()/restore() move the two record
+sets — plain tuples and frozensets, keys/contexts ONLY, never masks — through
+the artifact store's ``journal`` namespace, so a redeployment's admission
+warmup can precompute the PREVIOUS deployment's cold-walk set before its
+first request turns RUNNING. artifact_store.load_or_restore_journal binds a
+journal to its store key (blake2b(grammar_src), the dialect identity);
+bound journals self-flush after every GRID_PERF_STORE_JOURNAL_EVERY (default
+64) NEW records and on explicit flush() calls (admission_warmup completion,
+registry shutdown). A restored entry is exactly as inert as a recorded one:
+tier-i keys only ever feed warm_from_t2 (T2-donor adoption, no walks), and
+tier-ii contexts feed exact prefetch_build walks — a stale hint warms an
+entry nobody consults, never a wrong mask. genN tier-i keys embed eager-
+scanner state ids (p, q): cross-process validity holds because subset
+numbering is deterministic per (code epoch, grammar) and the store path is
+epoch-scoped — tests pin the cross-process numbering.
 """
 
 from __future__ import annotations
@@ -49,10 +65,14 @@ from __future__ import annotations
 import os
 import threading
 
+from grid import perf_flags
+
 
 class ContextJournal:
     """Per-dialect walk-miss journal: tier-i generic keys + tier-ii ident
     A-contexts. Registry-scoped (one per grammar source, beside the T2 pool)."""
+
+    _FLUSH_EVERY_DEFAULT = 64
 
     def __init__(self, cap: int | None = None) -> None:
         if cap is None:
@@ -63,6 +83,13 @@ class ContextJournal:
         # fan-out order, so structurally-early contexts warm first
         self._generic: dict[tuple, None] = {}
         self._ident: dict[frozenset, None] = {}
+        # persistence (S3): unbound journals never touch the store; binding is
+        # the loader's job (artifact_store.load_or_restore_journal), so the
+        # GRID_ADMIT_WARM=0 / flag-off paths construct exactly today's object
+        self._store_key: str | None = None
+        self._dirty = 0
+        self._flush_every = perf_flags.store_journal_flush_every(
+            self._FLUSH_EVERY_DEFAULT)
 
     # -- recording (producer walk-miss path) --------------------------------
 
@@ -72,6 +99,8 @@ class ContextJournal:
         with self._lock:
             if key not in self._generic and len(self._generic) < self._cap:
                 self._generic[key] = None
+                self._dirty += 1
+        self._maybe_flush()
 
     def record_ident_context(self, A: frozenset) -> None:
         """An identifier-position BOUNDARY configuration (remainder == a
@@ -81,6 +110,67 @@ class ContextJournal:
         with self._lock:
             if A not in self._ident and len(self._ident) < self._cap:
                 self._ident[frozenset(A)] = None
+                self._dirty += 1
+        self._maybe_flush()
+
+    # -- persistence (S3: artifact-store journal namespace) ------------------
+
+    def snapshot(self) -> dict:
+        """Pickle-clean payload of everything journaled: plain tuples and
+        frozensets (keys/contexts only — a journal can never carry masks)."""
+        with self._lock:
+            return {"generic": tuple(self._generic), "ident": tuple(self._ident)}
+
+    def restore(self, payload: dict) -> None:
+        """Merge a snapshot(): absent entries append in payload order (restore
+        runs at construction, so first-seen order = previous deployment's),
+        the per-class cap is enforced, and nothing is marked dirty — restored
+        records are already persisted. Shape-defensive: a foreign payload
+        restores nothing rather than raising (the journal is a warm-hint)."""
+        if not isinstance(payload, dict):
+            return
+        generic = payload.get("generic", ())
+        ident = payload.get("ident", ())
+        if not isinstance(generic, tuple) or not isinstance(ident, tuple):
+            return
+        with self._lock:
+            for key in generic:
+                if isinstance(key, tuple) and key not in self._generic \
+                        and len(self._generic) < self._cap:
+                    self._generic[key] = None
+            for A in ident:
+                if isinstance(A, frozenset) and A not in self._ident \
+                        and len(self._ident) < self._cap:
+                    self._ident[A] = None
+
+    def bind_store(self, key: str) -> None:
+        """Attach the artifact-store identity (the loader calls this once,
+        after any restore). Bound journals self-flush every _flush_every new
+        records; explicit flush() covers warmup completion and shutdown."""
+        self._store_key = key
+
+    def flush(self) -> None:
+        """Persist a snapshot through the artifact store (no-op unbound).
+        Never raises — a broken store must never break the walk path — and
+        put() itself degrades to a one-shot warning on write failure."""
+        if self._store_key is None:
+            return
+        try:
+            with self._lock:
+                payload = {"generic": tuple(self._generic),
+                           "ident": tuple(self._ident)}
+                self._dirty = 0
+            from grid.serving import artifact_store
+
+            artifact_store.put("journal", self._store_key, payload)
+        except Exception:  # pragma: no cover - defensive (warm-hint only)
+            pass
+
+    def _maybe_flush(self) -> None:
+        # read outside the lock: a racy under/over-count merely shifts WHEN a
+        # flush happens; flush() itself snapshots consistently under the lock
+        if self._store_key is not None and self._dirty >= self._flush_every:
+            self.flush()
 
     # -- planning (admission warmup) -----------------------------------------
 

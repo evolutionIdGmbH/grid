@@ -5,10 +5,13 @@
 - prefetch: overlap — successor-state masks build on a worker thread behind
   the GPU forward window; fill-time waits are the bounded residual.
 - journal: per-dialect record of cold-walked key shapes (W4) feeding the
-  admission warmup in compile_grammar (W5) — keys only, never mask content.
+  admission warmup in compile_grammar (W5) — keys only, never mask content;
+  persisted through the store's ``journal`` namespace (S3) so redeployments
+  restore the previous deployment's cold-walk set.
 - artifact_store: versioned on-disk compile-artifact store
   (GRID_PERF_ARTIFACT_STORE) — warm deployments reload compiled schema
-  source / ScannerDFA / LALRTables instead of rebuilding.
+  source / ScannerDFA / LALRTables / per-terminal components / TokenTrie /
+  journals instead of rebuilding.
 """
 
 from grid.serving import artifact_store

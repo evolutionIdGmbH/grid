@@ -165,6 +165,69 @@ the realistic saving rides on bonus tokens; byte-level JF (~10x the mass)
 stays the recorded v2 deferral. Mode-2 logits-processor route untouched
 (§4.5 rule 3: singleton-degrade, never a unioned span mask).
 
+Artifact-store redeploy warm set (S3, still under the default-off
+`GRID_PERF_ARTIFACT_STORE` master; zero flag-off behavior change):
+
+- New namespaces, each with a default-on sub-flag kill switch:
+  `component` (`GRID_PERF_STORE_COMPONENTS`) — per-terminal TerminalDFA
+  payloads keyed `blake2b(kind|budget|pattern)`, CROSS-schema by
+  construction, plus breach MARKERS so warm redeploys skip the
+  substring-union family's capped eager attempt (fresh-process step-1
+  attribution: components 2.1-12.6s vs product <=0.8s per family member;
+  the breached component's cost IS the attempt, and its LazyTerminalDFA is
+  lock-bearing and unpicklable — markers recover what payloads cannot);
+  `trie` (`GRID_PERF_STORE_TRIE`) — TokenTrie keyed by (tokenizer
+  fingerprint, `GRID_PERF_SLICER` variant: S2 bakes TrieSlices into the
+  payload at build time, so the flag states never share an entry and the
+  slicer kill switch keeps its full-walk contract cross-process),
+  fingerprint computed from the same single token_bytes pass a
+  cold build consumes; `journal` (`GRID_PERF_STORE_JOURNAL`, CANDIDATES
+  #20a) — ContextJournal snapshot/restore (walk-miss keys/contexts only,
+  never masks) keyed `blake2b(grammar_src)`, restored in the registry under
+  `GRID_ADMIT_WARM=1` so admission warmup precomputes the previous
+  deployment's cold-walk set; write-back = self-flush every
+  `GRID_PERF_STORE_JOURNAL_EVERY` (64) new records + warmup completion +
+  backend destroy.
+- `load_or_build_scanner` skips `put` for lazy facades (previously tripped
+  the one-shot degraded-store warning via pickle TypeError); their redeploy
+  warmth comes from the component namespace.
+- `_EPOCH_MODULES` now covers every payload-producing source: factored.py,
+  trie/build.py, grammar/parts.py (P2's schema_src text renderer), and the
+  E2 split modules (nfa/rx/subset) whose sources fed scanner artifacts
+  while only dfa.py was hashed — wholesale invalidation on rollout, by
+  design. `code_epoch()` LOCATES these sources (sys.modules, else a
+  PathFinder walk over parent search locations) without executing ANY
+  module — importing grid.trie.build would charge numpy's ~20ms import to
+  the first store access, taxing the warm-hit latency the store exists to
+  remove, and even find_spec's parent-package imports are off-limits
+  (grid.jsonschema's `__init__` pulls the whole compiler chain into e.g. a
+  grid-source-only serving process).
+- Failed-build law, stated precisely: the grammar-keyed namespaces
+  (schema_src/scanner/lalr) never persist anything from a failed build, so
+  error outcomes reproduce from real rebuilds; the component namespace
+  keeps components that built VALIDLY even when a sibling terminal or a
+  scanner-level law (empty-match) fails the parent build — its
+  (kind, budget, pattern) identity is grammar-independent, and the failing
+  check re-runs and re-raises identically over partial warm stores
+  (parity-gated).
+- `kernel_fingerprint()` (blake2b of the grid_core binary) reserved-key
+  helper; persisted T2 mask blobs (#20b) and RustWalker arenas stay
+  EXPLICIT non-goals (key shapes documented in bench/perfbench/DESIGN.md,
+  no payloads) pending a served-mask-parity gate / the RUST_SCANNER
+  decision.
+- Gates: poison-builder warm hits per namespace; store-warm factored
+  differential (dense bit-identical, breach-regime observable equality);
+  GrammarInvalid ordering + message parity on partial/warm stores; journal
+  replay entry-id parity vs a no-journal producer; cross-process scanner
+  numbering pin for genN (p,q) coherence;
+  bench/perfbench/diff_store_warm.py off/cold/warm corpus digests (src,
+  tables, scanner, mask-drive entry ids, error text).
+- Measured (bench/perfbench/store_coldwarm.py, fresh process per scenario,
+  results in the BAKEOFF.md S3 postscript — load-caveated): redeploy warm
+  hits erase the heavy tails (p3_family p50 5245 -> 17ms, ttfm_capped
+  1039 -> 23ms) while fast schemas pay ~2ms at p50, so the warm-hit p50
+  stays the default-on gate; store remains default-off this epoch.
+
 ## 0.3.0 - 2026-07-30
 
 The performance epoch: compile-time (TTFM) tail work, selected by measured

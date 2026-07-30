@@ -51,6 +51,14 @@ Flag table:
                                                             off: serving
                                                             jump-forward
                                                             draft injection)
+    GRID_PERF_STORE_COMPONENTS  store_components_enabled()  != "0" (default
+                                                            on; sub-flag of
+                                                            ARTIFACT_STORE)
+    GRID_PERF_STORE_TRIE        store_trie_enabled()        != "0" (ditto)
+    GRID_PERF_STORE_JOURNAL     store_journal_enabled()     != "0" (ditto)
+    GRID_PERF_STORE_JOURNAL_EVERY  store_journal_flush_every(default)
+                                                            int(); ValueError
+                                                            on garbage
 
 Contract (enforced by tests/test_perf_flags.py):
 
@@ -205,3 +213,41 @@ def jump_enabled() -> bool:
     touching the kernel session (the GRID_DEFER=0 byte-identical-no-op
     shape). Read at session construction, one session per request."""
     return os.environ.get("GRID_JUMP", "0") == "1"
+
+
+# The three store-namespace kill switches are SUB-flags of
+# GRID_PERF_ARTIFACT_STORE: consulted only where the master already gates
+# (call sites check artifact_store_enabled() first), default on so that
+# flag-on deployments get every namespace, "0" disables one namespace
+# without touching the others (the GRID_GENN_KEYS default-on grammar).
+
+
+def store_components_enabled() -> bool:
+    """GRID_PERF_STORE_COMPONENTS: per-terminal component namespace of the
+    artifact store (TerminalDFA payloads + breach markers, consulted from
+    grid/lexer/factored._component). "0" restores in-process-memo-only
+    component builds under a store-enabled deployment."""
+    return os.environ.get("GRID_PERF_STORE_COMPONENTS", "1") != "0"
+
+
+def store_trie_enabled() -> bool:
+    """GRID_PERF_STORE_TRIE: TokenTrie namespace of the artifact store
+    (keyed by tokenizer fingerprint; grid/serving/artifact_store.py
+    load_or_build_trie). "0" restores the per-process build_trie."""
+    return os.environ.get("GRID_PERF_STORE_TRIE", "1") != "0"
+
+
+def store_journal_enabled() -> bool:
+    """GRID_PERF_STORE_JOURNAL: ContextJournal persistence namespace
+    (keys/contexts only, never masks; additionally inert without
+    GRID_ADMIT_WARM=1, which gates whether a journal exists at all). "0"
+    restores in-memory-only journals under a store-enabled deployment."""
+    return os.environ.get("GRID_PERF_STORE_JOURNAL", "1") != "0"
+
+
+def store_journal_flush_every(default: int) -> int:
+    """GRID_PERF_STORE_JOURNAL_EVERY -> flush the journal to the store after
+    this many NEW records since the last flush (self-flush write-back; the
+    default is injected by the call site, grid/serving/journal.py).
+    Non-integer values raise ValueError like the other int readers."""
+    return int(os.environ.get("GRID_PERF_STORE_JOURNAL_EVERY", str(default)))
