@@ -43,13 +43,24 @@
 //! rest-trie, merging the precomputed slice ids into ci (byte-identical
 //! output to the full walk by construction; proof failure falls back to the
 //! full walk untouched). tests/trie/test_slicer.py binds on/off bit-for-bit.
+//!
+//! Kernel v8: the walker's scanner becomes a backend enum (`Scanner`) behind
+//! the four accessor touchpoints — `Dense` keeps the v7 arenas verbatim;
+//! `Lazy` is the in-kernel lazy product (grid/lexer/factored.py
+//! LazyProductDFA as executable specification), so schemas whose scanner
+//! exceeded the factored/component budgets serve masks at kernel speed
+//! instead of through pure-Python `_walk_py` (GRID_PERF_KERNEL_LAZY,
+//! grid/trie/walk.py). States materialize only along walked trie paths;
+//! ids are instance-local demand-order and never cross the FFI.
+//! `RustVerdicts` is deliberately NOT lazy-capable this phase: lazy schemas
+//! keep Python-side verdicts (producer gates on `dfa.lazy`).
 
 use blake2::digest::consts::U16;
 use blake2::{Blake2b, Digest};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::collections::{HashMap, HashSet};
 
 type Blake2b128 = Blake2b<U16>;
@@ -212,6 +223,384 @@ fn walk_pool(threads: usize) -> Option<Arc<rayon::ThreadPool>> {
     Some(pool)
 }
 
+// ------------------------------------------------- scanner backends (v8)
+//
+// Kernel v8: the walker's scanner is an enum behind the four accessor
+// touchpoints (tr / accepting / accepts_all / live). `Dense` is the v7
+// arena layout verbatim. `Lazy` is the in-kernel LazyProductDFA
+// (grid/lexer/factored.py, the executable specification): scanner state =
+// sparse (terminal id, component state) tuple interned on demand, per-state
+// masks computed at intern time from per-component flags; components are
+// either eager per-terminal DFAs (class-wide rows, shipped as arenas) or —
+// for terminals that breached GRID_PERF_COMPONENT_BUDGET — component NFA
+// arenas whose subset states are ALSO interned on demand (byte classes,
+// eps-folded per-class edge lists and accept-reachability all precomputed
+// Python-side, so no regex/NFA machinery lives in the kernel). State ids
+// are instance-local demand-order — masks are pure functions of the state
+// VALUE (annotations computed from the tuple/subset at intern), so walk
+// outputs are id-independent; nothing that crosses the FFI embeds a scanner
+// state id (tests/trie/test_rust_parity.py pins both).
+//
+// Concurrency: reads are lock-free (append-only chunked arenas, per-slot
+// OnceLock publication, memoized rows as AtomicI32); ALL mutation happens
+// under one build Mutex (misses are rare after warmup — at most one new
+// product state per walked byte). A panic on the intern cap (or a poisoned
+// build mutex after one) is caught at the walk FFI boundary and surfaces as
+// ValueError; the Python caller falls back to the _walk_py specification,
+// so masks stay exact even past the cap.
+
+const UNSET: i32 = i32::MIN;
+const AR_CHUNK_BITS: usize = 10;
+const AR_CHUNK: usize = 1 << AR_CHUNK_BITS;
+const AR_MAX_CHUNKS: usize = 256; // 262,144-state intern cap (measured need: ~10^3-10^4)
+
+/// Append-only slot arena: lock-free reads via per-slot OnceLock, single
+/// writer (the LazyScanner build mutex). Slot i is readable iff published;
+/// publication order (value fully built, then set) makes any id a reader
+/// obtained from a row load safe to dereference.
+struct Arena<T> {
+    chunks: Box<[OnceLock<Box<[OnceLock<T>]>>]>,
+    len: AtomicUsize,
+}
+
+impl<T> Arena<T> {
+    fn new() -> Self {
+        Arena {
+            chunks: (0..AR_MAX_CHUNKS).map(|_| OnceLock::new()).collect::<Vec<_>>().into_boxed_slice(),
+            len: AtomicUsize::new(0),
+        }
+    }
+
+    #[inline]
+    fn get(&self, i: usize) -> Option<&T> {
+        let chunk = self.chunks.get(i >> AR_CHUNK_BITS)?.get()?;
+        chunk[i & (AR_CHUNK - 1)].get()
+    }
+
+    /// Interned-state count (writer-owned; exact under the build mutex).
+    fn len(&self) -> usize {
+        self.len.load(Ordering::Acquire)
+    }
+
+    /// Writer-only (caller holds the build mutex): publish slot i == len().
+    fn push(&self, i: usize, val: T) {
+        let c = i >> AR_CHUNK_BITS;
+        assert!(
+            c < AR_MAX_CHUNKS,
+            "grid_core lazy scanner: state intern cap exceeded"
+        );
+        let chunk = self.chunks[c].get_or_init(|| {
+            (0..AR_CHUNK).map(|_| OnceLock::new()).collect::<Vec<_>>().into_boxed_slice()
+        });
+        if chunk[i & (AR_CHUNK - 1)].set(val).is_err() {
+            unreachable!("arena slot double-publish");
+        }
+        self.len.store(i + 1, Ordering::Release);
+    }
+}
+
+/// One terminal's component machinery (immutable after construction; blob
+/// layouts in grid/lexer/factored.py kernel_lazy_payload).
+enum CompMachine {
+    /// Eager TerminalDFA: class-wide rows + per-state flags.
+    Dense {
+        n_classes: usize,
+        trans: Vec<i32>, // [state * n_classes + class] -> state or DEAD
+        accepting: Vec<bool>,
+        co_acc: Vec<bool>,
+    },
+    /// Over-component-budget terminal: NFA arena, subsets interned on demand.
+    /// `dests` lists are eps-CLOSED per (state, class) — closure distributes
+    /// over union, so the kernel unions bitsets and never eps-walks.
+    Nfa {
+        n_classes: usize,
+        n_words: usize, // subset bitset width over NFA states
+        acc: u32,
+        reach: Vec<u64>,    // bit q: NFA state q reaches the accept (co_acc)
+        offsets: Vec<u32>,  // [q * n_classes + cls] -> dests range
+        dests: Vec<u32>,
+    },
+}
+
+struct ProdSlot<const W: usize> {
+    tuple: Box<[(u32, u32)]>, // sparse (tid, comp state), ascending tid
+    row: Box<[AtomicI32]>,    // n_g entries, UNSET until memoized
+    accepts_all: [u64; W],
+    live: [u64; W],
+    accepting: bool, // accepts_all non-empty (== dense accept[s] != -1)
+}
+
+struct CompSlot {
+    subset: Box<[u64]>,    // NFA-state bitset
+    row: Box<[AtomicI32]>, // n_classes entries
+    accepting: bool,       // acc in subset
+    co_acc: bool,          // subset & reach != 0
+}
+
+/// Writer-side interner maps (inside the build mutex).
+struct LazyBuild {
+    prod_ids: HashMap<Box<[(u32, u32)]>, i32>,
+    comp_ids: Vec<HashMap<Box<[u64]>, u32>>, // parallel to comps (empty for Dense)
+}
+
+/// Parsed, W-independent lazy payload (RustWalker::new -> build_walker).
+struct LazyParts {
+    gclass_of: [u16; 256],
+    n_g: usize,
+    comps: Vec<CompMachine>,
+    starts: Vec<Option<Vec<u64>>>, // eps-closed NFA start subset per Nfa comp
+    cmap: Vec<Vec<u16>>,           // [comp][g] -> component class
+}
+
+struct LazyScanner<const W: usize> {
+    gclass_of: [u16; 256],
+    n_g: usize,
+    comps: Vec<CompMachine>,
+    cmap: Vec<Vec<u16>>,
+    prod: Arena<ProdSlot<W>>,
+    comp_tabs: Vec<Arena<CompSlot>>, // parallel to comps; unused for Dense
+    build: Mutex<LazyBuild>,
+}
+
+impl<const W: usize> LazyScanner<W> {
+    fn new(p: LazyParts) -> Self {
+        let n_comps = p.comps.len();
+        let s = LazyScanner {
+            gclass_of: p.gclass_of,
+            n_g: p.n_g,
+            comps: p.comps,
+            cmap: p.cmap,
+            prod: Arena::new(),
+            comp_tabs: (0..n_comps).map(|_| Arena::new()).collect(),
+            build: Mutex::new(LazyBuild {
+                prod_ids: HashMap::new(),
+                comp_ids: (0..n_comps).map(|_| HashMap::new()).collect(),
+            }),
+        };
+        {
+            let mut b = s.build.lock().unwrap();
+            // component start subsets intern as state 0 (the LazyTerminalDFA
+            // convention); dense component state 0 is its subset-construction
+            // start already
+            for (t, start) in p.starts.iter().enumerate() {
+                if let Some(start) = start {
+                    let id = s.intern_comp(&mut b, t, start.clone());
+                    debug_assert_eq!(id, 0);
+                }
+            }
+            // product start: every component at state 0 (factored.py
+            // LazyProductDFA.__init__ start_state)
+            let start_tuple: Vec<(u32, u32)> = (0..s.comps.len() as u32).map(|t| (t, 0)).collect();
+            let id = s.intern_prod(&mut b, start_tuple);
+            debug_assert_eq!(id, 0);
+        }
+        s
+    }
+
+    #[inline]
+    fn prod_slot(&self, state: i32) -> &ProdSlot<W> {
+        self.prod.get(state as usize).expect("unpublished product state")
+    }
+
+    #[inline]
+    fn class_step(&self, sid: i32, g: usize) -> i32 {
+        let slot = self.prod_slot(sid);
+        let v = slot.row[g].load(Ordering::Acquire);
+        if v != UNSET {
+            return v;
+        }
+        self.class_step_slow(sid, g)
+    }
+
+    /// Row miss: compute the product transition under the build mutex —
+    /// component steps (which may intern component subsets), then product
+    /// tuple intern. factored.py LazyProductDFA._class_step verbatim.
+    #[cold]
+    fn class_step_slow(&self, sid: i32, g: usize) -> i32 {
+        let mut b = self.build.lock().unwrap();
+        let slot = self.prod_slot(sid);
+        let v = slot.row[g].load(Ordering::Relaxed);
+        if v != UNSET {
+            return v; // filled while we waited on the mutex
+        }
+        let mut nxt: Vec<(u32, u32)> = Vec::with_capacity(slot.tuple.len());
+        for &(t, cs) in slot.tuple.iter() {
+            let cls = self.cmap[t as usize][g] as usize;
+            let nc = self.comp_step(&mut b, t as usize, cs, cls);
+            if nc != DEAD {
+                nxt.push((t, nc as u32));
+            }
+        }
+        let got = if nxt.is_empty() { DEAD } else { self.intern_prod(&mut b, nxt) };
+        slot.row[g].store(got, Ordering::Release);
+        got
+    }
+
+    /// Component step by component class (build mutex held).
+    fn comp_step(&self, b: &mut LazyBuild, t: usize, cs: u32, cls: usize) -> i32 {
+        match &self.comps[t] {
+            CompMachine::Dense { n_classes, trans, .. } => trans[cs as usize * n_classes + cls],
+            CompMachine::Nfa { n_classes, n_words, offsets, dests, .. } => {
+                let slot = self.comp_tabs[t].get(cs as usize).expect("unpublished comp state");
+                let v = slot.row[cls].load(Ordering::Relaxed);
+                if v != UNSET {
+                    return v;
+                }
+                // subset_construct's per-class move (LazyTerminalDFA.step):
+                // union the members' eps-closed class destinations; DEAD when
+                // no member moves
+                let mut out = vec![0u64; *n_words];
+                let mut any = false;
+                for (wi, mut w) in slot.subset.iter().copied().enumerate() {
+                    while w != 0 {
+                        let q = wi * 64 + w.trailing_zeros() as usize;
+                        w &= w - 1;
+                        let lo = offsets[q * n_classes + cls] as usize;
+                        let hi = offsets[q * n_classes + cls + 1] as usize;
+                        for &d in &dests[lo..hi] {
+                            out[(d >> 6) as usize] |= 1u64 << (d & 63);
+                            any = true;
+                        }
+                    }
+                }
+                let got = if any { self.intern_comp(b, t, out) as i32 } else { DEAD };
+                slot.row[cls].store(got, Ordering::Release);
+                got
+            }
+        }
+    }
+
+    /// Intern an NFA-component subset (build mutex held): annotations are
+    /// pure functions of the subset value (accepting = acc in subset,
+    /// co_acc = subset & reach != 0) — exactly LazyTerminalDFA._intern.
+    fn intern_comp(&self, b: &mut LazyBuild, t: usize, subset: Vec<u64>) -> u32 {
+        let boxed: Box<[u64]> = subset.into_boxed_slice();
+        if let Some(&id) = b.comp_ids[t].get(&boxed) {
+            return id;
+        }
+        let (acc, reach, n_classes) = match &self.comps[t] {
+            CompMachine::Nfa { acc, reach, n_classes, .. } => (*acc, reach, *n_classes),
+            CompMachine::Dense { .. } => unreachable!("intern_comp on a dense component"),
+        };
+        let tab = &self.comp_tabs[t];
+        let id = tab.len() as u32;
+        let accepting = (boxed[(acc >> 6) as usize] >> (acc & 63)) & 1 == 1;
+        let co_acc = boxed.iter().zip(reach.iter()).any(|(s, r)| s & r != 0);
+        tab.push(
+            id as usize,
+            CompSlot {
+                subset: boxed.clone(),
+                row: (0..n_classes).map(|_| AtomicI32::new(UNSET)).collect(),
+                accepting,
+                co_acc,
+            },
+        );
+        b.comp_ids[t].insert(boxed, id);
+        id
+    }
+
+    fn comp_flags(&self, t: usize, cs: u32) -> (bool, bool) {
+        match &self.comps[t] {
+            CompMachine::Dense { accepting, co_acc, .. } => {
+                (accepting[cs as usize], co_acc[cs as usize])
+            }
+            CompMachine::Nfa { .. } => {
+                let slot = self.comp_tabs[t].get(cs as usize).expect("unpublished comp state");
+                (slot.accepting, slot.co_acc)
+            }
+        }
+    }
+
+    /// Intern a product tuple (build mutex held): masks fold per-component
+    /// flags at intern time — LazyProductDFA._intern/_annotate verbatim
+    /// (accept-winner priority is not needed: the walk only tests
+    /// acceptance-nonempty; candidate priority is applied by pick_viable).
+    fn intern_prod(&self, b: &mut LazyBuild, tuple: Vec<(u32, u32)>) -> i32 {
+        let boxed: Box<[(u32, u32)]> = tuple.into_boxed_slice();
+        if let Some(&id) = b.prod_ids.get(&boxed) {
+            return id;
+        }
+        let id = self.prod.len();
+        let mut acc = [0u64; W];
+        let mut lv = [0u64; W];
+        for &(t, cs) in boxed.iter() {
+            let (a, c) = self.comp_flags(t as usize, cs);
+            if a {
+                m_set(&mut acc, t);
+            }
+            if c {
+                m_set(&mut lv, t);
+            }
+        }
+        self.prod.push(
+            id,
+            ProdSlot {
+                tuple: boxed.clone(),
+                row: (0..self.n_g).map(|_| AtomicI32::new(UNSET)).collect(),
+                accepts_all: acc,
+                live: lv,
+                accepting: m_any(&acc),
+            },
+        );
+        b.prod_ids.insert(boxed, id as i32);
+        id as i32
+    }
+}
+
+/// v8 scanner seam: the four accessors are the ONLY scanner touchpoints in
+/// the walk (seed / emission cascade / verdicts / group keys / slice proof).
+enum Scanner<const W: usize> {
+    Dense(DenseScanner<W>),
+    Lazy(LazyScanner<W>),
+}
+
+/// v7 arena layout, verbatim.
+struct DenseScanner<const W: usize> {
+    trans: Vec<i32>, // [state * 256 + byte]
+    accept: Vec<i32>,
+    accepts_all: Vec<[u64; W]>,
+    live: Vec<[u64; W]>,
+}
+
+impl<const W: usize> Scanner<W> {
+    #[inline]
+    fn tr(&self, state: i32, byte: u8) -> i32 {
+        match self {
+            Scanner::Dense(d) => d.trans[(state as usize) * 256 + byte as usize],
+            Scanner::Lazy(l) => l.class_step(state, l.gclass_of[byte as usize] as usize),
+        }
+    }
+
+    #[inline]
+    fn accepting(&self, state: i32) -> bool {
+        match self {
+            Scanner::Dense(d) => d.accept[state as usize] != -1,
+            Scanner::Lazy(l) => l.prod_slot(state).accepting,
+        }
+    }
+
+    #[inline]
+    fn accepts_all(&self, state: i32) -> [u64; W] {
+        match self {
+            Scanner::Dense(d) => d.accepts_all[state as usize],
+            Scanner::Lazy(l) => l.prod_slot(state).accepts_all,
+        }
+    }
+
+    #[inline]
+    fn live(&self, state: i32) -> [u64; W] {
+        match self {
+            Scanner::Dense(d) => d.live[state as usize],
+            Scanner::Lazy(l) => l.prod_slot(state).live,
+        }
+    }
+
+    #[inline]
+    fn is_lazy(&self) -> bool {
+        matches!(self, Scanner::Lazy(_))
+    }
+}
+
 // ------------------------------------------------------------------ walker
 
 // S2 slicer bounds: the containment closure gives up past this many reachable
@@ -234,10 +623,7 @@ struct SliceTables {
 
 struct RustWalkerImpl<const W: usize> {
     nodes: Vec<u64>,
-    trans: Vec<i32>, // [state * 256 + byte]
-    accept: Vec<i32>,
-    accepts_all: Vec<[u64; W]>,
-    live: Vec<[u64; W]>,
+    scanner: Scanner<W>, // v8: Dense (v7 arenas) | Lazy (in-kernel lazy product)
     ignored: [u64; W],
     literal: [u64; W],
     dfa_start: i32,
@@ -287,7 +673,7 @@ type WalkGroupsRaw = Vec<WalkGroupRaw>;
 impl<const W: usize> RustWalkerImpl<W> {
     #[inline]
     fn tr(&self, state: i32, byte: u8) -> i32 {
-        self.trans[(state as usize) * 256 + byte as usize]
+        self.scanner.tr(state, byte)
     }
 
     fn lexeme_ok(&self, t: u32, lexeme: &[u8]) -> bool {
@@ -331,7 +717,7 @@ impl<const W: usize> RustWalkerImpl<W> {
     }
 
     fn partial_viable(&self, seg: &[u8], dfa_state: i32, cand_mask: &[u64; W]) -> bool {
-        let pool = m_and(&self.live[dfa_state as usize], cand_mask);
+        let pool = m_and(&self.scanner.live(dfa_state), cand_mask);
         m_find(&pool, |t| m_bit(&self.ignored, t) || self.prefix_ok(t, seg)).is_some()
     }
 
@@ -355,7 +741,7 @@ impl<const W: usize> RustWalkerImpl<W> {
         for (i, &b) in remainder.iter().enumerate() {
             cur = self.tr(cur, b);
             debug_assert!(cur != DEAD, "remainder must be scannable");
-            if self.accept[cur as usize] != -1 {
+            if self.scanner.accepting(cur) {
                 last_len = i + 1;
                 last_state = cur;
             }
@@ -389,7 +775,7 @@ impl<const W: usize> RustWalkerImpl<W> {
         'bfs: while i < r.len() {
             let s = r[i];
             i += 1;
-            let lv = &self.live[s as usize];
+            let lv = &self.scanner.live(s);
             if !m_and_any(lv, &a_or_ign) || m_and_any(lv, &self.lex_live_mask) {
                 ok = false;
                 break;
@@ -536,7 +922,7 @@ impl<const W: usize> RustWalkerImpl<W> {
                     path.push(b);
                     seg_len += 1;
                     cur = nx;
-                    if self.accept[nx as usize] != -1 {
+                    if self.scanner.accepting(nx) {
                         last_len = seg_len;
                         last_state = nx;
                     }
@@ -546,7 +932,7 @@ impl<const W: usize> RustWalkerImpl<W> {
                     reject = true;
                     break;
                 }
-                let cands = self.accepts_all[last_state as usize];
+                let cands = self.scanner.accepts_all(last_state);
                 let lexeme: Vec<u8> = path[seg_start..seg_start + last_len].to_vec();
                 if n_real == 0 {
                     match self.pick_viable(&cands, &lexeme, a_mask) {
@@ -661,7 +1047,7 @@ impl<const W: usize> RustWalkerImpl<W> {
                                 key.push(0); // empty tail: verdict is always true
                             } else {
                                 key.push(1);
-                                let lv = self.live[cur as usize];
+                                let lv = self.scanner.live(cur);
                                 let mut allow = [0u64; W];
                                 m_find(&lv, |t| {
                                     if self.prefix_ok(t, seg) {
@@ -683,7 +1069,8 @@ impl<const W: usize> RustWalkerImpl<W> {
                                     key.extend_from_slice(&w.to_le_bytes());
                                 }
                             }
-                            for w in self.live[cur as usize].iter() {
+                            let lvw = self.scanner.live(cur);
+                            for w in lvw.iter() {
                                 key.extend_from_slice(&w.to_le_bytes());
                             }
                         }
@@ -892,7 +1279,7 @@ impl<const W: usize> RustWalkerImpl<W> {
                     path.push(b);
                     seg_len += 1;
                     cur = nx;
-                    if self.accept[nx as usize] != -1 {
+                    if self.scanner.accepting(nx) {
                         last_len = seg_len;
                         last_state = nx;
                     }
@@ -902,7 +1289,7 @@ impl<const W: usize> RustWalkerImpl<W> {
                     reject = true;
                     break;
                 }
-                let cands = self.accepts_all[last_state as usize];
+                let cands = self.scanner.accepts_all(last_state);
                 let lexeme: Vec<u8> = path[seg_start..seg_start + last_len].to_vec();
                 if n_real == 0 {
                     match self.pick_viable(&cands, &lexeme, a_mask) {
@@ -997,7 +1384,7 @@ impl<const W: usize> RustWalkerImpl<W> {
                                 key.push(0);
                             } else {
                                 key.push(1);
-                                let lv = self.live[cur as usize];
+                                let lv = self.scanner.live(cur);
                                 let mut allow = [0u64; W];
                                 m_find(&lv, |t| {
                                     if self.prefix_ok(t, seg) {
@@ -1019,7 +1406,8 @@ impl<const W: usize> RustWalkerImpl<W> {
                                     key.extend_from_slice(&w.to_le_bytes());
                                 }
                             }
-                            for w in self.live[cur as usize].iter() {
+                            let lvw = self.scanner.live(cur);
+                            for w in lvw.iter() {
                                 key.extend_from_slice(&w.to_le_bytes());
                             }
                         }
@@ -1393,6 +1781,7 @@ fn parse_slices(
     Ok(Some(SliceTables { class_bytes, ids, rest_nodes }))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_walker<const W: usize>(
     node_words: Vec<u64>,
     trans_v: Vec<i32>,
@@ -1405,6 +1794,7 @@ fn build_walker<const W: usize>(
     lex: (Option<HashMap<u32, HashSet<Vec<u8>>>>, Option<HashMap<u32, HashSet<Vec<u8>>>>),
     aliases: HashMap<u32, Vec<u32>>,
     slices: Option<SliceTables>,
+    lazy: Option<LazyParts>,
 ) -> RustWalkerImpl<W> {
     let mut lex_live_mask = [0u64; W];
     if let Some(m) = &lex.0 {
@@ -1412,12 +1802,18 @@ fn build_walker<const W: usize>(
             m_set(&mut lex_live_mask, *t);
         }
     }
+    let scanner = match lazy {
+        None => Scanner::Dense(DenseScanner {
+            trans: trans_v,
+            accept: accept_v,
+            accepts_all: accepts_all.iter().map(|v| m_from_words::<W>(v)).collect(),
+            live: live.iter().map(|v| m_from_words::<W>(v)).collect(),
+        }),
+        Some(parts) => Scanner::Lazy(LazyScanner::new(parts)),
+    };
     RustWalkerImpl {
         nodes: node_words,
-        trans: trans_v,
-        accept: accept_v,
-        accepts_all: accepts_all.iter().map(|v| m_from_words::<W>(v)).collect(),
-        live: live.iter().map(|v| m_from_words::<W>(v)).collect(),
+        scanner,
         ignored: m_from_words::<W>(&ignored),
         literal: m_from_words::<W>(&literal),
         dfa_start,
@@ -1432,11 +1828,133 @@ fn build_walker<const W: usize>(
     }
 }
 
+/// Parse one component blob (layout: grid/lexer/factored.py
+/// _dense_component_blob / _nfa_component_blob; all little-endian).
+fn parse_component(blob: &[u8]) -> PyResult<(CompMachine, Option<Vec<u64>>)> {
+    let err = |m: &str| pyo3::exceptions::PyValueError::new_err(format!("lazy component blob: {m}"));
+    let mut r = BlobReader { b: blob, off: 0 };
+    let kind = r.take(1)?[0];
+    let n_classes = u16::from_le_bytes(r.take(2)?.try_into().unwrap()) as usize;
+    if n_classes == 0 || n_classes > 256 {
+        return Err(err("n_classes out of range"));
+    }
+    match kind {
+        0 => {
+            let n_states = r.u32()? as usize;
+            if n_states == 0 {
+                return Err(err("dense component with zero states"));
+            }
+            let tb = r.take(n_states * n_classes * 4)?;
+            let trans: Vec<i32> = tb
+                .chunks_exact(4)
+                .map(|c| i32::from_le_bytes(c.try_into().unwrap()))
+                .collect();
+            if trans.iter().any(|&s| s != DEAD && (s < 0 || s as usize >= n_states)) {
+                return Err(err("dense transition out of range"));
+            }
+            let accepting: Vec<bool> = r.take(n_states)?.iter().map(|&b| b != 0).collect();
+            let co_acc: Vec<bool> = r.take(n_states)?.iter().map(|&b| b != 0).collect();
+            if r.off != blob.len() {
+                return Err(err("trailing bytes"));
+            }
+            Ok((CompMachine::Dense { n_classes, trans, accepting, co_acc }, None))
+        }
+        1 => {
+            let n_nfa = r.u32()? as usize;
+            let acc = r.u32()?;
+            let n_words = r.u32()? as usize;
+            if n_nfa == 0 || n_words != n_nfa.div_ceil(64) || (acc as usize) >= n_nfa {
+                return Err(err("nfa header out of range"));
+            }
+            let words = |n: usize, r: &mut BlobReader| -> PyResult<Vec<u64>> {
+                Ok(r.take(n * 8)?
+                    .chunks_exact(8)
+                    .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+                    .collect())
+            };
+            let reach = words(n_words, &mut r)?;
+            let start = words(n_words, &mut r)?;
+            let ob = r.take((n_nfa * n_classes + 1) * 4)?;
+            let offsets: Vec<u32> = ob
+                .chunks_exact(4)
+                .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+                .collect();
+            if offsets[0] != 0 || offsets.windows(2).any(|p| p[0] > p[1]) {
+                return Err(err("offsets not monotone"));
+            }
+            let n_dests = *offsets.last().unwrap() as usize;
+            let db = r.take(n_dests * 4)?;
+            let dests: Vec<u32> = db
+                .chunks_exact(4)
+                .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+                .collect();
+            if dests.iter().any(|&d| d as usize >= n_nfa) {
+                return Err(err("dest out of range"));
+            }
+            if r.off != blob.len() {
+                return Err(err("trailing bytes"));
+            }
+            Ok((
+                CompMachine::Nfa { n_classes, n_words, acc, reach, offsets, dests },
+                Some(start),
+            ))
+        }
+        k => Err(err(&format!("unknown component kind {k}"))),
+    }
+}
+
+/// Parse the v8 lazy-scanner FFI payload: (gclass_of[256], component blobs
+/// in terminal order, per-component global->component class maps). Validated
+/// hard at construction — a malformed payload must never walk.
+fn parse_lazy_scanner(
+    raw: Option<(Vec<u16>, Vec<Vec<u8>>, Vec<Vec<u16>>)>,
+    n_terminals: usize,
+) -> PyResult<Option<LazyParts>> {
+    let Some((gclass, blobs, cmap)) = raw else {
+        return Ok(None);
+    };
+    let err = |m: &str| pyo3::exceptions::PyValueError::new_err(format!("lazy scanner payload: {m}"));
+    if gclass.len() != 256 {
+        return Err(err("gclass_of must have 256 entries"));
+    }
+    // one component per SCANNER terminal (terminal_order); n_terminals may
+    // exceed it — the END column (and any unscanned ids) has no component,
+    // its mask bit simply never sets (exactly the dense arenas' behavior)
+    if blobs.is_empty() || blobs.len() > n_terminals {
+        return Err(err("component count exceeds n_terminals"));
+    }
+    if cmap.len() != blobs.len() {
+        return Err(err("cmap length must match component count"));
+    }
+    let n_g = *gclass.iter().max().unwrap() as usize + 1;
+    let mut gclass_of = [0u16; 256];
+    gclass_of.copy_from_slice(&gclass);
+    let mut comps = Vec::with_capacity(blobs.len());
+    let mut starts = Vec::with_capacity(blobs.len());
+    for (i, blob) in blobs.iter().enumerate() {
+        let (comp, start) = parse_component(blob)?;
+        let n_classes = match &comp {
+            CompMachine::Dense { n_classes, .. } => *n_classes,
+            CompMachine::Nfa { n_classes, .. } => *n_classes,
+        };
+        if cmap[i].len() != n_g {
+            return Err(err("cmap row length must equal the global class count"));
+        }
+        if cmap[i].iter().any(|&c| c as usize >= n_classes) {
+            return Err(err("cmap entry out of component class range"));
+        }
+        comps.push(comp);
+        starts.push(start);
+    }
+    Ok(Some(LazyParts { gclass_of, n_g, comps, starts, cmap }))
+}
+
 #[pymethods]
 impl RustWalker {
     #[new]
     #[pyo3(signature = (nodes, trans, accept, n_terminals, accepts_all, live, dfa_start,
-                        ignored_mask, literal_mask, lexicon=None, aliases=None, slices=None))]
+                        ignored_mask, literal_mask, lexicon=None, aliases=None, slices=None,
+                        lazy_scanner=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         nodes: &Bound<'_, PyBytes>,
@@ -1451,6 +1969,7 @@ impl RustWalker {
         lexicon: Option<&Bound<'_, PyDict>>,
         aliases: Option<HashMap<u32, Vec<u32>>>,
         slices: Option<(Vec<u64>, Vec<u8>, Vec<u8>)>,
+        lazy_scanner: Option<(Vec<u16>, Vec<Vec<u8>>, Vec<Vec<u16>>)>,
     ) -> PyResult<Self> {
         let nb = nodes.as_bytes();
         let mut node_words = Vec::with_capacity(nb.len() / 8);
@@ -1470,16 +1989,40 @@ impl RustWalker {
         let lex = parse_lexicon(lexicon)?;
         let aliases = aliases.unwrap_or_default();
         let slices = parse_slices(slices)?;
+        let lazy = parse_lazy_scanner(lazy_scanner, n_terminals)?;
+        if lazy.is_some() {
+            // v8 lazy contract: dense arrays must be absent, slices are
+            // unsupported (grid/trie/walk.py gates lazy DFAs off the slicer —
+            // the containment BFS would force product materialization), and
+            // the product start is state 0 by construction
+            if !trans_v.is_empty() || !accept_v.is_empty()
+                || !accepts_all.is_empty() || !live.is_empty()
+            {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "lazy_scanner excludes dense trans/accept/accepts_all/live",
+                ));
+            }
+            if slices.is_some() {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "lazy_scanner excludes slice tables",
+                ));
+            }
+            if dfa_start != 0 {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "lazy_scanner requires dfa_start == 0",
+                ));
+            }
+        }
         let width = width_for(n_terminals).ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err(format!(
                 "{n_terminals} terminals exceeds the 512-terminal kernel bound"
             ))
         })?;
         let inner = match width {
-            1 => WalkerAny::W1(build_walker::<1>(node_words, trans_v, accept_v, accepts_all, live, dfa_start, ignored_mask, literal_mask, lex, aliases, slices)),
-            2 => WalkerAny::W2(build_walker::<2>(node_words, trans_v, accept_v, accepts_all, live, dfa_start, ignored_mask, literal_mask, lex, aliases, slices)),
-            4 => WalkerAny::W4(build_walker::<4>(node_words, trans_v, accept_v, accepts_all, live, dfa_start, ignored_mask, literal_mask, lex, aliases, slices)),
-            _ => WalkerAny::W8(build_walker::<8>(node_words, trans_v, accept_v, accepts_all, live, dfa_start, ignored_mask, literal_mask, lex, aliases, slices)),
+            1 => WalkerAny::W1(build_walker::<1>(node_words, trans_v, accept_v, accepts_all, live, dfa_start, ignored_mask, literal_mask, lex, aliases, slices, lazy)),
+            2 => WalkerAny::W2(build_walker::<2>(node_words, trans_v, accept_v, accepts_all, live, dfa_start, ignored_mask, literal_mask, lex, aliases, slices, lazy)),
+            4 => WalkerAny::W4(build_walker::<4>(node_words, trans_v, accept_v, accepts_all, live, dfa_start, ignored_mask, literal_mask, lex, aliases, slices, lazy)),
+            _ => WalkerAny::W8(build_walker::<8>(node_words, trans_v, accept_v, accepts_all, live, dfa_start, ignored_mask, literal_mask, lex, aliases, slices, lazy)),
         };
         Ok(RustWalker { inner, width })
     }
@@ -1518,28 +2061,30 @@ impl RustWalker {
         remainder: Vec<u8>,
         a_mask: Vec<u64>,
     ) -> PyResult<(Py<PyBytes>, WalkGroups)> {
-        Ok(walker_dispatch!(self, w, {
+        walker_dispatch!(self, w, {
             fn go<const W: usize>(
                 w: &RustWalkerImpl<W>,
                 py: Python<'_>,
                 remainder: Vec<u8>,
                 a_mask: &[u64],
-            ) -> (Py<PyBytes>, WalkGroups) {
+            ) -> PyResult<(Py<PyBytes>, WalkGroups)> {
                 let mask = m_from_words::<W>(a_mask);
                 let (ci, raw) = py.detach(move || {
-                    let (ci, raw) = w.walk_auto(&remainder, &mask);
-                    // i32-le serialization inside detach: ids are < 2^24
-                    // (24-bit trie tid field), so u32 -> i32 is lossless
-                    let mut ci_bytes: Vec<u8> = Vec::with_capacity(ci.len() * 4);
-                    for t in &ci {
-                        ci_bytes.extend_from_slice(&(*t as i32).to_le_bytes());
-                    }
-                    (ci_bytes, raw)
-                });
-                (PyBytes::new(py, &ci).unbind(), wrap_groups(py, raw))
+                    walk_guarded(w, move || {
+                        let (ci, raw) = w.walk_auto(&remainder, &mask);
+                        // i32-le serialization inside detach: ids are < 2^24
+                        // (24-bit trie tid field), so u32 -> i32 is lossless
+                        let mut ci_bytes: Vec<u8> = Vec::with_capacity(ci.len() * 4);
+                        for t in &ci {
+                            ci_bytes.extend_from_slice(&(*t as i32).to_le_bytes());
+                        }
+                        (ci_bytes, raw)
+                    })
+                })?;
+                Ok((PyBytes::new(py, &ci).unbind(), wrap_groups(py, raw)))
             }
             go(w, py, remainder, &a_mask)
-        }))
+        })
     }
 
     /// Kernel v7 walk: -> (ci as ONE i32-le PyBytes, blob v1 PyBytes). Same
@@ -1554,27 +2099,53 @@ impl RustWalker {
         remainder: Vec<u8>,
         a_mask: Vec<u64>,
     ) -> PyResult<(Py<PyBytes>, Py<PyBytes>)> {
-        Ok(walker_dispatch!(self, w, {
+        walker_dispatch!(self, w, {
             fn go<const W: usize>(
                 w: &RustWalkerImpl<W>,
                 py: Python<'_>,
                 remainder: Vec<u8>,
                 a_mask: &[u64],
-            ) -> (Py<PyBytes>, Py<PyBytes>) {
+            ) -> PyResult<(Py<PyBytes>, Py<PyBytes>)> {
                 let mask = m_from_words::<W>(a_mask);
                 let (ci_bytes, blob) = py.detach(move || {
-                    let (ci, raw) = w.walk_auto(&remainder, &mask);
-                    let mut ci_bytes: Vec<u8> = Vec::with_capacity(ci.len() * 4);
-                    for t in &ci {
-                        ci_bytes.extend_from_slice(&(*t as i32).to_le_bytes());
-                    }
-                    (ci_bytes, blob_encode(W, &raw))
-                });
-                (PyBytes::new(py, &ci_bytes).unbind(), PyBytes::new(py, &blob).unbind())
+                    walk_guarded(w, move || {
+                        let (ci, raw) = w.walk_auto(&remainder, &mask);
+                        let mut ci_bytes: Vec<u8> = Vec::with_capacity(ci.len() * 4);
+                        for t in &ci {
+                            ci_bytes.extend_from_slice(&(*t as i32).to_le_bytes());
+                        }
+                        (ci_bytes, blob_encode(W, &raw))
+                    })
+                })?;
+                Ok((PyBytes::new(py, &ci_bytes).unbind(), PyBytes::new(py, &blob).unbind()))
             }
             go(w, py, remainder, &a_mask)
-        }))
+        })
     }
+}
+
+/// v8 panic fence: LAZY walks run under catch_unwind so an intern-cap breach
+/// (or a build mutex poisoned by one) surfaces as ValueError — the Python
+/// caller falls back to the _walk_py executable specification, masks stay
+/// exact. Dense walks run bare: their failure modes are kernel bugs and must
+/// stay loud (PanicException), exactly as in v7.
+fn walk_guarded<const W: usize, T>(
+    w: &RustWalkerImpl<W>,
+    f: impl FnOnce() -> T,
+) -> PyResult<T> {
+    if !w.scanner.is_lazy() {
+        return Ok(f());
+    }
+    // AssertUnwindSafe: on unwind the only shared state left behind is the
+    // lazy interner — append-only arenas whose published slots are complete
+    // by construction, plus the build mutex, which poisons and turns every
+    // later lazy walk on this walker into this same ValueError. That is the
+    // intended degraded mode (Python spec fallback), not a soundness hole.
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).map_err(|_| {
+        pyo3::exceptions::PyValueError::new_err(
+            "grid_core lazy walk aborted (state intern cap exceeded)",
+        )
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -3235,6 +3806,6 @@ fn grid_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<RustVerdicts>()?;
     m.add_function(wrap_pyfunction!(encode_mask, m)?)?;
     m.add_function(wrap_pyfunction!(entry_id_hex, m)?)?;
-    m.add("__kernel_version__", 7)?;
+    m.add("__kernel_version__", 8)?;
     Ok(())
 }
