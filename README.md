@@ -46,7 +46,7 @@ source, recorded = compile_json_schema(schema)   # -> .grid grammar source
 All 11,306 schemas of [JSONSchemaBench](https://github.com/guidance-ai/jsonschemabench),
 every valid/invalid test instance byte-walked, engines at current versions,
 identical runner semantics and tokenizer (Llama-3.1 128k). Full per-schema
-statuses and protocol: [`bench/RESULTS-jsonschemabench-v0.4.0rc1.md`](bench/RESULTS-jsonschemabench-v0.4.0rc1.md).
+statuses and protocol: [`bench/RESULTS-jsonschemabench-v0.4.0.md`](bench/RESULTS-jsonschemabench-v0.4.0.md).
 
 | engine | passing | declared unsupported | valid rejected | invalid accepted | never terminates |
 |---|---:|---:|---:|---:|---:|
@@ -78,11 +78,11 @@ times in µs , lower is better
 
 | metric | GRID 0.4.0 | llguidance 1.7.6 | XGrammar 0.2.3 |
 |:--|--:|--:|--:|
-| TBM avg | 513 | **22** | 194 |
-| TBM p99 | 8,228 | **299** | 772 |
-| TBM p99.9 | 8,980 | **1,099** | 51,022 |
-| TTFM avg | 65,684 | **693** | 334,134 |
-| TTFM p99 | 1,157,520 | **6,680** | 4,579,322 |
+| TBM avg | 486 | **21** | 191 |
+| TBM p99 | 7,741 | **294** | 757 |
+| TBM p99.9 | 8,638 | **1,063** | 50,665 |
+| TTFM avg | 60,905 | **624** | 362,186 |
+| TTFM p99 | 1,142,255 | **6,189** | 5,037,974 |
 | tokens | 3,491,288 | 2,958,083 | 3,468,252 |
 | compile error | 637 | 1,797 | 51 |
 | timeout | **0** | **0** | **0** |
