@@ -144,13 +144,6 @@ stated with explicit preconditions and paired with empirical tests
 (design rationale with proofs), [`LESSONS.md`](LESSONS.md) (the measured
 history), [`ONBOARDING.md`](ONBOARDING.md) (guided tour).
 
-## Versions
-
-| epoch | releases | focus |
-|---|---|---|
-| 0.2.x | 0.2.0-0.2.5 | correctness: JSON coverage 65% -> 89.5%, the honesty contract, official JSON-Schema-Test-Suite gate in CI |
-| 0.3.x | 0.3.0 | compile-time tail: measured bake-off of 20 candidates, 7 shipped; p99 4.4s -> 1.2s |
-| 0.4.x | 0.4.0 | zero timeouts, kernel v8 (in-kernel lazy product), construction budgets, conflict retry, artifact store |
 
 ## Development
 
@@ -163,6 +156,14 @@ python -m venv .venv && .venv/bin/pip install -e ".[dev]"
 
 Benchmark methodology and full reports live in `bench/`: pinned engine
 versions, declared runners, full error distributions, no cherry-picking.
+
+## Versions
+
+| epoch | releases | focus |
+|---|---|---|
+| 0.2.x | 0.2.0-0.2.5 | correctness: JSON coverage 65% -> 89.5%, the honesty contract, official JSON-Schema-Test-Suite gate in CI |
+| 0.3.x | 0.3.0 | compile-time tail: measured bake-off of 20 candidates, 7 shipped; p99 4.4s -> 1.2s |
+| 0.4.x | 0.4.0 | zero timeouts, kernel v8 (in-kernel lazy product), construction budgets, conflict retry, artifact store |
 
 ## Credits
 
