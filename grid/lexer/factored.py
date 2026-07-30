@@ -218,23 +218,48 @@ class LazyTerminalDFA:
 _COMPONENTS: dict[tuple[str, bool, int | None], TerminalDFA | LazyTerminalDFA] = {}
 
 
-def _build_component(
-    pattern: str, is_literal: bool, budget: int | None,
-) -> TerminalDFA | LazyTerminalDFA:
+def _nfa_artifacts(pattern: str, is_literal: bool):
+    """The subset-free front half of a component build: NFA + byte classes +
+    per-class edge index + eps-closure memo. Shared by the eager build and the
+    direct lazy build (store breach-marker hits skip the doomed subset
+    attempt), so both regimes construct from identical artifacts."""
     node = _literal_node(pattern) if is_literal else _parse_regex(pattern)
     b = _NFABuilder()
     s0, acc = b.build(node)
 
     # shared subset-construction core (grid/lexer/subset.py — the same helpers
     # behind build_scanner); byte classes cover this terminal's edge charsets
-    # only, so they stay tiny. Acceptance is a post-pass over the discovery
-    # order: order[i] is the i-th subset, so the list is positionally
-    # identical to the legacy in-loop append.
+    # only, so they stay tiny.
     eps_closure = eps_closure_fn(b.eps)
     blocks, class_of = byte_classes(b.edges)
     n_classes = len(blocks)
     edge_by_class = edges_by_class(b.edges, class_of, n_classes)
     start = eps_closure(frozenset({s0}))
+    return b, acc, start, eps_closure, class_of, n_classes, edge_by_class
+
+
+def _lazy_component(pattern: str, is_literal: bool) -> LazyTerminalDFA:
+    """Demand-interned component built DIRECTLY (no eager subset attempt) —
+    the store's breach-marker warm path. Value-equal to the LazyTerminalDFA
+    the breach branch below returns: same NFA artifacts, and every subset/
+    annotation is a pure function of the demanded words (the eps memo starts
+    cold instead of warm from the failed attempt — a speed detail only)."""
+    b, acc, start, eps_closure, class_of, n_classes, edge_by_class = \
+        _nfa_artifacts(pattern, is_literal)
+    return LazyTerminalDFA(
+        start, acc, eps_closure, edge_by_class, n_classes, class_of,
+        _terminal_reach(b, {acc: 0}),
+    )
+
+
+def _build_component(
+    pattern: str, is_literal: bool, budget: int | None,
+) -> TerminalDFA | LazyTerminalDFA:
+    # acceptance is a post-pass over the discovery order: order[i] is the
+    # i-th subset, so the list is positionally identical to the legacy
+    # in-loop append
+    b, acc, start, eps_closure, class_of, n_classes, edge_by_class = \
+        _nfa_artifacts(pattern, is_literal)
     try:
         order, trans = subset_construct(
             start, edge_by_class, eps_closure, n_classes, max_states=budget,
@@ -287,10 +312,21 @@ def _component(
     if got is None:
         if len(_COMPONENTS) >= _COMPONENT_CAP:
             _COMPONENTS.clear()
+        # memo miss -> the on-disk component namespace (S3), then the build.
+        # perf_flags is checked BEFORE importing the store so the flag-off
+        # fast path never pays the grid.serving import chain (the E1
+        # contract grid/jsonschema relies on); the store loader is a pure
+        # passthrough to _build_component under either flag.
+        if perf_flags.artifact_store_enabled() and perf_flags.store_components_enabled():
+            from grid.serving.artifact_store import load_or_build_component
+
+            built = load_or_build_component(pattern, is_literal, budget)
+        else:
+            built = _build_component(pattern, is_literal, budget)
         # setdefault: a concurrent duplicate build is benign, duplicate values
         # are equal (for a lazy duplicate the loser instance is discarded
         # before any caller holds it)
-        got = _COMPONENTS.setdefault(key, _build_component(pattern, is_literal, budget))
+        got = _COMPONENTS.setdefault(key, built)
     return got
 
 

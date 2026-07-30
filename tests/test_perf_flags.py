@@ -201,6 +201,39 @@ def test_hashcons_debug_oracle(monkeypatch, raw):
     assert perf_flags.hashcons_debug_enabled() == oracle
 
 
+@pytest.mark.parametrize("flag,reader", [
+    ("GRID_PERF_STORE_COMPONENTS", perf_flags.store_components_enabled),
+    ("GRID_PERF_STORE_TRIE", perf_flags.store_trie_enabled),
+    ("GRID_PERF_STORE_JOURNAL", perf_flags.store_journal_enabled),
+])
+@pytest.mark.parametrize("raw", RAW_VALUES)
+def test_store_namespace_kill_switch_oracles(monkeypatch, flag, raw, reader):
+    """S3 namespace sub-flags: default ON under the ARTIFACT_STORE master,
+    "0" the only disabling value (the GRID_GENN_KEYS default-on grammar)."""
+    _setenv(monkeypatch, flag, raw)
+    oracle = os.environ.get(flag, "1") != "0"
+    assert reader() == oracle
+    if raw is None:
+        assert reader() is True
+
+
+@pytest.mark.parametrize("raw", [None, "1", "64", "1000000"])
+@pytest.mark.parametrize("default", [64, 7])
+def test_store_journal_flush_every_oracle(monkeypatch, raw, default):
+    _setenv(monkeypatch, "GRID_PERF_STORE_JOURNAL_EVERY", raw)
+    oracle = int(os.environ.get("GRID_PERF_STORE_JOURNAL_EVERY", str(default)))
+    assert perf_flags.store_journal_flush_every(default) == oracle
+    if raw is None:
+        assert perf_flags.store_journal_flush_every(default) == default
+
+
+@pytest.mark.parametrize("raw", ["abc", "", " ", "1.5"])
+def test_store_journal_flush_every_garbage_raises(monkeypatch, raw):
+    monkeypatch.setenv("GRID_PERF_STORE_JOURNAL_EVERY", raw)
+    with pytest.raises(ValueError):
+        perf_flags.store_journal_flush_every(64)
+
+
 # ------------------------------------------------------- call-time reads
 
 
@@ -241,6 +274,21 @@ def test_every_reader_is_call_time(monkeypatch):
     assert perf_flags.hashcons_debug_enabled() is True
     monkeypatch.setenv("GRID_PERF_HASHCONS_DEBUG", "0")
     assert perf_flags.hashcons_debug_enabled() is False
+
+    for flag, reader in [
+        ("GRID_PERF_STORE_COMPONENTS", perf_flags.store_components_enabled),
+        ("GRID_PERF_STORE_TRIE", perf_flags.store_trie_enabled),
+        ("GRID_PERF_STORE_JOURNAL", perf_flags.store_journal_enabled),
+    ]:
+        monkeypatch.setenv(flag, "0")
+        assert reader() is False
+        monkeypatch.setenv(flag, "1")
+        assert reader() is True
+
+    monkeypatch.setenv("GRID_PERF_STORE_JOURNAL_EVERY", "5")
+    assert perf_flags.store_journal_flush_every(64) == 5
+    monkeypatch.setenv("GRID_PERF_STORE_JOURNAL_EVERY", "6")
+    assert perf_flags.store_journal_flush_every(64) == 6
 
 
 # ------------------------------------------------------- leaf import

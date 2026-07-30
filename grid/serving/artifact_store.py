@@ -178,8 +178,64 @@ def load_or_build_scanner(grammar: DialectGrammar) -> ScannerDFA:
     if isinstance(hit, ScannerDFA):
         return hit
     dfa = build_scanner(grammar.terminals, grammar.terminal_order)
-    put("scanner", key, dfa)
+    if not getattr(dfa, "lazy", False):
+        # lazy facades (over-budget factored products) hold locks + demand
+        # state: never picklable, and their redeploy warmth comes from the
+        # component namespace instead — skip the put rather than tripping
+        # the one-shot store-degraded warning on a TypeError
+        put("scanner", key, dfa)
     return dfa
+
+
+# breach-marker payload for the component namespace: (pattern, is_literal)
+# breached this exact budget — deterministic (subset_construct is FIFO), so
+# the warm path skips the doomed eager attempt and builds the demand-interned
+# component directly. Versioned string, never a pickle of live state.
+_COMPONENT_BREACH = "component-breach:v1"
+
+
+def component_key(pattern: str, is_literal: bool, budget: int | None) -> str:
+    """Component-namespace key. Unlike the exact-schema-keyed namespaces the
+    identity is the (pattern, is_literal) pair the schema compiler already
+    dedupes terminals on — cross-schema by construction (STRING_RX / format
+    patterns / keyword literals recur corpus-wide). The RESOLVED budget is
+    part of the key because the artifact depends on it (breach vs eager is a
+    budget property; the in-memory memo keys on it for the same reason)."""
+    h = hashlib.blake2b(digest_size=16)
+    h.update(b"L" if is_literal else b"R")
+    h.update(str(budget).encode())
+    h.update(b"|")
+    h.update(pattern.encode("utf-8", "surrogatepass"))
+    return h.hexdigest()
+
+
+def load_or_build_component(pattern: str, is_literal: bool, budget: int | None):
+    """Drop-in for ``factored._build_component(pattern, is_literal, budget)``
+    (call it with the RESOLVED budget, as factored._component does).
+
+    Payloads: TerminalDFA (frozen tuple dataclass, pickle-roundtrip-equal)
+    for components that terminate within budget; the _COMPONENT_BREACH
+    sentinel for budget breaches — the substring-union family's capped
+    attempt is seconds of subset construction per member (S3 step-1
+    measurement), and the LazyTerminalDFA it produces holds locks/closures
+    that can never be pickled, so the marker persists the DECISION and the
+    warm path rebuilds the cheap NFA artifacts only."""
+    from grid.lexer.factored import TerminalDFA, _build_component, _lazy_component
+
+    if not (enabled() and perf_flags.store_components_enabled()):
+        return _build_component(pattern, is_literal, budget)
+    key = component_key(pattern, is_literal, budget)
+    hit = get("component", key)
+    if isinstance(hit, TerminalDFA):
+        return hit
+    if hit == _COMPONENT_BREACH:
+        return _lazy_component(pattern, is_literal)
+    # GrammarInvalid (bad regex) raises HERE, before any put — error
+    # outcomes reproduce exactly on warm runs (store law)
+    comp = _build_component(pattern, is_literal, budget)
+    put("component", key,
+        comp if isinstance(comp, TerminalDFA) else _COMPONENT_BREACH)
+    return comp
 
 
 def load_or_compile_tables(

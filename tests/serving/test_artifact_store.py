@@ -36,7 +36,9 @@ def _bins(root):
 def test_scanner_roundtrip(cache, toy_grammar, monkeypatch):
     cold = store.load_or_build_scanner(toy_grammar)
     assert cold == build_scanner(toy_grammar.terminals, toy_grammar.terminal_order)
-    assert len(_bins(cache)) == 1
+    # exactly one scanner entry (the factored default also writes the
+    # per-terminal component namespace alongside — S3)
+    assert len([p for p in _bins(cache) if p.parent.name == "scanner"]) == 1
     monkeypatch.setattr(store, "build_scanner", _boom)
     warm = store.load_or_build_scanner(toy_grammar)
     assert warm == cold
@@ -80,12 +82,12 @@ def test_flag_off_noop(tmp_path, monkeypatch, toy_grammar):
 
 def test_corrupt_entry_selfheals(cache, toy_grammar):
     cold = store.load_or_build_scanner(toy_grammar)
-    (path,) = _bins(cache)
+    (path,) = [p for p in _bins(cache) if p.parent.name == "scanner"]
     path.write_bytes(path.read_bytes()[:10])
     assert store.get("scanner", path.stem) is None
     assert not path.exists()
     assert store.load_or_build_scanner(toy_grammar) == cold
-    assert len(_bins(cache)) == 1
+    assert len([p for p in _bins(cache) if p.parent.name == "scanner"]) == 1
 
 
 def test_envelope_key_mismatch_rejected(cache):
@@ -244,3 +246,136 @@ def test_uncached_projection_raises_like_compile_tables(cache, toy_grammar):
     proj = RoleProjection.full(toy_grammar)  # never .build(): not CACHED
     with pytest.raises(ValueError, match="CACHED"):
         store.load_or_compile_tables(proj)
+
+
+# ------------------------------------------------- component namespace (S3)
+
+from grid.errors import GrammarInvalid  # noqa: E402
+from grid.grammar.spec import Terminal  # noqa: E402
+from grid.lexer import factored  # noqa: E402
+
+
+@pytest.fixture
+def fresh_memo(monkeypatch):
+    """Isolate the process-wide component memo: the store consult sits BEHIND
+    it, so warm-hit proofs need the memo cold."""
+    monkeypatch.setattr(factored, "_COMPONENTS", {})
+    return monkeypatch
+
+
+def _terms(*patterns: str):
+    terms = {
+        f"T{i}": Terminal(name=f"T{i}", pattern=p, is_literal=False,
+                          ignored=False, decl_index=i)
+        for i, p in enumerate(patterns)
+    }
+    return terms, tuple(terms)
+
+
+# the substring-union shape (BAKEOFF F1) at k=2: breaches small budgets fast
+_UNION_PAT = '"([a-e]*ab[a-e]*|[a-e]*cd[a-e]*)"'
+
+
+def test_component_roundtrip_and_warm_hit(cache, fresh_memo):
+    cold = store.load_or_build_component("[a-z]{2,8}", False, 64)
+    assert isinstance(cold, factored.TerminalDFA)
+    assert [p.parent.name for p in _bins(cache)] == ["component"]
+    fresh_memo.setattr(factored, "_build_component", _boom)
+    warm = store.load_or_build_component("[a-z]{2,8}", False, 64)
+    assert warm == cold  # frozen tuple dataclass: full structural equality
+
+
+def test_component_breach_marker_skips_eager_attempt(cache, fresh_memo):
+    cold = store.load_or_build_component(_UNION_PAT, False, 8)
+    assert isinstance(cold, factored.LazyTerminalDFA)
+    (path,) = _bins(cache)
+    assert store.get("component", path.stem) == store._COMPONENT_BREACH
+    # warm: the eager attempt (subset_construct) must never run again
+    fresh_memo.setattr(factored, "_build_component", _boom)
+    fresh_memo.setattr(factored, "subset_construct", _boom)
+    warm = store.load_or_build_component(_UNION_PAT, False, 8)
+    assert isinstance(warm, factored.LazyTerminalDFA)
+    # value-equal observables: drive both and compare (ids are demand-order
+    # on both sides and both are fresh, so numbering agrees too)
+    for word in [b'"ab"', b'"cd"', b'"aabcd"', b'"x', b'"e"', b'""']:
+        sc, sw = cold, warm
+        stc = stw = 0
+        for byte in word:
+            stc = sc.step(stc, sc.class_of[byte])
+            stw = sw.step(stw, sw.class_of[byte])
+            assert stc == stw
+            if stc == -1:
+                break
+            assert sc.accepting[stc] == sw.accepting[stw]
+            assert sc.co_acc[stc] == sw.co_acc[stw]
+
+
+def test_component_key_separates_budget_and_kind(cache):
+    """Breach is a budget property and literal-vs-regex changes the automaton:
+    all three key components must separate entries."""
+    k = store.component_key
+    assert k("ab", False, 64) != k("ab", True, 64)
+    assert k("ab", False, 64) != k("ab", False, 65)
+    assert k("ab", False, None) != k("ab", False, 64)
+    assert k("ab", False, 64) == k("ab", False, 64)
+
+
+def test_component_kill_switch(cache, fresh_memo, monkeypatch):
+    monkeypatch.setenv("GRID_PERF_STORE_COMPONENTS", "0")
+    comp = store.load_or_build_component("[0-9]+", False, 64)
+    assert isinstance(comp, factored.TerminalDFA)
+    assert _bins(cache) == []  # no component namespace writes
+
+
+def test_component_bad_regex_raises_before_put_warm_and_cold(cache, fresh_memo):
+    for _ in range(2):  # second iteration: store warm for good patterns
+        with pytest.raises(GrammarInvalid):
+            store.load_or_build_component("a{4,2}", False, 64)
+    assert _bins(cache) == []  # failed builds never put
+
+
+def test_factored_scanner_first_error_ordering_with_partial_warm_store(
+        cache, fresh_memo):
+    """T0 (good) warms the store; the first GrammarInvalid must still be
+    T1's — components build in terminal_order regardless of warmth."""
+    terms, order = _terms("[a-z]+", "a{4,2}", "b{9999999}")
+    with pytest.raises(GrammarInvalid) as cold:
+        factored.build_factored_scanner(terms, order, budget=0, component_budget=64)
+    assert len(_bins(cache)) == 1  # T0 stored before T1 raised
+    fresh_memo.setattr(factored, "_COMPONENTS", {})
+    with pytest.raises(GrammarInvalid) as warm:
+        factored.build_factored_scanner(terms, order, budget=0, component_budget=64)
+    assert str(warm.value) == str(cold.value)
+
+
+def test_empty_match_error_parity_with_warm_store(cache, fresh_memo):
+    """Empty-matching terminals produce VALID stored components; the
+    build-time GrammarInvalid must reproduce identically on a warm store."""
+    terms, order = _terms("x", "a*")
+    with pytest.raises(GrammarInvalid) as cold:
+        factored.build_factored_scanner(terms, order, budget=0, component_budget=64)
+    fresh_memo.setattr(factored, "_COMPONENTS", {})
+    fresh_memo.setattr(factored, "_build_component", _boom)  # warm-hit proof
+    with pytest.raises(GrammarInvalid) as warm:
+        factored.build_factored_scanner(terms, order, budget=0, component_budget=64)
+    assert str(warm.value) == str(cold.value)
+
+
+def test_scanner_put_skipped_for_lazy_facade(cache, fresh_memo, toy_grammar,
+                                             monkeypatch):
+    """Over-budget factored products are unpicklable facades: the scanner
+    namespace skips them silently (no one-shot degraded warning), while the
+    component namespace still persists their per-terminal library."""
+    monkeypatch.setenv("GRID_PERF_FACTORED_SCANNER", "1")
+    monkeypatch.setenv("GRID_PERF_FACTORED_BUDGET", "1")
+    monkeypatch.setattr(store, "_put_warned", False)
+    import warnings as _warnings
+
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("error")  # any warning fails the test
+        dfa = store.load_or_build_scanner(toy_grammar)
+    assert getattr(dfa, "lazy", False)
+    assert store._put_warned is False
+    by_ns = {p.parent.name for p in _bins(cache)}
+    assert "scanner" not in by_ns
+    assert "component" in by_ns
