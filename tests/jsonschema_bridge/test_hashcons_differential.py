@@ -224,7 +224,7 @@ def test_unmergeable_message_identical():
         old = normalize(schema, hashcons=OFF)
     new = normalize(schema, hashcons=NORM)
     assert json.dumps(old, sort_keys=True) == json.dumps(new, sort_keys=True)
-    for hc in (OFF, NORM):
+    for _hc in (OFF, NORM):
         with pytest.raises(Unmergeable) as ei:
             N.merge2({"format": "date"}, {"format": "uri"}, {})
         assert "two distinct formats" in str(ei.value)
