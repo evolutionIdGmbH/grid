@@ -54,7 +54,8 @@ the official JSON-Schema-Test-Suite runs in CI under that contract.
   <img alt="Per-split coverage across GRID, llguidance, XGrammar" src="docs/assets/coverage-by-split-light.svg">
 </picture>
 
-### Latency and outcomes - times in µs (one runner, one accounting)
+### Latency and outcomes (one runner, one accounting)
+times in µs , lower is better
 
 | metric | GRID 0.4.0 | llguidance 1.7.6 | XGrammar 0.2.3 |
 |:--|--:|--:|--:|
