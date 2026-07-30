@@ -116,7 +116,8 @@ def build_scanner(
     the v0.3.0 full-corpus run) selects the per-terminal-DFA product path
     (grid/lexer/factored.py), which may return a ScannerDFA-protocol lazy
     facade instead of an eager ScannerDFA when the product exceeds its state
-    budget. GRID_PERF_FACTORED_SCANNER=0 restores the eager union builder
+    budget — or immediately when a single terminal exceeds the per-component
+    budget (GRID_PERF_COMPONENT_BUDGET, the substring-union family). GRID_PERF_FACTORED_SCANNER=0 restores the eager union builder
     below — kept as the factored path's exactness oracle (LazyProductDFA.
     materialize reproduces it exactly, numbering included). Live sets on
     both paths come from the one NFA terminal-reach computation

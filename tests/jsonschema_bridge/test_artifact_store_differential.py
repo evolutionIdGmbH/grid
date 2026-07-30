@@ -72,6 +72,12 @@ def _compile_all(schema):
 @pytest.mark.parametrize("schema,instances", CASES,
                          ids=[f"case{i}" for i in range(len(CASES))])
 def test_cold_warm_equivalence(schema, instances, tmp_path, monkeypatch):
+    # scanner budgets pinned: the store persists DENSE artifacts (lazy facades
+    # degrade to a per-process rebuild by design), and the lazy-regime CI legs
+    # export budget-0/1 ambients that would otherwise turn every dataclass
+    # equality below into a facade identity comparison
+    monkeypatch.setenv("GRID_PERF_FACTORED_BUDGET", "1000000")
+    monkeypatch.setenv("GRID_PERF_COMPONENT_BUDGET", "1000000")
     monkeypatch.setenv("GRID_PERF_ARTIFACT_STORE", "0")
     base = _compile_all(schema)
 
@@ -128,6 +134,9 @@ def test_cross_process_warm_hit(tmp_path, monkeypatch):
     schema = {"type": "object", "properties": {"a": {"type": "integer"}},
               "required": ["a"], "additionalProperties": False}
 
+    # dense-artifact pin, as in test_cold_warm_equivalence (child env inherits)
+    monkeypatch.setenv("GRID_PERF_FACTORED_BUDGET", "1000000")
+    monkeypatch.setenv("GRID_PERF_COMPONENT_BUDGET", "1000000")
     monkeypatch.setenv("GRID_PERF_ARTIFACT_STORE", "0")
     base = _compile_all(schema)
 

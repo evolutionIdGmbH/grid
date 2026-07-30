@@ -97,7 +97,7 @@ grid/
     rx.py               # grid-regex subset -> parse tree
     nfa.py              # Thompson byte-NFAs + terminal-accept reachability
     subset.py           # shared subset-construction core (eager + factored paths)
-    factored.py         # per-terminal component DFAs + lazy product (0.3.x #4)
+    factored.py         # per-terminal component DFAs (eager or demand-interned over the component budget) + lazy product (0.3.x #4)
     run.py              # LexerRun: immutable value object (§5 E7)
   trie/
     build.py            # TokenTrie from TokenizerAdapter.token_bytes (final artifact format, §2)

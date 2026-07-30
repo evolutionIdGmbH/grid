@@ -132,7 +132,8 @@ def test_lazy_takes_raw_schema_scoped_key(sql_grammar, sql_tables, sql_tokenizer
     eager_p = MaskProducer(tables=sql_tables,
                            dfa=build_factored_scanner(sql_grammar.terminals,
                                                       sql_grammar.terminal_order,
-                                                      budget=10**9),
+                                                      budget=10**9,
+                                                      component_budget=10**9),
                            trie=trie, vocab_size=vocab, schema_fingerprint="fp-mat")
     eager_p.set_genn_keys(True)
     assert eager_p.cache_key(b"select", A)[0] == "genN"  # materialized keeps genN

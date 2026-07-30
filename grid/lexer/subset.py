@@ -8,9 +8,12 @@ start closure and their post-passes:
 
 - dfa.build_scanner (eager union DFA, the GRID_PERF_FACTORED_SCANNER=0
   oracle): 256-wide row expansion + accepts_all / live-mask annotation over
-  the discovery order;
+  the discovery order, always uncapped;
 - factored._build_component (per-terminal component DFA): class-wide rows
-  kept as-is + a per-state accepting bitmap.
+  kept as-is + a per-state accepting bitmap, capped at
+  GRID_PERF_COMPONENT_BUDGET states (SubsetBudgetExceeded -> the caller
+  switches to demand-driven interning; under the cap the arrays are
+  bit-identical to an uncapped run).
 
 Determinism here is load-bearing: state ids feed genN cache keys and the
 artifact store, and the factored product's materialized numbering must equal

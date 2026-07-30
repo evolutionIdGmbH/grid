@@ -202,8 +202,10 @@ def _full_differential(terminals, order, seed: int) -> None:
         compare_streams(eager, lazy, w)
     assert shortest_lexemes(eager, len(order)) == shortest_lexemes(lazy, len(order))
     # under-budget materialization: EXACT reproduction of the eager artifact
-    # (budget pinned: the CI lazy leg exports GRID_PERF_FACTORED_BUDGET=0)
-    mat = build_factored_scanner(terminals, order, budget=10**9)
+    # (both budgets pinned: CI legs export GRID_PERF_FACTORED_BUDGET=0 and
+    # GRID_PERF_COMPONENT_BUDGET=1, and this assertion is about the
+    # under-budget regime in every leg)
+    mat = build_factored_scanner(terminals, order, budget=10**9, component_budget=10**9)
     if isinstance(mat, LazyProductDFA):  # pragma: no cover
         pytest.fail("materialization aborted under an unbounded budget")
     assert mat == eager
@@ -321,7 +323,7 @@ def test_mixed_lazy_and_eager_components():
     eager = build_scanner(terms, order, factored=False)
     mixed = build_factored_scanner(terms, order, budget=0, component_budget=24)
     assert isinstance(mixed, LazyProductDFA)
-    kinds = {name: type(c).__name__ for name, c in zip(order, mixed.comps)}
+    kinds = {name: type(c).__name__ for name, c in zip(order, mixed.comps, strict=True)}
     assert kinds["T0"] == "LazyTerminalDFA"   # the union breaches 24 states
     assert "TerminalDFA" in kinds.values()    # a sibling stays eager
     for w in _words(eager, seed=88) + UNION_PROBES:
@@ -399,7 +401,7 @@ def test_priority_ties():
     st = lazy.scan_state(b"ab")
     assert lazy.accepts_all[st] == frozenset({0, 1, 2})
     assert lazy.accept[st] == 1  # the literal wins
-    assert build_factored_scanner(terms, order, budget=10**9) == eager
+    assert build_factored_scanner(terms, order, budget=10**9, component_budget=10**9) == eager
 
 
 def test_empty_match_rejected_same_message():
@@ -410,6 +412,11 @@ def test_empty_match_rejected_same_message():
         with pytest.raises(GrammarInvalid) as e_fact:
             build_factored_scanner(terms, order)
         assert str(e_eager.value) == str(e_fact.value)
+        # lazy components carry the same matches_empty (accept in the start
+        # closure), so the budget-0 path raises the identical message too
+        with pytest.raises(GrammarInvalid) as e_lazy:
+            build_factored_scanner(terms, order, component_budget=0)
+        assert str(e_eager.value) == str(e_lazy.value)
 
 
 def test_bad_regex_same_first_error():
@@ -432,7 +439,8 @@ def test_jsonschema_corpus():
             compare_streams(eager, lazy, w)
         assert (shortest_lexemes(eager, len(g.terminal_order))
                 == shortest_lexemes(lazy, len(g.terminal_order)))
-        mat = build_factored_scanner(g.terminals, g.terminal_order, budget=10**9)
+        mat = build_factored_scanner(g.terminals, g.terminal_order,
+                                     budget=10**9, component_budget=10**9)
         assert mat == eager
         assert mat.h_max == eager.h_max
 
@@ -444,6 +452,8 @@ def test_flag_dispatch(monkeypatch, sql_grammar):
     eager = build_scanner(sql_grammar.terminals, sql_grammar.terminal_order, factored=False)
     monkeypatch.setenv("GRID_PERF_FACTORED_SCANNER", "1")
     monkeypatch.setenv("GRID_PERF_FACTORED_BUDGET", "1000000")
+    # pinned so the ambient component-lazy CI leg keeps this a DENSE dispatch
+    monkeypatch.setenv("GRID_PERF_COMPONENT_BUDGET", "1000000")
     mat = build_scanner(sql_grammar.terminals, sql_grammar.terminal_order)
     assert mat == eager
     monkeypatch.setenv("GRID_PERF_FACTORED_BUDGET", "3")

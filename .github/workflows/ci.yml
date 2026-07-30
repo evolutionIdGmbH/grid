@@ -45,3 +45,10 @@ jobs:
         run: >
           GRID_PERF_FACTORED_BUDGET=0 GRID_NO_RUST=1
           pytest tests/lexer tests/mask tests/trie tests/guide tests/generate tests/jsonschema_bridge -q
+      - name: Tests (component-lazy regime, P3)
+        # component budget 1 forces every non-degenerate terminal onto the
+        # demand-interned LazyTerminalDFA (env "0" is the kill switch, so 1 is
+        # the smallest all-lazy value); product budget 0 stacks the facades
+        run: >
+          GRID_PERF_COMPONENT_BUDGET=1 GRID_PERF_FACTORED_BUDGET=0 GRID_NO_RUST=1
+          pytest tests/lexer tests/mask tests/trie tests/guide tests/generate tests/jsonschema_bridge -q

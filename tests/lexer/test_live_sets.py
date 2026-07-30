@@ -41,7 +41,19 @@ def _bfs_live(dfa) -> list[frozenset[int]]:
     return out
 
 
+def _dense(dfa):
+    """Lazy-regime CI legs (GRID_PERF_FACTORED_BUDGET=0 and/or
+    GRID_PERF_COMPONENT_BUDGET=1) make build_scanner return the facade; the
+    dense-graph oracles here need the full artifact, and materializing a
+    facade reproduces the eager one exactly, so the oracles lose nothing."""
+    if getattr(dfa, "lazy", False):
+        dfa = dfa.materialize(10**9)
+        assert dfa is not None
+    return dfa
+
+
 def _assert_matches_bfs(dfa) -> None:
+    dfa = _dense(dfa)
     oracle = _bfs_live(dfa)
     assert list(dfa.live) == oracle
     assert dfa.h_max == max((len(s) for s in oracle), default=0)
@@ -101,12 +113,13 @@ def test_differential_jsonschema_grammars(name):
 
 def test_ground_truth_bfs(toy_dfa, sql_dfa):
     for dfa in (toy_dfa, sql_dfa):
+        dfa = _dense(dfa)
         assert list(dfa.live) == _bfs_live(dfa)
 
 
 def test_live_monotone_and_start(toy_grammar, sql_grammar):
     for g in (toy_grammar, sql_grammar):
-        dfa = build_scanner(g.terminals, g.terminal_order)
+        dfa = _dense(build_scanner(g.terminals, g.terminal_order))
         assert dfa.live[dfa.start] == frozenset(range(len(g.terminal_order)))
         assert dfa.h_max == len(dfa.live[dfa.start])
         for src_state, row in enumerate(dfa.trans):
@@ -115,10 +128,14 @@ def test_live_monotone_and_start(toy_grammar, sql_grammar):
                     assert dfa.live[dst] <= dfa.live[src_state]
 
 
-def test_eager_and_factored_paths_equal(sql_grammar):
+def test_eager_and_factored_paths_equal(monkeypatch, sql_grammar):
     """The two surviving build paths must agree exactly (live/h_max included);
     the factored path's co_acc bits are transitively pinned through this and
-    the byte-identical differential in test_factored_differential.py."""
+    the byte-identical differential in test_factored_differential.py.
+    Budgets pinned: this assertion is about the under-budget regime in every
+    CI leg (the lazy legs export budget-0/1 ambients)."""
+    monkeypatch.setenv("GRID_PERF_FACTORED_BUDGET", "1000000")
+    monkeypatch.setenv("GRID_PERF_COMPONENT_BUDGET", "1000000")
     dfa_eager = build_scanner(sql_grammar.terminals, sql_grammar.terminal_order,
                               factored=False)
     dfa_fact = build_scanner(sql_grammar.terminals, sql_grammar.terminal_order,
