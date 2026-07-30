@@ -394,3 +394,96 @@ standard-host rerun remains open alongside the S1 GPU-box items).
 Residual: store schema_src remains text (hits re-parse; the optional
 'grammar' pickle namespace is the recorded follow-on), and the DP-LALR
 int-id handoff (CANDIDATES id 6) now has a clean seam via GrammarParts.
+
+## Postscript: P1 kernel-resident lazy scanner (post-v0.3.0, wave C) — grid_core v8
+
+The lazy serving gap P3 left is closed: over-budget schemas (LazyProductDFA)
+now walk the kernel under `GRID_PERF_KERNEL_LAZY` with a v8+ grid_core,
+instead of pure-Python `_walk_py`. The scanner behind the walker is a
+backend enum at the four accessor touchpoints — `Dense` is v7 verbatim,
+`Lazy` interns sparse (tid, comp-state) product tuples and per-component
+subset bitsets on demand (one build mutex for mutation, lock-free reads via
+append-only OnceLock arenas + AtomicI32 rows; annotations folded from
+component flags at intern time, so masks are functions of state VALUES and
+demand-order ids never cross the FFI). Components arrive as compact blobs
+(`factored.kernel_lazy_payload`): dense arenas for eager components, NFA
+arenas with eps-CLOSED per-class edge lists for capped ones — closure
+distributes over union, so the kernel unions bitsets and never eps-walks;
+no regex/NFA machinery was added to the crate. Intern cap 262,144 states;
+breach = ValueError at the walk FFI -> `_walk_py` fallback (masks exact
+either way); dense walks keep no sanctioned failure mode.
+
+Step-1 bound (the bet, measured before Rust work; full valid instances,
+full-vocab walks, Python lazy leg): touched product states 71-7,265 and
+lazy-component subsets 26-2,140 across the nine substring-union schemas —
+the predicted 10^2-10^4 vs 268,803 eager subset states for o83132's single
+component; cap headroom ~36x.
+
+Gates (all local macOS, jobs 1, worktree venv wheel):
+
+- Mask parity (the outcome gate): per-token full-vocab mask digests
+  kernel-ON vs spec-OFF identical across all nine family schemas + the two
+  no-instance members' initial masks — 3,095 instance steps, zero
+  divergence; eager third leg (component budget 0) identical on the two
+  schemas whose uncapped build terminates locally (o83133 15.4s, o33033).
+- Parity suite: forced-all-lazy legs (toy / wide W=2 / sql+lexicons),
+  opposite-order interning and rayon-pool id-independence, intern-cap
+  fallback (lazy degrades to spec, dense re-raises), payload-shape pins;
+  full suite 809+ passed / 0 failed on the v8 wheel, flag on and off.
+- Recorded sets: by construction — the flag's only consumer is walk
+  dispatch (grep-audited); `_apply_scanner_budget` reads pattern text at
+  schema-compile time; GrammarInvalid text and reserve shortest-lexemes
+  equality stay pinned by the existing P3 differential suite.
+- Family AB (p3_family, --first-mask, interleaved ON/OFF, jobs 1):
+
+  | metric (12 completed; o83677/io-package declare LALR conflicts both legs) | OFF | ON |
+  |---|---|---|
+  | 64-token cold-prefix worst token p50 / p90 / max | 276 / 313.5 / 313.5ms | 9.2 / 15.9 / 15.9ms |
+  | pooled prefix_masks phase | 64.6s | 2.6s |
+  | TTFM compile-only p50 / p90 | 5.357 / 12.333s | 5.337 / 12.391s |
+  | TTFM first-mask-included p50 / p90 | 5.358 / 12.336s | 5.343 / 12.588s |
+
+  Dense control: Stream (16,229-state dense DFA) worst token 8.4ms OFF /
+  8.6ms ON — the flag is unobservable off the lazy path. DataContract (lazy
+  product over all-eager components) 255 -> 9.8ms: the all-dense-component
+  lazy product is covered, not just the NFA-component case. RSS unchanged
+  (family max ~1.0GB OFF -> 843MB ON, tokenizer/trie-dominated).
+- p50 gate (the one RUST_SCANNER failed; stratified-29 fast set,
+  interleaved, jobs 1): compile-only p50 8.85ms ON vs 9.07ms OFF,
+  first-mask-included 10.34 vs 10.67ms; per-schema ON/OFF ratio p50 1.003
+  (compile-only) / 1.001 (first-incl), spread 0.78-1.40 both directions —
+  session noise on a sub-10ms set, zero timeouts/crashes on either leg.
+  Structurally expected: dense schemas execute one extra getattr.
+- MaskBench protocol (maskbench_grid.py, family 14, ON/OFF arms,
+  outcomes.py --strict): 14/14 unchanged (12 ok incl. every test verdict
+  and token count, 2 compile_error:LALRConflictError both legs); zero
+  validation/invalidation errors both legs. Pooled TBM over 10,965 masks:
+  p50 196us ON vs 215 OFF (warm path untouched), p90 7.8ms vs 233ms,
+  p99 8.6ms vs 257ms (~30x — the plan's "bounded ~8ms cold-miss parity",
+  llguidance's lazy-DFA p99 6.7ms being the cross-engine reference regime),
+  max 185ms vs 373ms (the CD-re-check residue below). Stream (dense
+  control) p50 31us both arms.
+
+RUST_SCANNER disposition (held worktree wf_6c21bc07-902-4): SUBSUMED and
+retired. v8 ships blobs once at walker construction and never rehydrates
+arenas into Python, so the +18-22ms per-build FFI floor that failed gate
+(d) cannot recur; the eager `build_scanner_arena` entry point is not
+ported, and nothing was harvested — the payload pre-computes eps-folded
+NFA artifacts Python-side, leaving no work for in-kernel CharSet/NFA/
+eps_star modules. scanner_build.rs remains in its held worktree as
+reference. Size-gated dispatch, the recorded fallback, is unneeded.
+
+Store law (the #1-vs-#8 conflict, resolved): the artifact store never
+persists product-interner state — `load_or_build_scanner` skips the put
+for lazy facades (instance-local ids, unpicklable locks; post-P3 lazy
+builds are seconds). Deterministic component artifacts (eager TerminalDFA
+arenas + component NFA arenas) are the recorded S3 follow-on payload.
+
+Residue, recorded: full-instance worst tokens reach ~185/221ms ON
+(BatchJob/DataConnector, vs 297/416ms OFF) at steps whose cost is
+Python-side CD re-checks + registration — RustVerdicts stays non-lazy this
+phase and is the declared phase-2 item; one-time payload serialization on
+first walk costs ~40-200ms on schemas carrying 8-16k-state eager
+components (tuple-table -> np conversion; revisit only if it surfaces
+outside the family). Full-corpus (11.3k) republish with the flag default
+is owed on the next GPU-box session, as with every wave flip.

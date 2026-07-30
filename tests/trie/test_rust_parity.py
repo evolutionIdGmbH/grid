@@ -118,7 +118,10 @@ def test_parity_sql_with_lexicons(sql_source, sql_tokenizer, sql_grammar):
 # comparison by construction: _entries_for compares ci sets, group
 # partitions, and verdict-relevant representative fields only.
 
-_KERNEL_V8 = W._grid_core is not None and getattr(W._grid_core, "__kernel_version__", 0) >= 8
+# _USE_RUST folds GRID_NO_RUST=1: these legs assert the kernel path is TAKEN,
+# so a disabled kernel must skip them (walk() itself degrades to the spec)
+_KERNEL_V8 = (W._USE_RUST
+              and getattr(W._grid_core, "__kernel_version__", 0) >= 8)
 
 
 def _force_lazy(monkeypatch):
@@ -126,7 +129,8 @@ def _force_lazy(monkeypatch):
     monkeypatch.setenv("GRID_PERF_KERNEL_LAZY", "1")
 
 
-needs_v8 = pytest.mark.skipif(not _KERNEL_V8, reason="grid_core v8 (lazy scanner) not installed")
+needs_v8 = pytest.mark.skipif(
+    not _KERNEL_V8, reason="grid_core v8 (lazy scanner) not installed/enabled")
 
 
 @needs_v8
@@ -164,11 +168,12 @@ def test_parity_sql_with_lexicons_lazy(sql_source, sql_tokenizer, sql_grammar, m
     _walk_states(guide, seed=7, steps=10, ctx="sql-lazy")
 
 
-def test_lazy_stays_off_kernel_without_flag(toy_source, toy_tokenizer, monkeypatch):
-    """The wave-B gate holds with the flag unset: lazy DFAs walk _walk_py
-    (spec-path WalkResult, groups=None), never the kernel."""
+def test_lazy_stays_off_kernel_with_kill_switch(toy_source, toy_tokenizer, monkeypatch):
+    """GRID_PERF_KERNEL_LAZY=0 restores the wave-B regime regardless of the
+    shipped default: lazy DFAs walk _walk_py (spec-path WalkResult,
+    groups=None), never the kernel."""
     monkeypatch.setenv("GRID_PERF_COMPONENT_BUDGET", "1")
-    monkeypatch.delenv("GRID_PERF_KERNEL_LAZY", raising=False)
+    monkeypatch.setenv("GRID_PERF_KERNEL_LAZY", "0")
     guide = build_guide(toy_source, toy_tokenizer)
     assert getattr(guide.dfa, "lazy", False)
     A = guide.producer.allowed(guide.initial_state.stack)
@@ -258,6 +263,47 @@ def test_lazy_kernel_parallel_walks_match_sequential(toy_source, toy_tokenizer, 
     seq = outputs("0")
     par = outputs("4")
     assert seq == par
+
+
+@needs_v8
+def test_lazy_kernel_valueerror_falls_back_to_spec(toy_source, toy_tokenizer, monkeypatch):
+    """The intern-cap contract: a ValueError out of a LAZY kernel walk (cap
+    breach / poisoned build mutex) degrades to the _walk_py specification —
+    masks stay exact; a dense walk must re-raise (no sanctioned kernel
+    failure mode)."""
+    _force_lazy(monkeypatch)
+    guide = build_guide(toy_source, toy_tokenizer)
+    assert getattr(guide.dfa, "lazy", False)
+    A = guide.producer.allowed(guide.initial_state.stack)
+    args = (guide.trie, guide.dfa, b"", A,
+            guide.tables.ignored_terminal_ids, guide.producer._priority, None)
+
+    class _CapBreach:
+        width = 1
+
+        def walk(self, remainder, a_words):
+            raise ValueError("grid_core lazy walk aborted (state intern cap exceeded)")
+
+    key = (id(guide.trie), id(guide.dfa), id(None))
+    monkeypatch.setitem(W._WALKERS, key, (_CapBreach(), None))
+    got = W.walk(*args)
+    assert got.groups is None, "cap-breach walk must be the Python spec result"
+    spec = W._walk_py(*args)
+    assert sorted(got.ci_tokens) == sorted(spec.ci_tokens)
+    assert got.cd_entries == spec.cd_entries
+
+    # dense: the same ValueError stays loud
+    monkeypatch.delenv("GRID_PERF_COMPONENT_BUDGET", raising=False)
+    dense_guide = build_guide(toy_source, toy_tokenizer)
+    assert not getattr(dense_guide.dfa, "lazy", False)
+    dense_args = (dense_guide.trie, dense_guide.dfa, b"",
+                  dense_guide.producer.allowed(dense_guide.initial_state.stack),
+                  dense_guide.tables.ignored_terminal_ids,
+                  dense_guide.producer._priority, None)
+    dense_key = (id(dense_guide.trie), id(dense_guide.dfa), id(None))
+    monkeypatch.setitem(W._WALKERS, dense_key, (_CapBreach(), None))
+    with pytest.raises(ValueError):
+        W.walk(*dense_args)
 
 
 @needs_v8

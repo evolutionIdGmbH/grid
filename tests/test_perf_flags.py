@@ -241,6 +241,23 @@ def test_slicer_default_is_off(monkeypatch):
 
 
 @pytest.mark.parametrize("raw", RAW_VALUES)
+def test_kernel_lazy_oracle(monkeypatch, raw):
+    _setenv(monkeypatch, "GRID_PERF_KERNEL_LAZY", raw)
+    # P1 kernel-resident lazy scanner, born as a perf_flags reader: strict
+    # == "1" value grammar — "" / "true" / "2" are OFF (the kill-switch
+    # convention); the unset default is pinned by the test below
+    oracle = os.environ.get("GRID_PERF_KERNEL_LAZY", "0") == "1"
+    assert perf_flags.kernel_lazy_enabled() == oracle
+    if raw in ("", "true", "2", "00", "0"):
+        assert perf_flags.kernel_lazy_enabled() is False
+
+
+def test_kernel_lazy_default_is_off(monkeypatch):
+    monkeypatch.delenv("GRID_PERF_KERNEL_LAZY", raising=False)
+    assert perf_flags.kernel_lazy_enabled() is False
+
+
+@pytest.mark.parametrize("raw", RAW_VALUES)
 def test_jump_oracle(monkeypatch, raw):
     _setenv(monkeypatch, "GRID_JUMP", raw)
     # S1 serving jump-forward lever, born as a perf_flags reader (post-E1

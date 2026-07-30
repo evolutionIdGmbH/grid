@@ -3,10 +3,13 @@ serve IDENTICAL masks through the pure-Python spec walk.
 
 - _walk_py WalkResult equality eager-vs-lazy (ci ids, CDEntry events/segments/
   remainders — all numbering-free) is the direct mask-equivalence proof.
-- Consumer gates: lazy DFAs never reach the Rust kernel (walk() falls back to
-  the spec path, make_verdict_kernel returns None) and never take genN cache
-  keys (demand-order state ids are instance-local; T2 is shared per-dialect
-  across template instances — aliasing them is the forbidden wrong-mask class).
+- Consumer gates: RustVerdicts is never lazy-capable (make_verdict_kernel
+  returns None; P1 phase-2 item), the walk kernel is GRID_PERF_KERNEL_LAZY-
+  gated (=0 restores the spec-path-only wave-B regime; the v8 kernel leg is
+  pinned by tests/trie/test_rust_parity.py), and lazy DFAs never take genN
+  cache keys (demand-order state ids are instance-local; T2 is shared
+  per-dialect across template instances — aliasing them is the forbidden
+  wrong-mask class).
 - End-to-end: a flag-off guide and a flag-on/budget-0 guide driven in lockstep
   produce identical per-step mask id sets and statuses.
 """
@@ -108,13 +111,20 @@ def test_walk_parity_toy(toy_grammar, toy_tables, toy_dfa, toy_tokenizer):
                  [b"", b"fo", b"12", b"1", b" "])
 
 
-def test_lazy_never_reaches_kernel(sql_grammar, sql_tables, sql_tokenizer):
+def test_lazy_kernel_gates(sql_grammar, sql_tables, sql_tokenizer, monkeypatch):
+    """The lazy kernel gates post-P1: RustVerdicts is NEVER lazy-capable
+    (phase-2 item — flag-independent), and the WALK takes the kernel only
+    under GRID_PERF_KERNEL_LAZY with a v8+ kernel; otherwise the Python spec
+    path (groups None), kernel present or not."""
     lazy = _lazy_of(sql_grammar)
-    assert make_verdict_kernel(sql_tables, lazy, None) is None
+    monkeypatch.setenv("GRID_PERF_KERNEL_LAZY", "1")
+    assert make_verdict_kernel(sql_tables, lazy, None) is None  # both flag states
     trie = build_trie(sql_tokenizer)
     A = allowed_terminals(sql_tables, root_node(sql_tables))
+
+    monkeypatch.setenv("GRID_PERF_KERNEL_LAZY", "0")  # the kill switch, default-proof
     got = walk(trie, lazy, b"", A, sql_tables.ignored_terminal_ids, _priority(sql_tables))
-    assert got.groups is None  # the Python spec path, kernel present or not
+    assert got.groups is None  # the wave-B regime the kill switch restores
     assert isinstance(got.ci_tokens, tuple)
 
 
