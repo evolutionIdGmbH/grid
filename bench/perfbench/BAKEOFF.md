@@ -338,3 +338,59 @@ records. Any future cross-engine TTFM claim uses first-mask-included on
 BOTH sides or is not made; a same-definition llguidance reference leg is
 an explicit follow-on (ROADMAP non-goal until requested), never smuggled
 into a GRID-only republish.
+
+## Postscript: P2 direct emission (post-v0.3.0, wave B)
+
+The spec_load re-parse is gone from the default schema->mask compile
+pipeline. Baseline held up under the step-1 freeze (ttfm_capped +
+stratified_200, 216 schemas, jobs 4, .venv-bench dev box): spec_load median
+49.1% of front-end (schema_compile+spec_load+projection), spec_load +
+projection 83.2% — the CANDIDATES id-10 probe shares reproduced on the full
+profile sets.
+
+Change (grid/grammar/parts.py, spec.py, projection.py, reduction.py,
+grid/jsonschema/): compile_parts() emits a GrammarParts manifest; the text
+emitter is render_text over that same manifest (compile() unchanged,
+byte-identical over all 11,306 corpus schemas with PYTHONHASHSEED pinned —
+the sweep surfaced pre-existing seed-sensitive emission on 8/11,306
+schemas, out of P2 scope, noted in the step-2 commit);
+DialectGrammar.from_parts replays only the _parse_source contract and runs
+validate()/freeze() verbatim; RoleProjection.full_built registers the full
+projection without the compose/reduce/verify rebuild; the reduction
+fixpoints are linear worklists in all configurations (30k-rule chain:
+139.8s -> 0.019s; corpus/projection/synthetic set-equality gated).
+GRID_PERF_DIRECT_EMIT default ON after the gates; =0 restores text ->
+spec.load; GRID_PERF_DIRECT_EMIT_CHECK=1 is the permanent render+reload
+oracle (CI leg).
+
+Gates run: (a) Gate A byte-identity 11,306/11,306 (114 status-equal
+declared outcomes). (b) diff_direct_emit full corpus: 0 flips — 11,191
+equal grammars (terminal_order tuple primary), 106 equal_unsupported, 8
+equal_RxUnsupported, 1 equal_grammar_invalid (the unproductive-recursion
+family occurs once in corpus and matches). (c) --tables leg over
+ttfm_capped+ttfm_tail_1pct+stratified_200+tbm_tail_100 (309): 303 equal
+incl. role_shape_hash + LALRTables.fingerprint + action/goto, 1
+equal_LALRConflictError, 4 equal_unsupported, helm both-arms-timeout (no
+oracle). (d) mask-level walk differential: 25 stratified schemas x 2 seeds
+x 40 steps over one MockTokenizer trie, 2,000 allowed-id sets equal.
+(e) full pytest on three legs: defaults, kill-switch, check-oracle.
+
+Measured (same profile sets, flag-off vs flag-on on the post-change tree):
+
+| metric | flag-off | flag-on |
+|---|---|---|
+| spec_load p50 / p90 / total | 1.30ms / 3.22ms / 0.65s | 1.12ms / 1.95ms / 0.39s |
+| projection p50 / p90 / total | 0.83ms / 1.82ms / 0.36s | 0.66ms / 0.77ms / 0.15s |
+| front-end, 12 costliest grammars | 693ms | 344ms (-50.3%; o87865 127->61ms) |
+| terminals>=60 band spec_load+projection p50 | 3.83ms | 2.32ms |
+| full pipeline p50 / p90 | 8.03ms / 239ms | 7.68ms / 238ms |
+
+p90+ of the whole pipeline stays scanner-bound (P3's residual analysis
+unchanged); completion/timeout structure identical across legs (210
+complete; 4 declared-slow schema_compile + 2 helm-family lalr). Absolute
+numbers are dev-box; shares are the durable claim (the plan's step-8
+standard-host rerun remains open alongside the S1 GPU-box items).
+
+Residual: store schema_src remains text (hits re-parse; the optional
+'grammar' pickle namespace is the recorded follow-on), and the DP-LALR
+int-id handoff (CANDIDATES id 6) now has a clean seam via GrammarParts.

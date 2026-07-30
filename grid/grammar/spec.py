@@ -33,12 +33,15 @@ import re
 import warnings
 from dataclasses import dataclass, field
 
+from grid import perf_flags
 from grid._statecharts.engine import Statechart, load_chart
 from grid.errors import GrammarInvalid
+from grid.grammar.parts import GrammarParts, render_text
 
 _TERM_DEF = re.compile(r"^([A-Z][A-Z0-9_]*)\s*:\s*(.+)$")
 _RULE_DEF = re.compile(r"^([a-z_][a-z0-9_]*)\s*:\s*(.+)$")
 _RHS_TOKEN = re.compile(r'"((?:[^"\\]|\\.)*)"|([A-Z][A-Z0-9_]*)|([a-z_][a-z0-9_]*)|(\|)')
+_UNESCAPE = re.compile(r"\\(.)")
 
 
 def _literal_terminal_name(text: str) -> str:
@@ -86,6 +89,69 @@ class DialectGrammar:
     @property
     def nonterminals(self) -> frozenset[str]:
         return frozenset(p.lhs for p in self.productions)
+
+    # -- direct emission (P2) ----------------------------------------------
+
+    @classmethod
+    def from_parts(cls, parts: GrammarParts) -> DialectGrammar:
+        """Build a FROZEN grammar straight from a compiler GrammarParts
+        manifest — the object twin of ``load(render_text(parts))`` with the
+        text render and regex re-parse skipped.
+
+        Replicates ONLY the _parse_source contract (decl_index assignment:
+        named defs in manifest order, then literal terminals at first token
+        use over the start line and rules in order; quoted-token unescaping;
+        epsilon alternatives; %start/%ignore wiring). validate() and
+        freeze() then run verbatim — GrammarInvalid outcomes (unproductive
+        recursive schemas), L-REC01 warnings, and terminal_order numbering
+        are shared code with the text path, not replicas.
+
+        GRID_PERF_DIRECT_EMIT_CHECK=1 (CI oracle): also load the rendered
+        text and assert both paths agree — on the full grammar identity for
+        valid manifests, on the GrammarInvalid message otherwise. (The
+        oracle arm runs validate() twice, so warning COUNTS double under
+        check mode; message parity is unaffected.)"""
+        g = cls(source="")
+        try:
+            g._build_from_parts(parts)
+        except GrammarInvalid:
+            g._sc.fire("parse_error")
+            raise
+        g._sc.fire("parse_ok")
+        if perf_flags.direct_emit_check_enabled():
+            return g._validate_freeze_checked(parts)
+        return g.validate().freeze()
+
+    def _validate_freeze_checked(self, parts: GrammarParts) -> DialectGrammar:
+        """Check-mode tail of from_parts: text-path oracle for outcome AND
+        identity parity. Raises AssertionError on any divergence."""
+        try:
+            oracle = load(render_text(parts))
+        except GrammarInvalid as text_err:
+            try:
+                self.validate()
+            except GrammarInvalid as obj_err:
+                if str(obj_err) != str(text_err):
+                    raise AssertionError(
+                        "direct-emit check: divergent GrammarInvalid: "
+                        f"object={obj_err} text={text_err}") from obj_err
+                raise   # identical outcome; propagate the object-path error
+            raise AssertionError(
+                f"direct-emit check: text path invalid ({text_err}) "
+                "but object path validated") from text_err
+        try:
+            self.validate()
+        except GrammarInvalid as obj_err:
+            raise AssertionError(
+                f"direct-emit check: object path invalid ({obj_err}) "
+                "but text path validated") from obj_err
+        self.freeze()
+        for attr in ("start", "ignored", "terminals", "productions",
+                     "terminal_order", "fingerprint"):
+            if getattr(self, attr) != getattr(oracle, attr):
+                raise AssertionError(
+                    f"direct-emit check: object/text divergence in {attr}")
+        return self
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -195,6 +261,59 @@ class DialectGrammar:
                 alt.append(rule)
         self.productions.append(Production(lhs, tuple(alt)))
         return decl
+
+    def _build_from_parts(self, parts: GrammarParts) -> None:
+        """Replay _parse_source's single decl counter over the manifest.
+
+        The parse contract being replicated (and nothing more): every named
+        terminal def takes the next decl_index in manifest order; quoted
+        rule-body tokens become literal terminals at FIRST use — start line
+        first, then rules in manifest order, tokens left to right — with
+        _parse_rhs's unescape; ''-tuples are epsilon productions; start is
+        the synthetic 'start' rule and WS the sole ignored terminal (the
+        emitter's fixed header, see grid/grammar/parts.py)."""
+        terminals = self.terminals
+        decl = 0
+        for name, pattern in parts.terminal_defs:
+            if name in terminals:
+                raise GrammarInvalid(f"duplicate terminal {name}")
+            terminals[name] = Terminal(name, pattern, is_literal=False,
+                                       ignored=False, decl_index=decl)
+            decl += 1
+        productions = self.productions
+        lit_names: dict[str, str] = {}   # raw quoted token -> terminal name
+        for lhs, alts in (("start", ((parts.start_target,),)),) + parts.rules:
+            for alt in alts:
+                syms: list[str] = []
+                for tok in alt:
+                    if tok[:1] != '"':
+                        syms.append(tok)
+                        continue
+                    name = lit_names.get(tok)
+                    if name is None:
+                        if len(tok) < 2 or tok[-1] != '"':
+                            raise GrammarInvalid(
+                                f"bad rhs token in rule {lhs!r} at: {tok!r}")
+                        text = _UNESCAPE.sub(r"\1", tok[1:-1])
+                        if not text:
+                            raise GrammarInvalid(f"empty literal in rule {lhs!r}")
+                        name = _literal_terminal_name(text)
+                        if name not in terminals:
+                            terminals[name] = Terminal(name, text, is_literal=True,
+                                                       ignored=False, decl_index=decl)
+                            decl += 1
+                        lit_names[tok] = name
+                    syms.append(name)
+                productions.append(Production(lhs, tuple(syms)))
+        self.start = "start"
+        ws = terminals.get("WS")
+        if ws is None:
+            raise GrammarInvalid("%ignore references unknown terminal WS")
+        # same in-place ignored-flag rewrite as _parse_source: dict key
+        # reassignment keeps WS's original insertion position
+        terminals["WS"] = Terminal(ws.name, ws.pattern, ws.is_literal, True,
+                                   ws.decl_index)
+        self.ignored = frozenset(("WS",))
 
     def _validate(self) -> None:
         nts = self.nonterminals
