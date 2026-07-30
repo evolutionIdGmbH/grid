@@ -168,13 +168,31 @@ def digest_dense(d) -> str:
     return "dense:" + hashlib.sha256(payload.encode()).hexdigest()
 
 
+def _probe_lazy_comp(c, cap: int = _LAZY_PROBE_STATES) -> tuple:
+    """Bounded FIFO/ascending-class probe of a LazyTerminalDFA: driven this
+    way from a FRESH instance it reproduces the eager component's discovery
+    order, so the probed prefix is deterministic and demand-independent."""
+    rows = []
+    i = 0
+    while i < len(c._states) and i < cap:
+        rows.append(tuple(c.step(i, cl) for cl in range(c._n_classes)))
+        i += 1
+    return ("lazycomp", c.class_of, c.matches_empty, rows,
+            tuple(c.accepting[:i]), tuple(c.co_acc[:i]))
+
+
 def digest_lazy(p) -> str:
-    """Over-budget facade: full component digests + global classes + a bounded
+    """Over-budget facade: component digests + global classes + a bounded
     BFS probe (states 0..cap in the facade's own discovery order — probing i
     in order with classes ascending IS the eager discovery order, so the
-    probed prefix is deterministic)."""
+    probed prefix is deterministic). Over-component-budget (P3) components
+    have no dense arrays and their instance state depends on what earlier
+    units demanded through the shared memo, so they contribute only their
+    demand-independent identity — the product probe rows already pin their
+    behavior along every probed state."""
     comp_reprs = tuple(
         (c.trans, c.class_of, c.accepting, c.co_acc, c.matches_empty)
+        if hasattr(c, "trans") else ("lazycomp", c.class_of, c.matches_empty)
         for c in p.comps)
     rows = []
     i = 0
@@ -188,13 +206,22 @@ def digest_lazy(p) -> str:
 
 
 def digest_comps(terminals, order) -> str:
-    from grid.lexer.factored import _component
+    from grid.lexer.factored import _build_component, _component
     h = hashlib.sha256()
     for name in order:
         t = terminals[name]
         c = _component(t.pattern, t.is_literal)
-        h.update(repr((t.pattern, t.is_literal, c.trans, c.class_of,
-                       c.accepting, c.co_acc, c.matches_empty)).encode())
+        if hasattr(c, "trans"):
+            payload = (t.pattern, t.is_literal, c.trans, c.class_of,
+                       c.accepting, c.co_acc, c.matches_empty)
+        else:
+            # over-component-budget: probe a FRESH instance (budget 0 forces
+            # the lazy path; the automaton itself is budget-independent) so
+            # the digest never depends on what earlier units demanded
+            # through the shared memo
+            payload = (t.pattern, t.is_literal,
+                       _probe_lazy_comp(_build_component(t.pattern, t.is_literal, 0)))
+        h.update(repr(payload).encode())
     return "comps:" + h.hexdigest()
 
 
@@ -258,9 +285,16 @@ def _unit_id(kind: str, payload) -> str:
     return f"builtin:{kind}:{payload}"
 
 
-def worker(list_file: str, out_file: str, timeout_s: int) -> None:
+def worker(list_file: str, out_file: str, timeout_s: int,
+           flags: list[str] | None = None) -> None:
     for k in [k for k in os.environ if k.startswith("GRID_PERF_")]:
         del os.environ[k]
+    # --flag NAME=VALUE: re-applied AFTER the scrub — the only sanctioned way
+    # to run a leg off the in-code defaults (e.g. GRID_PERF_COMPONENT_BUDGET=0
+    # for the P3 kill-switch-identity leg); self-describing via the out dir
+    for f in flags or []:
+        name, _, value = f.partition("=")
+        os.environ[name] = value
     with open(list_file) as f:
         units = json.load(f)
     with open(out_file, "w") as out:
@@ -335,10 +369,13 @@ def main() -> None:
     ap.add_argument("--timeout", type=int, default=60)
     ap.add_argument("--jobs", type=int, default=4)
     ap.add_argument("--out", default="tmp/scanner-digest")
+    ap.add_argument("--flag", action="append", default=[],
+                    help="NAME=VALUE env var re-applied in workers after the "
+                         "GRID_PERF_* scrub (repeatable)")
     args = ap.parse_args()
 
     if args.worker:
-        worker(args.worker[0], args.worker[1], args.timeout)
+        worker(args.worker[0], args.worker[1], args.timeout, args.flag)
         return
     if args.compare:
         compare(*args.compare)
@@ -366,9 +403,11 @@ def main() -> None:
         of = os.path.join(args.out, f"chunk{i}.jsonl")
         with open(lf, "w") as f:
             json.dump(chunk, f)
-        procs.append(subprocess.Popen(
-            [sys.executable, __file__, "--worker", lf, of,
-             "--timeout", str(args.timeout)]))
+        cmd = [sys.executable, __file__, "--worker", lf, of,
+               "--timeout", str(args.timeout)]
+        for fl in args.flag:
+            cmd += ["--flag", fl]
+        procs.append(subprocess.Popen(cmd))
     for p in procs:
         p.wait()
 
