@@ -18,7 +18,9 @@ bounded ~8ms cold-miss tail; on mb-grid-v030rc1 (3.47M masks) the 1-8ms
 cold-walk band is 6.4% of masks but 76.3% of pooled mask time. Outcome
 accounting on the 16 formerly-capped schemas: 5 compiled, 5 terminate
 deterministically, 6 still time out (the old "10/16 fixed" union number is
-withdrawn; its replacement is PENDING the outcome-aware republish, item E4).
+withdrawn; E4 has since published the replacement at wave-A HEAD:
+10 compiled / 5 declared / 1 timeout, classifier-gated, both TTFM columns —
+BAKEOFF.md E4 postscript).
 Two structural tail families remain: the substring-union scanner family
 (5 timeouts: o5195, o48423, o48427, o47656, o47657; plus slow compiles
 o83132 89.3s, o83133 5.8s, DataConnector 13.4s, BatchJob 11.9s; root cause
