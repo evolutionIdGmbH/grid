@@ -51,7 +51,29 @@ runner. Ordered by expected reach per unit of work.
   namespace becomes the .gridc format). Gate: llama.cpp's server JSON-schema
   tests + our corpus smoke through their `llama-server`.
 
-## 4. TGI / Ollama / mistral.rs (watch list)
+## 4. Typed-pipeline frameworks (DSPy, Instructor) — client-side
+
+- Why: these frameworks declare output types *before* the request — DSPy
+  signatures and pydantic models carry the enum/Literal/shape of every
+  output field statically — and they already route derived JSON schemas to
+  provider structured outputs where available (DSPy's JSONAdapter). That is
+  the ideal GRID workload: few schemas × many calls (compile once, warm
+  path every call, artifact store across restarts), and the framework's
+  parse-retry machinery goes dead because typed fields cannot arrive
+  malformed.
+- Work: S, no engine changes. An adapter subclass that maps signature ->
+  `model_json_schema()` -> `compile_json_schema()` client-side and sends
+  the `.grid` source as the request's grammar constraint to any
+  GRID-enabled server; keep the framework's own validation scoped to
+  `recorded` (usually empty — pydantic-derived schemas are the corpus's
+  easy end); `strict=True` at program build makes an unenforceable
+  signature a build error rather than a runtime surprise.
+- Gate: a DSPy program smoke (signatures with Literal/enum, nested models,
+  optional fields) through a GRID-backed vLLM — zero parse failures across
+  seeds, recorded-residue plumbing exercised, one optimizer run to confirm
+  rollouts never burn tokens on malformed outputs.
+
+## 5. TGI / Ollama / mistral.rs (watch list)
 
 - TGI: guidance module is Outlines-based; a backend abstraction may land
   with their v3 refactor - revisit then.

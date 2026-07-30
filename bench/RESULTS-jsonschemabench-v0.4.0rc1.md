@@ -80,3 +80,37 @@ caveat. TBM warm p50 25-26us throughout.
 Two-column TTFM (E4) and warm-store numbers are recorded per-set in
 bench/perfbench/BAKEOFF.md postscripts; this table remains compile-only
 TTFM for cross-version comparability with the v0.2.5 baseline.
+
+## Function-calling splits (three engines, same runs)
+
+The corpus contains three function/tool-calling splits — BFCL (1,043
+schemas), Glaiveai2K (1,707), MCPspec (45): 2,795 schemas, 24.7% of the
+corpus. Derived from the same per-schema statuses as the tables above
+(GRID 0.4.0 run; llguidance 1.7.6 and XGrammar 0.2.3 full runs).
+**Counts below are schemas** (a schema counts once regardless of how many
+of its instances fail); classification per schema: `compile_error` ->
+declined; else `validation_errors > 0` -> valid-rejected; else
+`invalidation_errors > 0` -> invalid-accepted; else passing.
+
+| split | outcome (schemas) | GRID 0.4.0 | llguidance 1.7.6 | XGrammar 0.2.3 |
+|---|---|---:|---:|---:|
+| BFCL (1,043) | passing | 1,043 | 1,043 | 1,043 |
+| | any failure | 0 | 0 | 0 |
+| Glaiveai2K (1,707) | passing | 1,658 | 1,639 | 1,655 |
+| | valid-rejected | 0 | 0 | 26 |
+| | invalid-accepted | 18 (named) | 0 | 26 (silent) |
+| | declined | 31 | 68 | 0 |
+| MCPspec (45) | passing | 42 | 35 | 41 |
+| | valid-rejected | 0 | 0 | 4 |
+| | invalid-accepted | 1 (named) | 0 | 0 |
+| | declined | 2 | 10 | 0 |
+| combined (2,795) | passing | 2,743 (98.1%) | 2,717 (97.2%) | 2,739 (98.0%) |
+
+Units note for the whole file: `passing`/`compile error` rows count
+schemas; `validation error`/`invalidation error` rows in the headline
+table count INSTANCES (maskbench runner convention). Schema-level, from
+the same statuses: schemas with any valid-rejected instance — GRID 3,
+llguidance 22, XGrammar 427; schemas with any invalid-accepted instance —
+GRID 507, llguidance 0, XGrammar 627 (11 XGrammar schemas exhibit both;
+priority classification assigns them to valid-rejected). Instance-level:
+GRID 5/876, llguidance 32/0, XGrammar 671/1,493.

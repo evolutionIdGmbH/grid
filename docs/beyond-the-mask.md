@@ -1,0 +1,164 @@
+# Beyond the mask: policy, audit, and proof
+
+A mask engine answers one question: *which tokens may come next.* If
+everything you need fits inside that question, any of the good engines will
+serve you — pick one with [`choosing-a-backend.md`](choosing-a-backend.md)
+and move on.
+
+This document is for requirements that live **above** the mask:
+
+- "The analyst role must not be able to produce a `DELETE`. Not filtered
+  out afterwards — *not able to produce it.*"
+- "Show me exactly what the model was permitted to emit at step 141 of a
+  generation from three weeks ago, and prove the log wasn't edited."
+- "Compliance wants a machine-readable list of what was *not* enforced on
+  this response."
+
+These are not exotic asks — they are the standard shape of enterprise
+review for anything that writes SQL, calls tools, or lands in an audited
+pipeline. And they are not features you can bolt onto a mask engine after
+the fact. GRID ships them as-is; XGrammar and llguidance do not attempt
+this layer — deliberately, and reasonably: they are mask engines, and
+excellent ones. Different products live above the mask.
+
+## RBAC that removes capability, not output
+
+The usual text-to-SQL guardrail stack is a prompt instruction ("you may only
+SELECT") plus a regex or parser check on the output. Both act *after* the
+model has already produced the forbidden thing; both are in a race with
+whatever your users put in the prompt.
+
+GRID does it earlier. A role's policy is compiled **into the grammar**:
+`PolicyBundle` projects away the statement subtrees the role isn't allowed —
+before parser tables are built — so a forbidden verb or table is not
+filtered, it is **unreachable**. There is no token path through the mask
+that spells it.
+
+```python
+from grid import generate, samplers
+from grid.policy.bundle import PolicyBundle
+from grid.policy.schema import SchemaSnapshot
+
+g = generate.sql(
+    model,
+    open("grammars/sql_subset.grid").read(),
+    policy=PolicyBundle.from_store({"analyst": {"verbs": ["select"]}}, "analyst"),
+    schema=SchemaSnapshot.from_dict({"users": ["id", "name", "email"]}),
+    sampler=samplers.multinomial(temperature=0.7),
+)
+```
+
+Measured, not asserted: an exhaustive multi-token speller (breadth-first
+search over every mask-admitted token path, at every reachable identifier
+position, on a 151k-token vocabulary) tried to complete forbidden verbs,
+tables, and columns across role × position × target combinations — **0
+bypasses in 58 probes, with 9/9 positive controls reachable**, so the result
+is non-vacuous ([`bench/RESULTS-g6.md`](../bench/RESULTS-g6.md); the mask
+property and bypass-injection fixtures run in CI). No sampler, no
+temperature, and no prompt injection can reach a token path the mask does
+not contain.
+
+The same path runs in serving: the vLLM backend accepts a JSON envelope
+(`{"grammar": <.grid>, "schema": {...}}`) that carries the schema lexicons,
+so per-role grammars ride ordinary structured-output requests.
+
+Two boundaries, stated plainly, because they are where trust is won:
+
+- **Column-level policy is not mask-enforceable** — provably; whether a
+  column reference is allowed can depend on context a token mask cannot see.
+  GRID enforces verbs and tables in the mask and routes column policy to a
+  post-parse `SemanticChecker`. An engine that claims column RBAC in the
+  mask alone is overclaiming.
+- **Decode-time masking is deterministic capability reduction, not your
+  security boundary.** Keep the database-side permission check — and compile
+  both it and the grammar from the *same* policy source, so the mask
+  guarantees the model only proposes statements the boundary will accept.
+
+## An audit trail that replays, bit for bit
+
+Every step of a GRID generation appends a hash-chained record: parser
+configuration, mask entry, chosen token, how many tokens were blocked, and
+the hash of the previous record. That gives you three things a logits log
+never will:
+
+- **Forensics.** "What was the model *permitted* to generate at step k?" is
+  answerable offline, later, exactly — not "what did it generate," but what
+  the policy allowed at that moment.
+- **Integrity.** Tampering with any field of any record breaks the chain:
+  1,000/1,000 random single-field tampers detected in the full-scale run.
+- **Reproducibility.** 1,000/1,000 generations replay **bit-identical**,
+  record by record, across a cache-namespace rollover
+  ([`bench/RESULTS-g10.md`](../bench/RESULTS-g10.md); smoke-scale versions
+  run in CI).
+
+The chain is native to GRID-owned generation (`grid.generate` returns the
+sealed log with the result); the vLLM backend preserves the fully-audited
+path for audit-enabled guides (the fastest kernel shortcut applies only when
+auditing is off).
+
+If your review board has ever asked "how do you know the guardrail was
+actually on for that response?" — this is the artifact that answers it.
+
+## The recorded contract: your validator list, generated by the engine
+
+Every constrained-decoding engine has constraints it cannot compile into a
+mask. The industry's two answers are *refuse the schema* (llguidance's
+convention — principled, costly in coverage) or *accept and hope*
+(silent). GRID's answer is a third contract: compile, and **return the names
+of what was not enforced**.
+
+```python
+source, recorded = compile_json_schema(schema)
+# recorded == {"uniqueItems", "oneOf-exclusivity"}  ->  re-validate exactly these
+```
+
+For a compliance pipeline this inverts the usual burden. Instead of a
+hand-maintained list of "things we think the engine might not catch" — which
+silently rots every time you upgrade the engine — the residue is machine
+output, per schema, auditable, and it shrinks release by release without
+your validator knowing or caring. `strict=True` flips any schema to the
+refusal contract where a residue is unacceptable. The full per-keyword
+status is public: [`grid/jsonschema/SUPPORT.md`](../grid/jsonschema/SUPPORT.md).
+And for the mask-unenforceable residue in SQL pipelines, the checker that
+catches it feeds a guided repair loop rather than a bare failure
+([`bench/RESULTS-spider-repair.md`](../bench/RESULTS-spider-repair.md)).
+
+## Determinism you can put in front of a reviewer
+
+GRID's construction budgets fire at input-derived points — the same schema
+produces the same grammar, the same tables, the same outcome (compiled,
+recorded, or declined) on a laptop, in CI, and in production. Compiled
+artifacts live in a versioned store keyed by a code epoch that invalidates
+wholesale on any engine change. Together with bit-identical replay, this
+makes "the guardrail" a reviewable artifact with a provenance chain, not a
+runtime behavior you characterize statistically.
+
+## Why not build this around XGrammar?
+
+You could build some of it — a policy projector that rewrites EBNF, a
+validator you run on everything, always. Teams do, and for masks alone
+XGrammar and llguidance are excellent. But two pieces cannot be retrofitted
+from outside the engine, even in principle:
+
+- **The recorded contract.** By the time a silent engine has accepted a
+  schema, the information — *which* constraints it dropped — is gone. No
+  wrapper can recover what the engine never reported.
+- **Mask-level audit.** A replayable proof of "what was permitted at step k"
+  needs the mask identity and parser configuration at every step. If the
+  engine doesn't expose its decisions, the trail cannot exist.
+
+If your requirements stop at "valid JSON, fast," you don't need this layer,
+and we said so at the top. If they don't stop there, the engine has to be
+built for it — and this one was: GRID began as an enterprise SQL guardrail,
+and JSON Schema is a front end onto that machinery, not the other way
+around.
+
+## Scope, honestly
+
+Policy projection is defined over `.grid` context-free grammars — SQL
+shipped first; any CFG in the dialect gets the same machinery. JSON Schema
+requests get the recorded/strict contract and the audit chain, not role
+projection (a schema is already a whitelist of shape; roles bite on
+*languages*, like SQL, where what you may say depends on who you are). The
+RBAC and replay records above are measured at their pinned engine versions
+and re-run as smoke tests in CI, per the repo's benchmark discipline.

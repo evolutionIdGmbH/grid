@@ -5,13 +5,16 @@
 [![DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.21486746-blue)](https://doi.org/10.5281/zenodo.21486746)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
 
-GRID is a constrained-decoding engine for LLMs: it compiles a JSON Schema (or
-any context-free grammar — SQL was first) into LALR(1) tables with constrained
-terminals, and masks tokens through a configuration-keyed viable-prefix walk
-served by Rust kernels. Its founding rule is that **an engine must never fail
-silently**: every constraint is either *enforced* by the mask, *recorded* by
-name in the result so you know exactly what to re-validate, or *declared*
-unsupported up front. Nothing in between.
+GRID is a structured-outputs engine for LLM serving. Point your stack's
+grammar backend at it — vLLM today, SGLang and llama.cpp on the
+[integration list](docs/integrations-plan.md) — and every JSON-Schema or
+SQL/CFG-constrained request is enforced by token masks compiled before
+sampling: a JSON Schema (or any context-free grammar — SQL was first)
+becomes LALR(1) tables with constrained terminals, walked by Rust kernels.
+Its founding rule is that **an engine must never fail silently**: every
+constraint is either *enforced* by the mask, *recorded* by name in the
+result so you know exactly what to re-validate, or *declared* unsupported up
+front. Nothing in between.
 
 ```bash
 pip install "grid-guardrail[kernel]"   # engine + Rust mask kernels (5 platforms)
@@ -25,6 +28,19 @@ source, recorded = compile_json_schema(schema)   # -> .grid grammar source
 # mode records; strict=True refuses instead). Nothing is silently ignored.
 ```
 
+**Deciding in 30 seconds:**
+
+- **Serving schemas you don't control** — users, tenants, model-generated
+  tool definitions? Run GRID, and pick it for its worst case, not its
+  median: 3 valid-instance rejections and no silent enforcement gaps on the
+  11,306-schema corpus below. The full argument — including the two cases
+  where you should run llguidance or the stack default instead — is
+  [docs/choosing-a-backend.md](docs/choosing-a-backend.md).
+- **Need decode-time RBAC, a replayable hash-chained audit trail, or a
+  machine-generated list of what was *not* enforced?** That layer is GRID's
+  home ground; mask engines don't attempt it:
+  [docs/beyond-the-mask.md](docs/beyond-the-mask.md).
+
 ## Where GRID stands — full JSONSchemaBench, three engines, one machine
 
 All 11,306 schemas of [JSONSchemaBench](https://github.com/guidance-ai/jsonschemabench),
@@ -34,9 +50,12 @@ statuses and protocol: [`bench/RESULTS-jsonschemabench-v0.4.0rc1.md`](bench/RESU
 
 | engine | passing | declared unsupported | valid rejected | invalid accepted | never terminates |
 |---|---:|---:|---:|---:|---:|
-| **GRID 0.4.0** | 10,159 (89.9%) | 637 | **3** | 876 — **every one named** | **0** |
+| **GRID 0.4.0** | 10,159 (89.9%) | 637 | **3** | 507 — **every one named** | **0** |
 | llguidance 1.7.6 | 9,487 (83.9%) | 1,797 | 22 | 0 | 0 |
 | XGrammar 0.2.3 | 10,212 (90.3%) | 51 | 427 | 627 — **all silent** | 0 |
+
+All counts are schemas; the outcomes table below counts failing *instances*
+(GRID's 507 schemas correspond to 876 instances, XGrammar's 627 to 1,493).
 
 Three engines, three philosophies. llguidance refuses what it cannot enforce
 — safe, at the cost of 16% of the corpus. XGrammar compiles almost everything
@@ -81,8 +100,8 @@ Reading the table:
   constraints involved.
 - llguidance's lazy lexer makes it the latency reference point on every
   timing row; nothing else is close. GRID's compile average
-  dropped 419ms -> 66ms across the 0.3/0.4 epochs (p50 7.4ms), and — unique
-  to this run — **zero schemas fail to terminate**: every one of 11,306
+  dropped 419ms -> 66ms across the 0.3/0.4 epochs (p50 7.4ms), and — new at
+  0.4.0 — **zero schemas fail to terminate**: every one of 11,306
   compiles, declares, or budget-declines deterministically inside the wall.
 - GRID's TBM p25-p75 is the grid_core kernel hit path (masks up to 512
   terminals run in-kernel); the p90+ tail is cold-miss trie walks over the
@@ -176,7 +195,9 @@ Per-role and per-schema grammars make unauthorized verbs, tables, and columns
 unreachable at decode time; the audit chain reconstructs, bit for bit, what
 the model was permitted to generate at every step. Decode-time masking is
 deterministic *capability reduction*; pair it with an independent check where
-the SQL executes, both compiled from one policy source.
+the SQL executes, both compiled from one policy source. The measured RBAC
+and replay records, and why this layer cannot be retrofitted onto a mask
+engine, are in [docs/beyond-the-mask.md](docs/beyond-the-mask.md).
 
 ## Guarantees
 
