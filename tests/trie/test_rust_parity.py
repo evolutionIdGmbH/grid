@@ -125,6 +125,9 @@ _KERNEL_V8 = (W._USE_RUST
 
 
 def _force_lazy(monkeypatch):
+    # pin the regime under test: the legacy CI leg disables the factored path
+    # entirely, and these tests exercise the lazy product, not the leg env
+    monkeypatch.setenv("GRID_PERF_FACTORED_SCANNER", "1")
     monkeypatch.setenv("GRID_PERF_COMPONENT_BUDGET", "1")
     monkeypatch.setenv("GRID_PERF_KERNEL_LAZY", "1")
 
@@ -172,6 +175,7 @@ def test_lazy_stays_off_kernel_with_kill_switch(toy_source, toy_tokenizer, monke
     """GRID_PERF_KERNEL_LAZY=0 restores the wave-B regime regardless of the
     shipped default: lazy DFAs walk _walk_py (spec-path WalkResult,
     groups=None), never the kernel."""
+    monkeypatch.setenv("GRID_PERF_FACTORED_SCANNER", "1")  # pin: legacy leg disables factored
     monkeypatch.setenv("GRID_PERF_COMPONENT_BUDGET", "1")
     monkeypatch.setenv("GRID_PERF_KERNEL_LAZY", "0")
     guide = build_guide(toy_source, toy_tokenizer)

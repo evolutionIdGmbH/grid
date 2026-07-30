@@ -59,7 +59,7 @@ def test_state_cap_is_a_real_backstop(monkeypatch, toy_grammar):
     # its derived state cap (budget // 8) can: fires with items under budget
     monkeypatch.setenv("GRID_LALR_BUDGET", "0")
     stats: dict = {}
-    compile_tables(_proj(toy_grammar), stats=stats)
+    compile_tables(_proj(toy_grammar), stats=stats, algorithm="dp")  # lr0_* counters are dp-construction stats
     n_states, n_items = stats["lr0_states"], stats["lr0_items"]
     assert n_items < 4 * n_states  # toy grammar: ~2-3 items/state
     err = _fire(monkeypatch, toy_grammar, str(2 * n_items))
@@ -104,7 +104,7 @@ def test_stats_untouched_on_fire(monkeypatch, toy_grammar):
     monkeypatch.setenv("GRID_LALR_BUDGET", "8")
     stats: dict = {}
     with pytest.raises(LALRBudgetExceeded):
-        compile_tables(_proj(toy_grammar), stats=stats)
+        compile_tables(_proj(toy_grammar), stats=stats, algorithm="dp")
     assert stats == {}
 
 

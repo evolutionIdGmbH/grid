@@ -76,6 +76,7 @@ def test_lazy_scanner_never_persisted(cache, toy_grammar, monkeypatch):
     docstring), and component identity is grammar-independent."""
     import warnings as _warnings
 
+    monkeypatch.setenv("GRID_PERF_FACTORED_SCANNER", "1")  # pin: legacy leg disables factored
     monkeypatch.setenv("GRID_PERF_COMPONENT_BUDGET", "1")
     with _warnings.catch_warnings():
         _warnings.simplefilter("error")  # any store warning fails the test
