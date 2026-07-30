@@ -400,7 +400,14 @@ class GridGrammarSession:
         never walked eagerly for a jump (they would be walked anyway when
         the request reaches them — jumping only removes the forward passes
         between, it must not add walks). Stops on: non-singleton mask, eos
-        bit, _FLAG_COMPLETE, j_max, cold successor.
+        bit, _FLAG_COMPLETE, j_max, cold successor. Consequence of the
+        warm rule (measured in the S1 end-to-end drive): first-encounter
+        positions jump 0-1 hops (their successors are still building on
+        the prefetch pool); once the template's T1 is warm — the second
+        request onward, or repeated configurations within one generation —
+        chains run at full j_max length. Forced runs are config-
+        deterministic, so warm-template serving is the steady state that
+        pays.
 
         GRID_JUMP unset/0 (perf_flags.jump_enabled, read at construction):
         returns [] without touching guide or kernel. Raises only where the
