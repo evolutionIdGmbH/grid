@@ -4,8 +4,21 @@ Warm deployments reload compile artifacts instead of rebuilding them:
 
 - namespace ``schema_src``: canonical-schema key -> (.grid source, recorded
   set), wired inside :func:`grid.jsonschema.compile_json_schema`;
-- namespace ``scanner``: grammar key -> pickled ScannerDFA;
-- namespace ``lalr``: projection key -> pickled LALRTables.
+- namespace ``scanner``: grammar key -> pickled ScannerDFA (lazy facades are
+  skipped — their warmth comes from ``component``);
+- namespace ``lalr``: projection key -> pickled LALRTables;
+- namespace ``component`` (S3): (kind, budget, pattern) -> pickled
+  TerminalDFA or a breach marker — CROSS-SCHEMA (patterns recur corpus-wide),
+  sub-flag GRID_PERF_STORE_COMPONENTS;
+- namespace ``trie`` (S3): tokenizer fingerprint -> pickled TokenTrie,
+  sub-flag GRID_PERF_STORE_TRIE;
+- namespace ``journal`` (S3): blake2b(grammar_src) -> ContextJournal
+  snapshot (walk-miss keys/contexts only, never masks), sub-flag
+  GRID_PERF_STORE_JOURNAL; timing-only by construction.
+
+Deferred namespaces (S3 step 8, reserved key shapes under
+:func:`kernel_fingerprint`, no payloads this epoch): persisted T2 mask blobs
+(#20b) and RustWalker ingestion arenas.
 
 Entries live under ``<root>/<code_epoch>/<namespace>/<key>.bin``. code_epoch
 content-hashes the package version, the Python major.minor, and every pipeline
@@ -236,6 +249,36 @@ def load_or_build_component(pattern: str, is_literal: bool, budget: int | None):
     put("component", key,
         comp if isinstance(comp, TerminalDFA) else _COMPONENT_BREACH)
     return comp
+
+
+@lru_cache(maxsize=1)
+def kernel_fingerprint() -> str | None:
+    """blake2b of the grid_core extension binary (None without the kernel).
+
+    RESERVED-KEY component only this epoch: grid_core exports no
+    __version__/blob-format constant, and both deferred namespaces below key
+    on the exact kernel build because their payloads are kernel-native:
+
+    - T2 mask blobs (CANDIDATES #20b): MaskEntryV7.blob is register_blob's
+      own export format — a wrong-key hit is the forbidden served-wrong-mask
+      class, so persistence waits for a served-mask-parity gate. Reserved
+      key: (dialect, schema_fp, tokenizer_fingerprint, vocab_size,
+      kernel_fingerprint(), blob-format const).
+    - RustWalker ingestion arenas: reserved key (scanner key, trie
+      fingerprint, kernel_fingerprint(), kernel word width); blocked on the
+      RUST_SCANNER un-hold / size-gated-dispatch decision.
+
+    No payload is written under either shape this epoch (S3 step 8)."""
+    try:
+        import grid_core
+
+        so = next(
+            p for p in Path(grid_core.__file__).parent.iterdir()
+            if p.suffix == ".so" or ".so." in p.name or p.suffix == ".pyd"
+        )
+        return hashlib.blake2b(so.read_bytes(), digest_size=16).hexdigest()
+    except Exception:
+        return None
 
 
 def journal_key(grammar_src: str) -> str:

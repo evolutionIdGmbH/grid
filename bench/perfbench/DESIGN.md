@@ -68,6 +68,41 @@ makes it exact before we bet an epoch on it.
 6. Open lane: any further idea enters as a numbered candidate with the
    same gate and the same report format.
 
+## Store cold/warm protocol (S3) + reserved kernel-keyed namespaces
+
+Every artifact-store measurement runs in a FRESH process per scenario —
+same-process "warm" conflates in-memory memos (registry single-flight,
+factored._COMPONENTS, T1/T2) with the store and reads ~0.16 ms where a true
+redeploy pays spec-load + unpickle. Scenarios per schema
+(bench/perfbench/store_coldwarm.py):
+
+- A: flag-on, EMPTY store (cold + persist cost);
+- B: flag-on, PRE-POPULATED store (the redeploy warm hit);
+- C: flag-off baseline.
+
+A and B are reported separately, never blended (SELECTION.md #8); warm-hit
+p50/p99 for B is the number that gates any future default-on decision. The
+harness reports store size on disk alongside, and page-cache state is a
+sensitivity note (post-purge B is a different measurement). The journal TBM
+protocol additionally simulates a redeploy: process 1 serves and flushes its
+journal; process 2 restores it under GRID_ADMIT_WARM=1, runs admission
+warmup off-batch, and measures the first-request TBM distribution against
+the no-journal bounded cold-miss tail.
+
+Two namespaces stay RESERVED (key shapes only, no payloads this epoch), both
+keyed on grid.serving.artifact_store.kernel_fingerprint() = blake2b(grid_core
+.so) because grid_core exports no version/blob-format constant:
+
+- T2 mask blobs (CANDIDATES #20b): MaskEntryV7.blob is the kernel's own
+  register_blob export format; a wrong-key hit is the forbidden
+  served-wrong-mask class. Key: (dialect, schema_fp, tokenizer_fingerprint,
+  vocab_size, kernel_fingerprint(), blob-format const). Blocked on a
+  served-mask-parity gate.
+- RustWalker ingestion arenas (trie nodes/trans/accept + accepts_all/live
+  word lists): key (scanner key, trie fingerprint, kernel_fingerprint(),
+  kernel word width). Blocked on the RUST_SCANNER un-hold / size-gated FFI
+  dispatch decision.
+
 ## Decision rule
 
 Winner = the smallest candidate set that (a) passes the correctness gate,
