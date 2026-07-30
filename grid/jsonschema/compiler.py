@@ -44,6 +44,7 @@ import json
 import math
 from typing import Any
 
+from grid.grammar.parts import GrammarParts, render_text
 from grid.jsonschema import rx
 from grid.jsonschema.normalize import (
     FALSE_SCHEMA,
@@ -1343,6 +1344,18 @@ class SchemaCompiler:
                     self.degraded.add(self.rx_terms[src])
 
     def compile(self) -> str:
+        return render_text(self.compile_parts())
+
+    def compile_parts(self) -> GrammarParts:
+        """Run the compile pipeline up to the emission manifest.
+
+        Everything compile() historically did except the final text
+        assembly; render_text(compile_parts()) is byte-identical to the
+        legacy string emitter (full-corpus gated). The manifest is also
+        what DialectGrammar.from_parts consumes on the direct-emission
+        path (GRID_PERF_DIRECT_EMIT), so this method's emission ORDER —
+        named terminals, then rules in rule_order — is the decl_index /
+        terminal-numbering contract, not a presentation choice."""
         start = self.rule_for(self.root)
         self._apply_scanner_budget()
         if self.degraded and len(self.degraded) <= 3:
@@ -1386,36 +1399,43 @@ class SchemaCompiler:
                         stack.append(t)
         used = {t for r in reach for alt in self.rules[r] for t in alt.split()}
 
-        lines = ["%start start", "%ignore WS", r"WS: /[ \t\n\r]+/"]
+        terminal_defs: list[tuple[str, str]] = [("WS", r"[ \t\n\r]+")]
         for key, term in self.key_terms.items():
             if term not in used:
                 continue
-            lines.append(f"{term}: /{_regex_literal(json.dumps(key, ensure_ascii=False))}/")
+            terminal_defs.append(
+                (term, _regex_literal(json.dumps(key, ensure_ascii=False))))
         for lit, term in self.lit_terms.items():
             if term not in used:
                 continue
-            lines.append(f"{term}: /{lit}/")
+            terminal_defs.append((term, lit))
         for src, term in self.rx_terms.items():
             if term not in used:
                 continue
             demoted = term in self.degraded or term in self.degraded_keep
-            lines.append(f"{term}: /{STRING_RX if demoted else src}/")
+            terminal_defs.append((term, STRING_RX if demoted else src))
         if "STRING" in used:
-            lines.append(f"STRING: /{STRING_RX}/")
+            terminal_defs.append(("STRING", STRING_RX))
         if "NUMBER" in used:
-            lines.append(f"NUMBER: /{NUMBER_RX}/")
+            terminal_defs.append(("NUMBER", NUMBER_RX))
         if "INT" in used:
-            lines.append(f"INT: /{INT_RX}/")
-        lines.append(f"start: {start}")
+            terminal_defs.append(("INT", INT_RX))
+        # alt -> token tuple is exact: every non-EPS alt was rebuilt by
+        # _dedupe_rebuild as " ".join(tokens) (dedupe runs unconditionally
+        # above), so " ".join(a.split()) == a; no literal token contains
+        # whitespace (compiler-emitted quoted tokens are JSON punctuation
+        # and keywords only)
+        rules: list[tuple[str, tuple[tuple[str, ...], ...]]] = []
         for name in self.rule_order:
             if name not in reach:
                 continue
             alts = self.rules.get(name)
             if not alts:
                 continue
-            rendered = ["" if a == "|EPS|" else a for a in alts]
-            lines.append(f"{name}: " + " | ".join(rendered))
-        return "\n".join(lines) + "\n"
+            rules.append((name, tuple(
+                () if a in ("", "|EPS|") else tuple(a.split()) for a in alts)))
+        return GrammarParts(terminal_defs=tuple(terminal_defs),
+                            start_target=start, rules=tuple(rules))
 
 
 def compile_schema(schema: Any, strict: bool = False,
