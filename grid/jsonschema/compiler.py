@@ -1451,6 +1451,21 @@ def compile_schema(schema: Any, strict: bool = False,
     retry ONCE with this enabled — normalize then unifies overlapping
     per-branch string values into one shared rule (widening, recorded as
     branch-string-values-unified; strict mode declares Unsupported)."""
+    parts, ignored = compile_schema_parts(
+        schema, strict, hashcons=hashcons,
+        unify_string_values=unify_string_values)
+    return render_text(parts), ignored
+
+
+def compile_schema_parts(schema: Any, strict: bool = False,
+                         *, hashcons: frozenset[str] | None = None,
+                         unify_string_values: bool = False
+                         ) -> tuple[GrammarParts, set[str]]:
+    """-> (GrammarParts manifest, recorded-unenforced set); the object-form
+    twin of compile_schema (same normalize pipeline, same Unsupported
+    outcomes — compile_schema IS render_text over this). Feed the manifest
+    to DialectGrammar.from_parts (direct emission) or render_text (the
+    debug/audit text path)."""
     if hashcons is None:
         hashcons = _hashcons_components()
     shared: dict[int, Any] | None = {} if "norm" in hashcons else None
@@ -1474,5 +1489,4 @@ def compile_schema(schema: Any, strict: bool = False,
                 root[dk] = schema[dk]
     c = SchemaCompiler(root, strict=strict, hashcons=hashcons,
                        shared_nodes=shared)
-    src = c.compile()
-    return src, c.ignored
+    return c.compile_parts(), c.ignored
