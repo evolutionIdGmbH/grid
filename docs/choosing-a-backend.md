@@ -33,9 +33,10 @@ The rest of this document is the argument.
 Every backend comparison leads with per-token mask latency, so let's dispose
 of it. Per-token medians for all three engines are 10–26 µs. A decode step on
 an H100 is ~6 ms. At the median, masking is under half a percent of the step
-for every engine on this page; measured end to end, GRID adds **+1.51% TPOT
-at batch 32** against unconstrained decoding (H100 record at kernel v7,
-[`bench/RESULTS-serving.md`](../bench/RESULTS-serving.md)). If two engines
+for every engine on this page; measured end to end, GRID adds **+0.71% TPOT
+at batch 32** against unconstrained decoding (H100 record at 0.4.0/kernel v8,
+[`bench/RESULTS-serving-v0.4.0.md`](../bench/RESULTS-serving-v0.4.0.md);
+cold schema specialize 14.8 ms once, warm TTFT 1.39 ms). If two engines
 differ by 15 µs at p50, your users cannot tell. Median mask speed is a solved
 problem industry-wide, and choosing a backend on it is choosing on noise.
 
@@ -181,9 +182,11 @@ enforces the exclusivity rather than recording it. Function-call formats
 are also the most boilerplate-rigid workload measured — 8–13% forced tokens
 on the BFCL-style splits vs ~2% corpus-wide
 ([`bench/RESULTS-jf-density.md`](../bench/RESULTS-jf-density.md)) — which is
-exactly what the jump-forward API targets; it stays default-off until its
-serving measurement lands, per this repo's rule that machinery is measured
-before it is advertised.
+exactly what the jump-forward API targets; it stays default-off — its
+serving probe on vLLM 0.26 fails the engine's own spec-token accounting
+(the 0.24-era injection point no longer exists; port recorded in
+`bench/perfbench/BAKEOFF.md`), per this repo's rule that machinery is
+measured before it is advertised.
 
 ## Pick GRID when any of these is true
 
@@ -304,8 +307,10 @@ Operational dials, in the order you'll reach for them:
 - **vLLM:** scheduler-side backend implemented
   (`grid/models/vllm_structured.py`), registered via the idempotent patch
   script above; accepted on GPU under the default async-capable scheduler.
-  The GPU-box serving stamp at 0.4.0 is the remaining item before the
-  upstream RFC. This document is the RFC centerpiece per maintainer guidance
+  The 0.4.0 GPU-box serving stamp is in
+  ([`bench/RESULTS-serving-v0.4.0.md`](../bench/RESULTS-serving-v0.4.0.md):
+  +0.71% TPOT @ batch 32, warm TTFT 1.39 ms, single-flight verified) — the
+  RFC is unblocked. This document is the RFC centerpiece per maintainer guidance
   ("the criteria a user should have in mind when choosing grid over just
   accepting the default").
 - **jsonschemabench/MaskBench:** engine adapter PR open

@@ -689,3 +689,27 @@ above is the acceptance evidence for a default-ON flip as a release
 decision (flag flip + regime-pinned tests + CHANGELOG + full-corpus
 republish, per the wave-flip discipline). Raw per-sample data:
 t3c-slicer-{on,off} on the 2026-07-31 runner session.
+
+## Postscript: S1 jump-forward probe — fails its gate on vLLM 0.26 (2026-07-31, H100 runner)
+
+Probe design: {GRID_JUMP off,on} x {1,8,32} greedy legs, one spawn process
+per engine; gate = token-identical off/on streams + steps saved.
+
+Result: the OFF leg runs clean; the ON leg dies inside vLLM itself —
+`v1/structured_output/__init__.py:338 grammar_bitmask` raises
+`AssertionError((token, request_id, {request_id: [token]}))` when the
+site-5-injected `spec_token_ids` reach bitmask assembly. On vLLM 0.26 the
+structured-output manager owns speculative-token validation and rejects
+proposals that did not come through its drafter path, so the 0.24-era
+"stuff request.spec_token_ids in the scheduler" injection point is retired
+for 0.26+ (both site-5 anchor shapes patch cleanly; the mechanism itself is
+what died).
+
+Disposition: **GRID_JUMP stays default-OFF** (unchanged shipped behavior;
+the probe exists precisely to gate this flip and it said no). The 0.26+
+port is a recorded integration item: jump proposals must enter through the
+structured-output manager's spec path (grammar-side validate/accept plus
+per-position bitmask fill), not the scheduler shortcut. Jump-forward
+density evidence (8-13% forced tokens on BFCL-style splits,
+RESULTS-jf-density.md) keeps the item alive; nothing is advertised until a
+probe passes.
