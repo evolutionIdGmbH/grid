@@ -667,3 +667,25 @@ first walk costs ~40-200ms on schemas carrying 8-16k-state eager
 components (tuple-table -> np conversion; revisit only if it surfaces
 outside the family). Full-corpus (11.3k) republish with the flag default
 is owed on the next GPU-box session, as with every wave flip.
+
+## Postscript: S2 tokenizer slicer — GPU-host A/B stamp (2026-07-31, H100 runner)
+
+315-sample maskbench legs on the declared H100 runner (Lambda 1xH100 SXM,
+GRID 0.4.0, kernel v8), GRID_PERF_SLICER on vs off, same box, back-to-back:
+
+- **Outcome parity: 315/315 identical** (valid/invalid acceptance counts and
+  token counts match per schema; the slicer is latency-only, as designed).
+- **TTFM: unchanged.** p50 8.1 ms both legs; per-schema off/on ratio p50
+  1.01 (38 schemas >5% faster, 40 >5% slower — noise). The slicer is not a
+  compile lever.
+- **TBM: pooled avg 603 → 265 µs (2.3x)** with p50/p90/p99 flat
+  (69/171/9,022 → 71/170/8,605 µs): the entire win is the beyond-p99
+  heavy-walk tail. Top-8 schemas (Github_ultra/hard, 52-273 terminals, all
+  kernel-resident) carry 46% of the 24.3 s pooled saving; **zero schemas
+  pay >50 ms more**. Leg walls corroborate: 68 s off → 44 s on.
+
+Disposition: GRID_PERF_SLICER stays default-OFF this release; the stamp
+above is the acceptance evidence for a default-ON flip as a release
+decision (flag flip + regime-pinned tests + CHANGELOG + full-corpus
+republish, per the wave-flip discipline). Raw per-sample data:
+t3c-slicer-{on,off} on the 2026-07-31 runner session.
