@@ -6,9 +6,10 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
 
 GRID is a structured-outputs engine for LLM serving. Point your stack's
-grammar backend at it — vLLM today, SGLang and llama.cpp on the
-[integration list](docs/integrations-plan.md) — and every JSON-Schema or
-SQL/CFG-constrained request is enforced by token masks compiled before
+grammar backend at it — vLLM today, a typed-pipeline adapter for DSPy in
+[`grid/integrations/`](grid/integrations/dspy_adapter.py), SGLang and
+llama.cpp on the [integration list](docs/integrations-plan.md) — and every
+JSON-Schema or SQL/CFG-constrained request is enforced by token masks compiled before
 sampling: a JSON Schema (or any context-free grammar — SQL was first)
 becomes LALR(1) tables with constrained terminals, walked by Rust kernels.
 Its founding rule is that **an engine must never fail silently**: every
@@ -112,10 +113,12 @@ Reading the table:
   by the kernel v7 fused walk->blob->register path that eliminated the
   Python-side per-cold-entry materialization cost and its gen-2 GC pauses
   (208µs -> 75µs on the SQL harness); warm-path mask p50 is 25µs (3.7µs on
-  SQL/CFG grammars, GRID's home turf).
+  SQL/CFG grammars, GRID's home turf —
+  [`bench/RESULTS-engines-sql-v0.4.0.md`](bench/RESULTS-engines-sql-v0.4.0.md)).
 - GRID's TTFM is the Python table build per schema. On redeployment the
-  artifact store reloads compiled schemas at warm-hit medians of ~17-23ms
-  for the heaviest families (measured, load-caveated —
+  artifact store reloads compiled schemas at warm-hit medians of 24-37ms
+  for families whose cold compiles are 1.5-7.4s, neutral on cheap schemas,
+  declarations identical through the store (H100 runner stamp —
   `bench/perfbench/BAKEOFF.md`).
 - GRID's 5 validation errors on 11,306 schemas include 3 genuine
   valid-instance rejections — definition-order properties and spec-default
@@ -135,6 +138,23 @@ Compile-error reasons (v1 subset boundaries, llguidance-style upfront):
 LALRConflictError (519), Unsupported: allOf merge failed (30), RxUnsupported
 (9), terminal budget (9), rule budget (8), anyOf/oneOf/$ref sibling-key
 families (20), LALRBudgetExceeded (2).
+
+### On the serving box (H100, vLLM 0.26, Qwen2.5-7B)
+
+Mask latency only matters through its effect on decode. Measured end to end
+on the declared runner ([`bench/RESULTS-serving-v0.4.0.md`](bench/RESULTS-serving-v0.4.0.md)):
+
+- **TPOT overhead vs unconstrained: −0.00% / +0.21% / +0.71%** at batch
+  1/8/32, heterogeneous schemas per batch. Cold schema specialize **14.8 ms
+  once**, warm TTFT **1.39 ms**; concurrent cold starts coalesce
+  (single-flight: 1 build / 8 waiters). Known limitation, declared in the
+  record: a never-seen schema costs its batch ~24% TPOT during its 0.75 s
+  specialization window.
+- **Constraining improves the end task.** Spider dev, all 1,034 questions,
+  greedy, no repair loop: **55.2% execution accuracy constrained vs 52.7%
+  unconstrained** ([`bench/RESULTS-spider-v0.4.0.md`](bench/RESULTS-spider-v0.4.0.md)).
+  Masking never removes a correct continuation; it removes SQL that cannot
+  execute.
 
 ## What GRID has that the others are not designed for
 
@@ -163,8 +183,11 @@ families (20), LALRBudgetExceeded (2).
 - **Serving-side machinery, measured before advertised.** A jump-forward API
   (forced token runs decoded without forward passes), a tokenizer slicer for
   vocabulary-wide string masks, and an in-kernel lazy scanner (grid_core v8)
-  — each behind a flag, each with a differential parity gate; the ones
-  without a serving-grade measurement stay default-off and say so.
+  — each behind a flag with a differential parity gate. The slicer's GPU
+  stamp is banked (TBM avg 2.3x, outcome parity 315/315) pending a default
+  flip; jump-forward failed its probe against vLLM 0.26's spec-token
+  accounting and stays off until the port passes. Nothing ships default-on
+  without a passing probe, and the probes are in the repo.
 - **A measurement discipline you can audit.** `bench/perfbench/` holds the
   two-column TTFM profiler (compile-only and first-mask-included), an outcome
   classifier that refuses to count crashed or partial records as results, the
