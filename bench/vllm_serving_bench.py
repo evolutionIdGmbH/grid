@@ -279,6 +279,28 @@ def mock_adversarial(metric="v1", budget_ms=30.0):
     return build_adversarial_result(v1, v2, metric, budget_ms)
 
 
+def _shutdown_engine(llm) -> None:
+    """Stop the in-process engine core; vLLM >= 0.26 keeps it (and its GPU
+    reservation) alive across `del llm` when VLLM_ENABLE_V1_MULTIPROCESSING=0."""
+    try:
+        llm.llm_engine.engine_core.shutdown()
+    except Exception:
+        pass
+
+
+def _reclaim_cuda() -> None:
+    """Return freed allocator blocks to the driver so the next engine's
+    startup free-memory check sees them (sequential engines, one process).
+    Call after the last reference to the previous engine is dropped."""
+    import gc
+
+    import torch
+
+    gc.collect()
+    torch.cuda.synchronize()
+    torch.cuda.empty_cache()
+
+
 def mock_cells(batches, arms, metric="v1"):
     """Deterministic fabricated timings that satisfy the property shape — exercises
     the metric + report path only. NOT a performance claim (labeled in report).
@@ -426,13 +448,13 @@ def real_run(args):  # pragma: no cover - GPU host only
 
     for arm in arms:
         cfg = {} if arm == "unconstrained" else {"structured_outputs_config": {"backend": arm}}
+        llm = None
         try:
             llm = LLM(model=args.model, gpu_memory_utilization=args.gpu_mem,
                       max_model_len=args.max_model_len, enforce_eager=False, **cfg)
             for b in batches:
                 cells[(arm, b)] = _measure_cell(llm, arm, grammar, schema_items, b,
                                                 args.max_tokens, args.repeats)
-            del llm
         except Exception as e:  # noqa: BLE001
             # a comparison arm that cannot consume our .grid dialect grammar is
             # skipped, not fatal (xgrammar needs GBNF/Lark; the cross-engine
@@ -441,6 +463,11 @@ def real_run(args):  # pragma: no cover - GPU host only
             # grid-vs-unconstrained.
             print(f"[skip arm {arm}] {type(e).__name__}: {str(e)[:120]}", flush=True)
             continue
+        finally:
+            if llm is not None:
+                _shutdown_engine(llm)
+                del llm
+                _reclaim_cuda()
 
     if "grid" in arms:
         cold, warm = _ttft_specialize_ms(args.model)
@@ -590,7 +617,9 @@ def _adversarial_arm(args):  # pragma: no cover - GPU host
         walls, times = _step_loop_batch(llm, p, s, req_ids=ids)
         reductions.append(reduce_adversarial_v2(walls, times, fresh_id="fresh"))
     v2 = aggregate_adversarial_v2(reductions, base_v2["warm_tpot_mean_ms"])
+    _shutdown_engine(llm)
     del llm
+    _reclaim_cuda()
     return build_adversarial_result(v1, v2, args.adversarial_metric,
                                     args.step_budget_ms)
 
@@ -793,7 +822,9 @@ def _jump_probe(args):  # pragma: no cover - GPU host
                 "tokens": sum(len(v) for v in toks.values()),
                 "streams": {rid.split("-", 2)[-1]: v for rid, v in toks.items()},
             }
+        _shutdown_engine(llm)
         del llm
+        _reclaim_cuda()
     os.environ.pop("GRID_JUMP", None)
 
     ok = True
