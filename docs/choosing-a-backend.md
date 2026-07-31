@@ -245,8 +245,9 @@ box."
 
 **7. Your deployment redeploys.** With the artifact store enabled,
 previously-seen schemas reload instead of recompiling: warm-hit medians of
-~17–23 ms for schema families whose cold compiles are seconds
-([`bench/perfbench/BAKEOFF.md`](../bench/perfbench/BAKEOFF.md)). The store
+~24–37 ms for schema families whose cold compiles are 1.5–7.4 s, neutral on
+cheap schemas (H100 runner stamp, 2026-07-31,
+[`bench/perfbench/BAKEOFF.md`](../bench/perfbench/BAKEOFF.md)). The store
 never fakes a first compile — cold start on genuinely new schemas is
 unchanged.
 

@@ -713,3 +713,28 @@ per-position bitmask fill), not the scheduler shortcut. Jump-forward
 density evidence (8-13% forced tokens on BFCL-style splits,
 RESULTS-jf-density.md) keeps the item alive; nothing is advertised until a
 probe passes.
+
+## Postscript: S3 store — GPU-host cold/warm stamp (2026-07-31, H100 runner)
+
+store_coldwarm.py canonical groups (stratified_200 stride 4 + p3_family +
+ttfm_capped = 71 schemas x 3 scenarios, fresh process each, sequential),
+GRID 0.4.0, declared H100 runner:
+
+| group | n | C-p50 (cold) | A-p50 (cold+put) | B-p50 (warm hit) | B-p99 |
+|---|---:|---:|---:|---:|---:|
+| p3_family | 14 | 7,445 ms | 7,436 ms | **24.3 ms** | 1,405 ms |
+| ttfm_capped | 7 | 1,465 ms | 1,676 ms | **37.3 ms** | 247 ms |
+| stratified_200 | 50 | 11.8 ms | 23.7 ms | 13.2 ms | 306 ms |
+
+- Warm hits turn seconds-scale family compiles into tens of ms (306x on
+  p3_family medians); on cheap schemas the store is neutral (reload ~=
+  compile), i.e. it never fakes a first compile.
+- Put cost: ~0 on seconds-scale builds, +12 ms p50 on cheap schemas,
+  +211 ms p50 on ttfm_capped's large artifacts — consistent with the F2
+  attribution; still default-off, enable per deployment.
+- Declared errors identical across C/A/B (7/7/7): outcome determinism
+  holds through the store.
+- Footprint: per-schema p50 139 KiB (max 15.8 MiB); 71-schema deployment
+  dedupes to 65.6 MiB (1,616 unique entries).
+- Journal TBM (spider dialect): redeploy-warm build 8.4 ms, first-request
+  mask p50 31 us; redeploy-cold build 8.3 ms, first-request p50 76 us.
