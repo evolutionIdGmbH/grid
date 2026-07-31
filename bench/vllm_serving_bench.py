@@ -842,7 +842,7 @@ def _jump_probe(args):  # pragma: no cover - GPU host
             for key in sorted(off["streams"]):
                 a, c = off["streams"].get(key, []), on["streams"].get(key, [])
                 if a != c:
-                    i = next((k for k, (x, y) in enumerate(zip(a, c)) if x != y),
+                    i = next((k for k, (x, y) in enumerate(zip(a, c, strict=False)) if x != y),
                              min(len(a), len(c)))
                     print(f"    request {key}: first divergence at token {i} "
                           f"(off {a[i:i + 3]} vs on {c[i:i + 3]})")
