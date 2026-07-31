@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import multiprocessing
 import os
 import pathlib
 import statistics
@@ -279,26 +280,46 @@ def mock_adversarial(metric="v1", budget_ms=30.0):
     return build_adversarial_result(v1, v2, metric, budget_ms)
 
 
-def _shutdown_engine(llm) -> None:
-    """Stop the in-process engine core; vLLM >= 0.26 keeps it (and its GPU
-    reservation) alive across `del llm` when VLLM_ENABLE_V1_MULTIPROCESSING=0."""
+def _isolated_entry(q, worker_name, wargs):  # pragma: no cover - child process
     try:
-        llm.llm_engine.engine_core.shutdown()
-    except Exception:
-        pass
+        q.put((True, globals()[worker_name](*wargs)))
+    except Exception as e:  # noqa: BLE001
+        q.put((False, f"{type(e).__name__}: {str(e)[:400]}"))
 
 
-def _reclaim_cuda() -> None:
-    """Return freed allocator blocks to the driver so the next engine's
-    startup free-memory check sees them (sequential engines, one process).
-    Call after the last reference to the previous engine is dropped."""
-    import gc
+def _run_isolated(worker, *wargs):  # pragma: no cover - GPU host
+    """Run worker(*wargs) in a fresh spawn process; return its result.
 
-    import torch
-
-    gc.collect()
-    torch.cuda.synchronize()
-    torch.cuda.empty_cache()
+    One process per engine: in-process vLLM >= 0.26 never returns a dead
+    engine's GPU reservation to the driver (core shutdown + del + gc +
+    empty_cache all leave the pool allocated), so the next engine's startup
+    free-memory check refuses to boot. Process exit is the one reclaim that
+    always works. Workers are resolved by name after the spawn re-import and
+    must return picklable values."""
+    ctx = multiprocessing.get_context("spawn")
+    q = ctx.Queue()
+    proc = ctx.Process(target=_isolated_entry, args=(q, worker.__name__, wargs))
+    proc.start()
+    got = False
+    ok, payload = False, None
+    while True:
+        if not q.empty():           # drain before join: a payload larger than
+            ok, payload = q.get()   # the pipe buffer deadlocks a bare join
+            got = True
+            break
+        if not proc.is_alive():
+            break
+        proc.join(timeout=0.5)
+    if not got and not q.empty():
+        ok, payload = q.get()
+        got = True
+    proc.join()
+    if not got:
+        raise RuntimeError(f"{worker.__name__} died without a result "
+                           f"(exitcode {proc.exitcode})")
+    if not ok:
+        raise RuntimeError(f"{worker.__name__}: {payload}")
+    return payload
 
 
 def mock_cells(batches, arms, metric="v1"):
@@ -434,7 +455,7 @@ def _ttft_specialize_ms(model_name):  # pragma: no cover - GPU host
     return cold, warm
 
 
-def real_run(args):  # pragma: no cover - GPU host only
+def _arm_cells_worker(args, arm, batches):  # pragma: no cover - child process
     import vllm_grid_patch
     vllm_grid_patch.main()
 
@@ -442,19 +463,25 @@ def real_run(args):  # pragma: no cover - GPU host only
 
     grammar = GRAMMAR_SQL.read_text()
     schema_items = list(SCHEMAS.items())
+    cfg = {} if arm == "unconstrained" else {"structured_outputs_config": {"backend": arm}}
+    llm = LLM(model=args.model, gpu_memory_utilization=args.gpu_mem,
+              max_model_len=args.max_model_len, enforce_eager=False, **cfg)
+    return {(arm, b): _measure_cell(llm, arm, grammar, schema_items, b,
+                                    args.max_tokens, args.repeats)
+            for b in batches}
+
+
+def real_run(args):  # pragma: no cover - GPU host only
+    import vllm_grid_patch
+    vllm_grid_patch.main()
+
     arms = args.arms.split(",")
     batches = [int(b) for b in args.batches.split(",")]
     cells = {}
 
     for arm in arms:
-        cfg = {} if arm == "unconstrained" else {"structured_outputs_config": {"backend": arm}}
-        llm = None
         try:
-            llm = LLM(model=args.model, gpu_memory_utilization=args.gpu_mem,
-                      max_model_len=args.max_model_len, enforce_eager=False, **cfg)
-            for b in batches:
-                cells[(arm, b)] = _measure_cell(llm, arm, grammar, schema_items, b,
-                                                args.max_tokens, args.repeats)
+            cells.update(_run_isolated(_arm_cells_worker, args, arm, batches))
         except Exception as e:  # noqa: BLE001
             # a comparison arm that cannot consume our .grid dialect grammar is
             # skipped, not fatal (xgrammar needs GBNF/Lark; the cross-engine
@@ -463,11 +490,6 @@ def real_run(args):  # pragma: no cover - GPU host only
             # grid-vs-unconstrained.
             print(f"[skip arm {arm}] {type(e).__name__}: {str(e)[:120]}", flush=True)
             continue
-        finally:
-            if llm is not None:
-                _shutdown_engine(llm)
-                del llm
-                _reclaim_cuda()
 
     if "grid" in arms:
         cold, warm = _ttft_specialize_ms(args.model)
@@ -528,6 +550,10 @@ def _step_loop_batch(llm, prompts, sampling_params, req_ids=None):  # pragma: no
 
 
 def _adversarial_arm(args):  # pragma: no cover - GPU host
+    return _run_isolated(_adversarial_arm_worker, args)
+
+
+def _adversarial_arm_worker(args):  # pragma: no cover - child process
     """Cold-miss injected into batch-32: compare co-batched TPOT of an all-warm
     batch-32 (grid) against a batch-32 where one request carries a fresh,
     never-warmed schema (its mask must be built cold, mid-batch). The overlap
@@ -544,6 +570,9 @@ def _adversarial_arm(args):  # pragma: no cover - GPU host
     Acceptance (plan W9): with defer disabled and no adversary, v1 and v2
     agree within noise."""
     import time
+
+    import vllm_grid_patch
+    vllm_grid_patch.main()
 
     from vllm import LLM, SamplingParams
     from vllm.sampling_params import StructuredOutputsParams
@@ -617,9 +646,6 @@ def _adversarial_arm(args):  # pragma: no cover - GPU host
         walls, times = _step_loop_batch(llm, p, s, req_ids=ids)
         reductions.append(reduce_adversarial_v2(walls, times, fresh_id="fresh"))
     v2 = aggregate_adversarial_v2(reductions, base_v2["warm_tpot_mean_ms"])
-    _shutdown_engine(llm)
-    del llm
-    _reclaim_cuda()
     return build_adversarial_result(v1, v2, args.adversarial_metric,
                                     args.step_budget_ms)
 
@@ -764,6 +790,53 @@ def write_report(cells, adversarial, singleflight, checks, out_path, mock):
     return all_ok
 
 
+def _jump_leg_worker(args, leg, flag):  # pragma: no cover - child process
+    os.environ["GRID_JUMP"] = flag
+    import time
+
+    import vllm_grid_patch
+    vllm_grid_patch.main()
+
+    from vllm import LLM, SamplingParams
+    from vllm.sampling_params import StructuredOutputsParams
+
+    grammar = GRAMMAR_SQL.read_text()
+    batches = [int(b) for b in args.batches.split(",")]
+    schema_items = list(SCHEMAS.items())
+    results: dict[tuple[str, int], dict] = {}
+    llm = LLM(model=args.model, gpu_memory_utilization=args.gpu_mem,
+              max_model_len=args.max_model_len, enforce_eager=False,
+              structured_outputs_config={"backend": "grid"})
+    for b in batches:
+        prompts, sps, rids = [], [], []
+        for i in range(b):
+            name, schema = schema_items[i % len(schema_items)]
+            spec = json.dumps({"grammar": grammar, "schema": schema})
+            prompts.append(f"{PROMPT}{name} #{i}: ")
+            sps.append(SamplingParams(
+                temperature=0.0, max_tokens=args.max_tokens,
+                structured_outputs=StructuredOutputsParams(grammar=spec)))
+            rids.append(f"jp-{leg}-{b}-{i}")
+        eng = llm.llm_engine
+        for rid, prompt, sp in zip(rids, prompts, sps, strict=True):
+            eng.add_request(rid, prompt, sp)
+        toks: dict[str, list[int]] = {}
+        steps = 0
+        t0 = time.perf_counter()
+        while eng.has_unfinished_requests():
+            outs = eng.step()
+            steps += 1
+            for out in outs:
+                toks[out.request_id] = list(out.outputs[0].token_ids)
+        wall = time.perf_counter() - t0
+        results[(leg, b)] = {
+            "steps": steps, "wall_s": wall,
+            "tokens": sum(len(v) for v in toks.values()),
+            "streams": {rid.split("-", 2)[-1]: v for rid, v in toks.items()},
+        }
+    return results
+
+
 def _jump_probe(args):  # pragma: no cover - GPU host
     """S1 jump-forward bake: {GRID_JUMP off, on} x {batches} on the grid
     backend, greedy, heterogeneous schemas — the acceptance evidence for
@@ -777,55 +850,15 @@ def _jump_probe(args):  # pragma: no cover - GPU host
     divergence prints the first differing position per request for
     diagnosis (batching-numerics vs a real bug) and fails the probe.
 
-    GRID_JUMP is read at session construction in the ENGINE process: the
-    env is set before each LLM build (inherited by spawned engine procs).
-    Requires bench/vllm_grid_patch.py site 5 applied (real_run applies it).
+    Each leg runs in its own spawn process (_run_isolated): GRID_JUMP is
+    set in the child before the engine exists, and the leg's GPU
+    reservation dies with the child. Requires bench/vllm_grid_patch.py
+    site 5 (the leg worker applies it).
     """
-    import time
-
-    from vllm import LLM, SamplingParams
-    from vllm.sampling_params import StructuredOutputsParams
-
-    grammar = GRAMMAR_SQL.read_text()
     batches = [int(b) for b in args.batches.split(",")]
-    schema_items = list(SCHEMAS.items())
     results: dict[tuple[str, int], dict] = {}
     for leg, flag in (("off", "0"), ("on", "1")):
-        os.environ["GRID_JUMP"] = flag
-        llm = LLM(model=args.model, gpu_memory_utilization=args.gpu_mem,
-                  max_model_len=args.max_model_len, enforce_eager=False,
-                  structured_outputs_config={"backend": "grid"})
-        for b in batches:
-            prompts, sps, rids = [], [], []
-            for i in range(b):
-                name, schema = schema_items[i % len(schema_items)]
-                spec = json.dumps({"grammar": grammar, "schema": schema})
-                prompts.append(f"{PROMPT}{name} #{i}: ")
-                sps.append(SamplingParams(
-                    temperature=0.0, max_tokens=args.max_tokens,
-                    structured_outputs=StructuredOutputsParams(grammar=spec)))
-                rids.append(f"jp-{leg}-{b}-{i}")
-            eng = llm.llm_engine
-            for rid, prompt, sp in zip(rids, prompts, sps, strict=True):
-                eng.add_request(rid, prompt, sp)
-            toks: dict[str, list[int]] = {}
-            steps = 0
-            t0 = time.perf_counter()
-            while eng.has_unfinished_requests():
-                outs = eng.step()
-                steps += 1
-                for out in outs:
-                    toks[out.request_id] = list(out.outputs[0].token_ids)
-            wall = time.perf_counter() - t0
-            results[(leg, b)] = {
-                "steps": steps, "wall_s": wall,
-                "tokens": sum(len(v) for v in toks.values()),
-                "streams": {rid.split("-", 2)[-1]: v for rid, v in toks.items()},
-            }
-        _shutdown_engine(llm)
-        del llm
-        _reclaim_cuda()
-    os.environ.pop("GRID_JUMP", None)
+        results.update(_run_isolated(_jump_leg_worker, args, leg, flag))
 
     ok = True
     print("\nS1 jump-forward probe (greedy; steps saved is the lever's effect):")
