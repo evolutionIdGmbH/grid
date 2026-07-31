@@ -123,6 +123,33 @@ _SITE5_GUARD = (
 )
 
 
+
+
+# vLLM >= 0.26: the accept region moved into a reasoning-trim wrapper whose
+# failure branch terminates the request (FINISHED_ERROR + stopped). The
+# anchor below is that failure branch's tail; the guard inserts AFTER the
+# whole if-block (16-space indent) and fills spec_token_ids only when a
+# drafter left it empty - order-independent drafter-wins, since 0.26 assigns
+# proposals elsewhere.
+_SITE5_ANCHOR_V26 = (
+    "                    request.status = RequestStatus.FINISHED_ERROR\n"
+    "                    request.resumable = False\n"
+    "                    stopped = True\n"
+)
+
+_SITE5_GUARD_V26 = (
+    "\n"
+    "                # grid jump-forward (site 5, v26 shape): forced-run draft\n"
+    "                # tokens verified next step under per-position bitmasks;\n"
+    "                # parity-exact (singleton masks). Fill-only-if-empty keeps\n"
+    "                # any drafter proposal winning regardless of assignment\n"
+    "                # order in this vllm layout.\n"
+    "                if not stopped and not request.spec_token_ids:\n"
+    '                    _grid_jump = getattr(grammar, "jump_tokens", None)\n'
+    "                    if callable(_grid_jump):\n"
+    "                        request.spec_token_ids = _grid_jump()\n"
+)
+
 def patch_scheduler_jump(sched: pathlib.Path) -> bool:
     """Site 5, callable in isolation (tests dry-run it against a vendored
     region). Same discipline as site 4: idempotent by marker, SystemExit on
@@ -132,6 +159,10 @@ def patch_scheduler_jump(sched: pathlib.Path) -> bool:
     src = sched.read_text()
     if _SITE5_MARKER in src:
         return False
+    if src.count(_SITE5_ANCHOR) != 1 and src.count(_SITE5_ANCHOR_V26) == 1:
+        sched.write_text(src.replace(
+            _SITE5_ANCHOR_V26, _SITE5_ANCHOR_V26 + _SITE5_GUARD_V26, 1))
+        return True
     if src.count(_SITE5_ANCHOR) != 1:
         sys.exit(f"site-5 anchor not found in {sched}; vllm layout changed")
     sched.write_text(src.replace(_SITE5_ANCHOR, _SITE5_ANCHOR + _SITE5_GUARD, 1))
