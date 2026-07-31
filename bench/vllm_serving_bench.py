@@ -284,7 +284,9 @@ def _isolated_entry(q, worker_name, wargs):  # pragma: no cover - child process
     try:
         q.put((True, globals()[worker_name](*wargs)))
     except Exception as e:  # noqa: BLE001
-        q.put((False, f"{type(e).__name__}: {str(e)[:400]}"))
+        import traceback
+        q.put((False, f"{type(e).__name__}: {str(e)[:400]}\n"
+                      f"{traceback.format_exc()[-2000:]}"))
 
 
 def _run_isolated(worker, *wargs):  # pragma: no cover - GPU host
@@ -777,13 +779,23 @@ def write_report(cells, adversarial, singleflight, checks, out_path, mock):
               "unconstrained stays low, cold TTFT is a one-time specialize cost, warm "
               "TTFT is sub-millisecond-to-few-ms, and single-flight coalesces concurrent "
               "cold starts into one build."]
+    v2lim = adversarial.get("v2") if isinstance(adversarial, dict) else None
+    have_lim = (bool(v2lim)
+                and isinstance(v2lim.get("fresh_completion_ms"), float)
+                and v2lim["fresh_completion_ms"] == v2lim["fresh_completion_ms"])
+    win = (f"~{v2lim['tpot_degradation_pct']:.0f}% during its "
+           f"~{v2lim['fresh_completion_ms'] / 1000:.2f} s first-request "
+           "specialization window" if have_lim
+           else "during the first request's specialization window")
+    fresh_note = (f"{v2lim['fresh_ttft_ms']:.1f} ms TTFT, "
+                  f"{v2lim['fresh_tpot_ratio']:.2f}x warm effective TPOT" if have_lim
+                  else "warm-speed TTFT and effective TPOT")
     lines += ["", "Limitation (cold-schema co-batch cost): a fresh, never-before-seen "
-              "schema induces a transient co-batched slowdown (~34% during its ~0.66 s "
-              "first-request specialization window). This is host CPU/memory-bandwidth "
-              "contention between the cold grammar walk and the decode loop — it shrinks "
-              "as walk parallelism rises and is mitigated by scheduling niceness; the "
-              "fresh request itself runs at warm speed (0.7 ms TTFT, 1.00x warm effective "
-              "TPOT) and steady-state co-tenant requests are unaffected. Fully "
+              f"schema induces a transient co-batched slowdown ({win}). This is host "
+              "CPU/memory-bandwidth contention between the cold grammar walk and the "
+              "decode loop — it shrinks as walk parallelism rises and is mitigated by "
+              "scheduling niceness; the fresh request itself completes at "
+              f"{fresh_note}, and steady-state co-tenant requests are unaffected. Fully "
               "eliminating it is a compute-isolation trade-off, noted as future work."]
     lines += ["", "Harness: `bench/vllm_serving_bench.py` (+ `bench/vllm_grid_patch.py`).", ""]
     pathlib.Path(out_path).write_text("\n".join(lines))
@@ -829,10 +841,17 @@ def _jump_leg_worker(args, leg, flag):  # pragma: no cover - child process
             for out in outs:
                 toks[out.request_id] = list(out.outputs[0].token_ids)
         wall = time.perf_counter() - t0
+        # vLLM >= 0.26 may hand back suffixed request ids; recover our rid by
+        # prefix so the off/on legs key their streams identically
+        def _orig(returned_id, _rids=tuple(rids)):
+            for r in _rids:
+                if returned_id == r or returned_id.startswith(r + "-"):
+                    return r
+            return returned_id
         results[(leg, b)] = {
             "steps": steps, "wall_s": wall,
             "tokens": sum(len(v) for v in toks.values()),
-            "streams": {rid.split("-", 2)[-1]: v for rid, v in toks.items()},
+            "streams": {_orig(rid).split("-", 2)[-1]: v for rid, v in toks.items()},
         }
     return results
 
