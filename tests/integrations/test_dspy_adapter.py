@@ -4,8 +4,10 @@ The compile core runs dependency-free; adapter-shape tests skip unless dspy
 is installed (it is an integration dependency, never grid's).
 """
 
-import pydantic
 import pytest
+
+pydantic = pytest.importorskip("pydantic")  # integrations extra: absent -> the
+# whole module skips (every test here builds on model-derived schemas)
 
 from grid.integrations.dspy_adapter import (
     SignatureNotEnforceable,

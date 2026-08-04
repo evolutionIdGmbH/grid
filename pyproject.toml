@@ -35,6 +35,7 @@ dev = [
     "hypothesis",
     "lark",          # grammar authoring/validation and test oracles ONLY (DESIGN.md §12)
     "ruff",
+    "pydantic",      # integrations tests: model-derived schemas (dspy stays optional)
 ]
 transformers = ["transformers"]
 kernel = ["grid_core>=0.2"]  # Rust kernels (v8): 5-platform abi3 wheels on PyPI
