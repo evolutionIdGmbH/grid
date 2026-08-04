@@ -9,7 +9,7 @@ import pytest
 pydantic = pytest.importorskip("pydantic")  # integrations extra: absent -> the
 # whole module skips (every test here builds on model-derived schemas)
 
-from grid.integrations.dspy_adapter import (
+from grid.integrations.dspy_adapter import (  # noqa: E402 (after skip guard)
     SignatureNotEnforceable,
     compile_schema_for_model,
 )
