@@ -160,6 +160,9 @@ class SchemaCompiler:
         self.rx_terms: dict[str, str] = {}      # constrained regex -> terminal
         self.needs: set[str] = set()            # STRING | NUMBER | INT | generic
         self.ignored: set[str] = set()          # recorded unenforced constraints
+        self.ignored_at: set[tuple[str, str]] = set()  # (instance path, name) twins
+        self._path: list[str] = []              # instance-path segments (see
+                                                # compile_schema_with_paths)
         self.degraded: set[str] = set()         # terminals demoted to STRING
         self.degraded_keep: set[str] = set()    # demoted, kept as clones
         self.routing_terms: set[str] = set()    # key-position terminals: NEVER
@@ -172,9 +175,13 @@ class SchemaCompiler:
     # ------------------------------------------------------------- budget
 
     def _record(self, feat: str) -> None:
+        path = "$" + "".join(self._path)
         if self.strict:
-            raise Unsupported(f"strict: {feat}")
+            e = Unsupported(f"strict: {feat}")
+            e.path = path   # location surface for adapters; message stays stable
+            raise e
         self.ignored.add(feat)
+        self.ignored_at.add((path, feat))
 
     def _check_terms(self) -> None:
         if len(self.key_terms) + len(self.lit_terms) + len(self.rx_terms) \
@@ -238,7 +245,16 @@ class SchemaCompiler:
 
     # ------------------------------------------------------- schema -> rules
 
-    def rule_for(self, schema: Any) -> str:
+    def rule_for(self, schema: Any, seg: str | None = None) -> str:
+        if seg is None:
+            return self._rule_for(schema)
+        self._path.append(seg)
+        try:
+            return self._rule_for(schema)
+        finally:
+            self._path.pop()
+
+    def _rule_for(self, schema: Any) -> str:
         if schema is True or schema == {}:
             return self.generic_value()
         if schema is False or schema == FALSE_SCHEMA:
@@ -591,7 +607,8 @@ class SchemaCompiler:
         if prefix is not None:
             return self._tuple_array(prefix, tail_schema, min_i, max_i)
 
-        item_rule = self.rule_for(items if items is not None else True)
+        item_rule = self.rule_for(items if items is not None else True,
+                                  seg="[*]")
         if min_i == 0 and max_i is None:
             elems = self._rule("el")
             self.rules[elems] = [item_rule, f'{elems} "," {item_rule}']
@@ -614,9 +631,10 @@ class SchemaCompiler:
         if n > MAX_ITEMS_UNROLL or min_i > MAX_ITEMS_UNROLL or \
                 (max_i is not None and max_i > MAX_ITEMS_UNROLL):
             raise Unsupported("tuple beyond unroll cap")
-        prefix_rules = [self.rule_for(s) for s in prefix]
+        prefix_rules = [self.rule_for(s, seg="[*]") for s in prefix]
         tail_allowed = tail_schema is not False and tail_schema != FALSE_SCHEMA
-        tail_rule = self.rule_for(tail_schema) if tail_allowed else None
+        tail_rule = (self.rule_for(tail_schema, seg="[*]")
+                     if tail_allowed else None)
         if max_i is not None and min_i > max_i:
             return [self.rule_for(dict(FALSE_SCHEMA))]
 
@@ -1069,7 +1087,7 @@ class SchemaCompiler:
 
         units: list[tuple[str, int]] = []       # (pair grammar, state bit)
         for k, v in props.items():
-            pair_src = f'{self._key_term(k)} ":" {self.rule_for(v)}'
+            pair_src = f'{self._key_term(k)} ":" {self.rule_for(v, seg=_path_seg(k))}'
             units.append((pair_src, bit.get(k, 0)))
         for g in generic_pairs:
             units.append((g, 0))
@@ -1108,7 +1126,7 @@ class SchemaCompiler:
         declared properties in schema order with optional skips, generic
         pairs interleavable. Order violations reject visibly."""
         items = [
-            (self._key_term(k), self.rule_for(v), k in required)
+            (self._key_term(k), self.rule_for(v, seg=_path_seg(k)), k in required)
             for k, v in props.items()
         ]
         n = len(items)
@@ -1457,6 +1475,34 @@ def compile_schema(schema: Any, strict: bool = False,
     return render_text(parts), ignored
 
 
+def _path_seg(key: str) -> str:
+    """Instance-path segment for a property key: .name for identifier-shaped
+    keys, ['exact key'] otherwise."""
+    return f".{key}" if key.isidentifier() else f"[{key!r}]"
+
+
+def compile_schema_with_paths(schema: Any, strict: bool = False,
+                              *, hashcons: frozenset[str] | None = None,
+                              unify_string_values: bool = False
+                              ) -> tuple[str, set[str], dict[str, set[str]]]:
+    """-> (.grid source, recorded set, {instance path: recorded names}).
+
+    The path-qualified twin of compile_schema: the recorded set is
+    byte-identical to compile_schema's; the third element locates each
+    record, e.g. {"$.tags": {"uniqueItems"}}. Paths are instance-shaped
+    over the NORMALIZED schema ($ref inlined, allOf merged), which is the
+    location downstream validation checks. Two documented approximations:
+    hash-consed shared subschemas record at their first-seen path, and
+    patternProperties/additionalProperties value schemas inherit their
+    object's path. In strict mode the raised Unsupported carries the
+    offending path as e.path (message unchanged)."""
+    parts, c = _compile_to_parts(schema, strict, hashcons, unify_string_values)
+    by_path: dict[str, set[str]] = {}
+    for path, feat in sorted(c.ignored_at):
+        by_path.setdefault(path, set()).add(feat)
+    return render_text(parts), set(c.ignored), by_path
+
+
 def compile_schema_parts(schema: Any, strict: bool = False,
                          *, hashcons: frozenset[str] | None = None,
                          unify_string_values: bool = False
@@ -1466,6 +1512,16 @@ def compile_schema_parts(schema: Any, strict: bool = False,
     outcomes — compile_schema IS render_text over this). Feed the manifest
     to DialectGrammar.from_parts (direct emission) or render_text (the
     debug/audit text path)."""
+    parts, c = _compile_to_parts(schema, strict, hashcons,
+                                 unify_string_values)
+    return parts, c.ignored
+
+
+def _compile_to_parts(schema: Any, strict: bool = False,
+                      hashcons: frozenset[str] | None = None,
+                      unify_string_values: bool = False):
+    """Shared worker: -> (GrammarParts, the SchemaCompiler) so callers can
+    read located records (ignored_at) as well as the legacy set."""
     if hashcons is None:
         hashcons = _hashcons_components()
     shared: dict[int, Any] | None = {} if "norm" in hashcons else None
@@ -1489,4 +1545,4 @@ def compile_schema_parts(schema: Any, strict: bool = False,
                 root[dk] = schema[dk]
     c = SchemaCompiler(root, strict=strict, hashcons=hashcons,
                        shared_nodes=shared)
-    return c.compile_parts(), c.ignored
+    return c.compile_parts(), c

@@ -11,9 +11,10 @@ Unsupported instead — the llguidance-style declared-non-support convention).
 """
 
 from grid import perf_flags
-from grid.jsonschema.compiler import Unsupported, compile_schema
+from grid.jsonschema.compiler import Unsupported, compile_schema, compile_schema_with_paths
 
-__all__ = ["compile_json_schema", "compile_json_schema_grammar", "Unsupported"]
+__all__ = ["compile_json_schema", "compile_json_schema_grammar",
+           "compile_schema_with_paths", "Unsupported"]
 
 
 def _store_key(schema, strict: bool) -> str | None:

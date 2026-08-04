@@ -37,13 +37,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from grid.jsonschema import Unsupported, compile_json_schema
+from grid.jsonschema import Unsupported, compile_schema_with_paths
 
 __all__ = [
     "GridJSONAdapter",
     "SignatureNotEnforceable",
     "assert_enforceable",
     "compile_schema_for_model",
+    "compile_schema_paths_for_model",
 ]
 
 
@@ -57,17 +58,32 @@ def compile_schema_for_model(model_or_schema: Any, *, strict: bool = False):
 
     ``recorded`` names every constraint present but not mask-enforced -
     the set downstream validation should be scoped to. ``strict=True``
-    re-raises GRID's Unsupported as :class:`SignatureNotEnforceable`.
+    re-raises GRID's Unsupported as :class:`SignatureNotEnforceable`,
+    with the offending instance path when the compiler located one
+    ("strict: uniqueItems at $.tags").
     """
+    src, recorded, _paths = compile_schema_paths_for_model(
+        model_or_schema, strict=strict)
+    return src, recorded
+
+
+def compile_schema_paths_for_model(model_or_schema: Any, *,
+                                   strict: bool = False):
+    """(grid_source, recorded, {instance path: names}) — the path-qualified
+    twin of :func:`compile_schema_for_model`. Paths are instance-shaped
+    ("$.tags"), i.e. where in the OUTPUT downstream validation should look;
+    hash-consed shared subschemas report their first-seen path."""
     schema = (
         model_or_schema.model_json_schema()
         if hasattr(model_or_schema, "model_json_schema")
         else model_or_schema
     )
     try:
-        return compile_json_schema(schema, strict=strict)
+        return compile_schema_with_paths(schema, strict=strict)
     except Unsupported as e:
-        raise SignatureNotEnforceable(str(e)) from e
+        path = getattr(e, "path", None)
+        msg = f"{e} at {path}" if path else str(e)
+        raise SignatureNotEnforceable(msg) from e
 
 
 try:  # dspy is an integration dependency, never grid's
@@ -103,19 +119,29 @@ if _HAVE_DSPY:
         # -- grid surface ------------------------------------------------
         def compile_signature(self, signature) -> tuple[str, set[str]]:
             """Compile (and cache) the signature's response schema."""
+            src, recorded, _paths = self._compile_full(signature)
+            return src, recorded
+
+        def _compile_full(self, signature):
             got = self._compiled.get(signature)
             if got is None:
                 model = _get_structured_outputs_response_format(
                     signature, self.use_native_function_calling
                 )
-                got = compile_schema_for_model(model, strict=self.strict)
+                got = compile_schema_paths_for_model(model, strict=self.strict)
                 self._compiled[signature] = got
             return got
 
         def recorded_for(self, signature) -> set[str]:
             """Constraint names GRID accepted but does not mask-enforce for
             this signature - scope any extra validation to exactly these."""
-            return set(self.compile_signature(signature)[1])
+            return set(self._compile_full(signature)[1])
+
+        def recorded_paths_for(self, signature) -> dict[str, set[str]]:
+            """Path-qualified residue: {"$.tags": {"uniqueItems"}} - which
+            output field each unenforced constraint lives on, so validators
+            can be generated per field rather than hunted by hand."""
+            return {k: set(v) for k, v in self._compile_full(signature)[2].items()}
 
         # -- dspy hook ---------------------------------------------------
         def __call__(self, lm, lm_kwargs, signature, demos, inputs):

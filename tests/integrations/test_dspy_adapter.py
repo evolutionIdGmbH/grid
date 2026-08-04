@@ -111,3 +111,57 @@ def test_server_mode_injects_grammar(monkeypatch):
     ad(None, {}, Extract, [], {"text": "x"})
     assert "guided_grammar" in seen.get("extra_body", {})
     assert seen["extra_body"]["guided_decoding_backend"] == "grid"
+
+
+# ------------------------------------------------------- path-qualified residue
+
+
+def test_paths_for_plain_model():
+    from grid.integrations.dspy_adapter import compile_schema_paths_for_model
+
+    src, recorded, paths = compile_schema_paths_for_model(Constrained)
+    assert "%start" in src
+    assert any("multipleOf" in r for r in recorded)
+    assert paths == {"$.score": {"multipleOf"}}
+
+
+def test_adapter_recorded_paths_and_strict_path_message():
+    dspy = pytest.importorskip("dspy")
+    from grid.integrations.dspy_adapter import (
+        GridJSONAdapter,
+        SignatureNotEnforceable,
+    )
+
+    class Tagged(dspy.Signature):
+        text: str = dspy.InputField()
+        tags: set[str] = dspy.OutputField()  # -> uniqueItems at $.tags
+
+    ad = GridJSONAdapter()
+    assert ad.recorded_paths_for(Tagged) == {"$.tags": {"uniqueItems"}}
+    with pytest.raises(SignatureNotEnforceable, match=r"\$\.tags"):
+        GridJSONAdapter(strict=True).compile_signature(Tagged)
+
+
+def test_dspy_check_cli(tmp_path, capsys):
+    pytest.importorskip("dspy")
+    from grid.integrations import dspy_check
+
+    mod = tmp_path / "sigs_under_test.py"
+    mod.write_text(
+        "import dspy\n\n"
+        "class Clean(dspy.Signature):\n"
+        "    text: str = dspy.InputField()\n"
+        "    verdict: str = dspy.OutputField()\n\n"
+        "class Residual(dspy.Signature):\n"
+        "    text: str = dspy.InputField()\n"
+        "    tags: set[str] = dspy.OutputField()\n"
+    )
+    rc = dspy_check.main([str(mod)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "ENFORCEABLE" in out and "Clean" in out
+    assert "RECORDED" in out and "$.tags: uniqueItems" in out
+
+    rc_strict = dspy_check.main([str(mod), "--strict"])
+    capsys.readouterr()
+    assert rc_strict == 1
