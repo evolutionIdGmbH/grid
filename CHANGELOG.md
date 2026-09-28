@@ -4,6 +4,28 @@ Versions in the 0.2.x line are **correctness-only** (the coverage epoch,
 DESIGN-JSON-COVERAGE.md): error metrics are the headline; timings are
 recorded, not optimized (kernel frozen at v7). Speed work is the 0.3.x epoch.
 
+## 0.4.1 - 2026-09-28
+
+Packaging release: ships the DSPy integration merged after 0.4.0. No engine
+or kernel changes (`grid_core` stays 0.2.0 / kernel v8). The `v0.4.1` tag
+first cut on 2026-09-05 still carried the 0.4.0 version string, so nothing
+reached PyPI; this is the release that tag was meant to be.
+
+- DSPy adapter (`grid/integrations/dspy_adapter.py`): `GridJSONAdapter`, a
+  drop-in `dspy.adapters.JSONAdapter` subclass that compiles a Signature's
+  output schema through GRID. `strict=True` raises `SignatureNotEnforceable`
+  at build time instead of under-enforcing silently; `mode="server"` attaches
+  the compiled grammar via `extra_body` for GRID-enabled serving.
+- Path-qualified residue: `recorded_paths_for()` names which constraint on
+  which output path is accepted but not mask-enforced
+  (`{"$.tags": {"uniqueItems"}}`); `recorded_for()` is unchanged.
+- `dspy_check` CLI (`python -m grid.integrations.dspy_check`): reports every
+  `dspy.Signature` in a file or module as enforceable / recorded /
+  declared-unsupported; `--strict` exits 1 on anything short of enforceable,
+  for use as a CI gate.
+- Release workflow now fails when the pushed tag does not match the
+  `pyproject.toml` version.
+
 ## 0.4.0 - 2026-07-30
 
 0.3.x flag disposition (E3): the epoch's measured winners become the
