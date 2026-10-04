@@ -1,6 +1,16 @@
 # Spider dev — execution accuracy (EX), GRID-constrained vs unconstrained
 
-Measured 2026-07-31 at GRID 0.4.0 (grid_core 0.2.0, kernel v8), shipped defaults, plain constrained decoding — no repair loop (the repair-loop record is [RESULTS-spider-repair.md](RESULTS-spider-repair.md), version-pinned).
+> **Correction (2026-10-04).** This record was first labelled "plain constrained
+> decoding — no repair loop". That was wrong: `bench/spider_ex.py`'s `grid` arm has
+> run one SemanticChecker-guided constrained retry since v0.0.7, so the `grid` row
+> below is **mask + one repair round**. It matches the repair arm, not the mask-only
+> arm. The arms are separated, with paired 95% intervals, in
+> [RESULTS-spider-review-v0.4.1.md](RESULTS-spider-review-v0.4.1.md): on the same
+> 1,034 questions at 7B, mask only 91.1% / 53.5% (+0.8 EX, not significant), mask +
+> repair 94.7% / 55.2% (+2.5), and the same retry on unconstrained output 95.5% /
+> 54.4% (+1.7).
+
+Measured 2026-07-31 at GRID 0.4.0 (grid_core 0.2.0, kernel v8), shipped defaults, constrained decoding with one checker-guided retry (see the correction above).
 
 Model: `Qwen/Qwen2.5-7B-Instruct` (cpu, greedy) | sample: 1034 dev questions (seed 0) | max_tokens 128 | grammar: `grammars/sql_spider.grid` (100% dev-gold coverage) + per-database L3 lexicons | host: Lambda 1xH100 SXM 80GB HBM3, Ubuntu 24.04 (declared runner)
 
@@ -13,11 +23,9 @@ EX = predicted and gold result sets match on the Spider SQLite database (order-s
 
 Reading it:
 
-- **Constraining improves the end task.** +2.5 EX points over the same model
-  unconstrained, greedy, same prompts — with no repair loop. Masking never
-  removes a correct continuation (the gold parse is always in-grammar); what
-  it removes is the model's ability to spend probability mass on SQL that
-  cannot execute.
+- **Mask + one repair round: +2.5 EX** over the same model unconstrained,
+  greedy, same prompts. At 7B most of that comes from the retry, not the mask
+  (see the correction above and RESULTS-spider-review-v0.4.1.md).
 - **Both arms generated on CPU** (declared above). EX and syntax-valid are
   device-fair within this run — same device, same greedy decode, per-arm
   identical inputs — but the tok/query and gen tok/s columns are NOT

@@ -459,6 +459,13 @@ every one of these before any debugging session:
   failures are unrepairable prose. Constraint quality determines feedback
   quality: the checker can only name violations because the mask already
   guaranteed everything else.
+- **Correction (Oct 2026, v0.4.1 ablation, n=1,034, paired CIs):** the
+  symmetry above does not survive the missing controls. At 7B a retry that only
+  says "invalid" converts as well as the checker's message (difference +0.3 EX,
+  p=0.55), and the same retry on unconstrained output gains +1.7 EX; mask +
+  retry vs unconstrained + retry is not significant (+0.8). The checker's value
+  is deciding *when* to retry, not what it says. The 0.5B half holds (mask
+  +13.7 EX, retry +0.3). Record: bench/RESULTS-spider-review-v0.4.1.md.
 - **Next:** a second retry round shows diminishing returns by construction
   (best-by-checker keeps round 1 unless improved) - measure before adding;
   fold `grid-repair` into the standard cross-engine comparison arm set.

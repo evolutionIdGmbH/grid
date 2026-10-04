@@ -150,11 +150,16 @@ on the declared runner ([`bench/RESULTS-serving-v0.4.0.md`](bench/RESULTS-servin
   (single-flight: 1 build / 8 waiters). Known limitation, declared in the
   record: a never-seen schema costs its batch ~24% TPOT during its 0.75 s
   specialization window.
-- **Constraining improves the end task.** Spider dev, all 1,034 questions,
-  greedy, no repair loop: **55.2% execution accuracy constrained vs 52.7%
-  unconstrained** ([`bench/RESULTS-spider-v0.4.0.md`](bench/RESULTS-spider-v0.4.0.md)).
-  Masking never removes a correct continuation; it removes SQL that cannot
-  execute.
+- **Small models: the mask is the accuracy win.** Spider dev, all 1,034
+  questions, greedy: Qwen2.5-0.5B goes from **16.7% to 30.5% execution
+  accuracy** with the mask alone (+13.7, 95% CI 10.7–16.6; +11.6 on the held-out
+  test split). **Capable models: the mask is the policy win, not an accuracy
+  win.** At 7B the mask alone is within noise (+0.8); the 55.2% vs 52.7% gain
+  comes from one checker-triggered retry, which helps unconstrained output
+  nearly as much. What the 7B model gets from GRID: with one table forbidden per
+  database, a prompt rule leaks it in **86%** of the answers that need it, hiding
+  it from the prompt in **22%**, and GRID in **0 of 2,068**
+  ([`bench/RESULTS-spider-review-v0.4.1.md`](bench/RESULTS-spider-review-v0.4.1.md)).
 
 ## What GRID has that the others are not designed for
 
