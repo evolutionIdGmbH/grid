@@ -262,21 +262,28 @@ def main() -> None:
         replays.append((f"walk:{i} (len {len(seq)})", seq))
 
     results: dict[str, dict] = {}
+    per_replay: dict[str, list[tuple[list[float], bool]]] = {}  # engine -> [(step lats, accepted)]
     for eng in engines:
         lat: list[float] = []
         pos_lat: list[tuple[int, float]] = []
         rejected = 0
         steps = 0
+        per_replay[eng.name] = []
         for _name, seq in replays:
             eng.reset()
+            rl: list[float] = []
+            accepted = True
             for pos, tok in enumerate(seq):
                 dt, ok = eng.step(tok)
                 lat.append(dt)
+                rl.append(dt)
                 pos_lat.append((pos, dt))
                 steps += 1
                 if not ok:
                     rejected += 1
+                    accepted = False
                     break
+            per_replay[eng.name].append((rl, accepted))
         # position slope (flat per-token cost): OLS over (position, latency)
         import numpy as np
 
@@ -296,6 +303,8 @@ def main() -> None:
             results[eng.name].update({
                 "hit_p50_us": pct(eng.hit_lat, 0.5) * 1e6,
                 "miss_p50_us": pct(eng.miss_lat, 0.5) * 1e6,
+                "miss_p90_us": pct(eng.miss_lat, 0.9) * 1e6,
+                "miss_p99_us": pct(eng.miss_lat, 0.99) * 1e6,
                 "hit_rate": len(eng.hit_lat) / max(1, len(eng.hit_lat) + len(eng.miss_lat)),
             })
         r = results[eng.name]
@@ -305,6 +314,25 @@ def main() -> None:
         if "hit_rate" in r:
             print(f"  cache: hit p50 {r['hit_p50_us']:.1f} us | miss p50 {r['miss_p50_us']/1e3:.1f} ms | "
                   f"hit rate {r['hit_rate']:.0%}")
+
+    # common-acceptance subset: replays EVERY engine accepted in full, so each
+    # engine's percentiles are taken over identical steps (no language-parity
+    # corners, no early-terminated replays)
+    common = [i for i in range(len(replays))
+              if all(per_replay[e.name][i][1] for e in engines)]
+    for eng in engines:
+        cl = [d for i in common for d in per_replay[eng.name][i][0]]
+        results[eng.name].update({
+            "common_replays": len(common), "common_steps": len(cl),
+            "common_p50_us": pct(cl, 0.50) * 1e6, "common_p90_us": pct(cl, 0.90) * 1e6,
+            "common_p99_us": pct(cl, 0.99) * 1e6,
+        })
+    print(f"\ncommon-acceptance subset: {len(common)}/{len(replays)} replays; excluded: "
+          f"{[replays[i][0] for i in range(len(replays)) if i not in common]}")
+    for eng in engines:
+        r = results[eng.name]
+        print(f"  {eng.name}: p50 {r['common_p50_us']:.1f} us | p90 {r['common_p90_us']:.1f} us | "
+              f"p99 {r['common_p99_us']:.1f} us ({r['common_steps']} steps)")
 
     # flat-per-token-cost measurement: warm-cache replay of the longest walk
     # (GRID) — per-token cost must be independent of position n
@@ -372,8 +400,25 @@ def write_report(path: str, tokenizer: str, replays, results: dict) -> None:
             lines += [
                 "",
                 f"GRID cache split: hit p50 {r['hit_p50_us']:.1f} us | miss p50 "
-                f"{r['miss_p50_us']/1e3:.1f} ms | hit rate {r['hit_rate']:.0%}",
+                f"{r['miss_p50_us']/1e3:.1f} ms, p90 {r['miss_p90_us']/1e3:.1f} ms, p99 "
+                f"{r['miss_p99_us']/1e3:.1f} ms (the cold-walk distribution a one-shot "
+                f"workload sees) | hit rate {r['hit_rate']:.0%}",
             ]
+    first = next((r for n, r in results.items() if not n.startswith("_")), None)
+    if first and "common_replays" in first:
+        lines += [
+            "",
+            f"Common-acceptance subset ({first['common_replays']}/{len(replays)} replays that every "
+            "engine accepts in full; percentiles over identical steps):",
+            "",
+            "| engine | steps | p50 | p90 | p99 |",
+            "|---|---|---|---|---|",
+        ]
+        for name, r in results.items():
+            if name.startswith("_"):
+                continue
+            lines.append(f"| {name} | {r['common_steps']} | {r['common_p50_us']:.1f} us | "
+                         f"{r['common_p90_us']:.1f} us | {r['common_p99_us']:.1f} us |")
     warm = results.get("_grid_warm_R")
     if warm:
         lines += [
