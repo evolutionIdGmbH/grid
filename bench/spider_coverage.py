@@ -108,6 +108,9 @@ def parse_ok(tables, dfa, priority, data: bytes, lexicons=None) -> tuple[bool, s
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--spider", required=True, help="spider_data dir (dev.json, tables.json)")
+    ap.add_argument("--split", default="dev",
+                    help="gold file stem: dev | train_spider | train_others | test "
+                         "(held-out splits: the grammar was built against dev only)")
     args = ap.parse_args()
 
     grammar = spec.load(GRAMMAR)
@@ -120,8 +123,9 @@ def main() -> None:
     }
     print(f"grammar OK: {tables.n_terminals} terminals, {len(tables.action)} states")
 
-    dev = json.load(open(f"{args.spider}/dev.json"))
-    lex = db_lexicons(json.load(open(f"{args.spider}/tables.json")), tables)
+    dev = json.load(open(f"{args.spider}/{args.split}.json"))
+    tables_file = "test_tables.json" if args.split == "test" else "tables.json"
+    lex = db_lexicons(json.load(open(f"{args.spider}/{tables_file}")), tables)
     fails = Counter()
     examples: dict[str, str] = {}
     skipped = ok = 0
@@ -137,7 +141,8 @@ def main() -> None:
             fails[why.split("@")[0]] += 1
             examples.setdefault(why, norm[:110])
     total = len(dev) - skipped
-    print(f"coverage: {ok}/{total} = {ok / total:.1%}  (skipped {skipped} un-normalizable)")
+    print(f"coverage [{args.split}]: {ok}/{total} = {ok / total:.1%}  "
+          f"(skipped {skipped} un-normalizable)")
     if fails:
         print("fail buckets:", dict(fails.most_common()))
         for k, q in list(examples.items())[:10]:
