@@ -70,3 +70,27 @@ jobs:
         run: >
           GRID_PERF_COUNTING=1
           pytest tests/ -q
+
+  package:
+    # The test job runs from the source tree (editable install), where every
+    # data file exists. This job installs the BUILT wheel and sdist into fresh
+    # virtualenvs and runs from outside the repo, the way PyPI users do.
+    # 0.2.5-0.4.1 shipped without grid/_statecharts/*.yaml and only this kind
+    # of check would have caught it.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build wheel and sdist
+        run: pipx run build
+      - name: Smoke-test the installed wheel and sdist
+        run: |
+          for artifact in dist/*.whl dist/*.tar.gz; do
+            venv="/tmp/venv-$(basename "$artifact")"
+            python -m venv "$venv"
+            "$venv/bin/pip" install --quiet torch --index-url https://download.pytorch.org/whl/cpu
+            "$venv/bin/pip" install --quiet "$artifact"
+            (cd /tmp && "$venv/bin/python" "$GITHUB_WORKSPACE/tests/packaging/smoke_installed.py")
+          done
