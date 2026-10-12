@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "grid-guardrail"
-version = "0.4.1"
+version = "0.4.2"
 description = "GRID - Grammar-Railed Decoding: grammar-constrained LLM decoding with RBAC grammars and an audit trail"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }
@@ -42,6 +42,13 @@ kernel = ["grid_core>=0.2"]  # Rust kernels (v8): 5-platform abi3 wheels on PyPI
 
 [tool.setuptools.packages.find]
 include = ["grid", "grid.*"]
+
+# Non-Python files the package reads at runtime. Without this entry setuptools
+# leaves them out of the wheel and the sdist (0.2.5-0.4.1 shipped without the
+# statecharts, so every CFG grammar load failed from PyPI).
+[tool.setuptools.package-data]
+"grid._statecharts" = ["*.yaml"]
+"grid.jsonschema" = ["SUPPORT.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

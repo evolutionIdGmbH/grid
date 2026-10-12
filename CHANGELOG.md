@@ -4,6 +4,23 @@ Versions in the 0.2.x line are **correctness-only** (the coverage epoch,
 DESIGN-JSON-COVERAGE.md): error metrics are the headline; timings are
 recorded, not optimized (kernel frozen at v7). Speed work is the 0.3.x epoch.
 
+## 0.4.2 - unreleased
+
+Packaging fix. No engine or kernel changes (`grid_core` stays 0.2.0 / kernel v8);
+generation output and audit chains are bit-identical to 0.4.1 run from source.
+
+- Every release on PyPI so far (0.2.5 through 0.4.1, wheel and sdist) shipped
+  without `grid/_statecharts/*.yaml` and `grid/jsonschema/SUPPORT.md`, because
+  `pyproject.toml` had no `package-data` entry. Loading any CFG grammar
+  (`generate.cfg`, `generate.sql`, `grammar.spec.load`, role projections) raised
+  `FileNotFoundError` from an installed package; only the JSON Schema path
+  worked. A non-editable install from a git checkout had the same defect. The
+  files are now declared as package data.
+- CI and the release workflow now build the wheel and sdist, install each into a
+  fresh virtualenv, and run `tests/packaging/smoke_installed.py` from outside the
+  repo, so a package with missing data files cannot be published again.
+- `grid.__version__` now reports the installed version.
+
 ## 0.4.1 - 2026-09-28
 
 Packaging release: ships the DSPy integration merged after 0.4.0. No engine

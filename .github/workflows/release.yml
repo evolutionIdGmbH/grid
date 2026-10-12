@@ -48,6 +48,15 @@ jobs:
             exit 1
           fi
       - run: pipx run build
+      - name: Smoke-test the installed wheel and sdist (blocks publishing a package with missing data files)
+        run: |
+          for artifact in dist/*.whl dist/*.tar.gz; do
+            venv="/tmp/venv-$(basename "$artifact")"
+            python -m venv "$venv"
+            "$venv/bin/pip" install --quiet torch --index-url https://download.pytorch.org/whl/cpu
+            "$venv/bin/pip" install --quiet "$artifact"
+            (cd /tmp && "$venv/bin/python" "$GITHUB_WORKSPACE/tests/packaging/smoke_installed.py")
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: python-package
